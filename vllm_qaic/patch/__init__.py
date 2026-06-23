@@ -3,6 +3,13 @@
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 # ------------------------------------------------------------------
 
+# -------------------------------------------------------------------
+# This module manage the patch for vllm. Once a new patch is added in
+# vllm-qaic, please add the patch description into this file
+# -------------------------------------------------------------------
+
+# What's Patched and how it works:
+# --------------------------------
 # ** 1. File: patch_config.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. vllm.config.cache.CacheConfig
@@ -45,9 +52,31 @@
 #    How:
 #       Replace RejectionSampler.forward with a QAIC-optimized version.
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#
+# ** 5. File: patch_graph_pickler.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. torch.fx._graph_pickler.Options
+#   2. torch.fx._graph_pickler.GraphPickler.dumps
+#    Why:
+#       QAIC uses torch==2.7.0 (CPU-only build), but vllm.compilation.caching
+#       imports `Options` from torch.fx._graph_pickler and passes it to
+#       GraphPickler.dumps — both of which were only added in torch 2.8.0.
+#       Without this shim the EngineCore subprocess crashes at import time.
+#    How:
+#       If `Options` is absent, inject a compatible dataclass into
+#       torch.fx._graph_pickler and wrap GraphPickler.dumps to accept and
+#       silently ignore the options argument. No-op on torch >= 2.8.
+#    Note:
+#       This patch must be applied before vllm.compilation.caching is imported.
+#       Because vLLM defaults to fork-based subprocesses, patching here (in the
+#       main process before fork) is sufficient.
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # =================
 
 import vllm_qaic.patch.patch_config  # noqa
 import vllm_qaic.patch.patch_parallel_state  # noqa
 import vllm_qaic.patch.patch_utils  # noqa
 import vllm_qaic.patch.patch_rejection_sampler  # noqa
+import vllm_qaic.patch.patch_graph_pickler  # noqa
+import vllm_qaic.patch.patch_mem_utils  # noqa
+import vllm_qaic.patch.patch_block_table  # noqa

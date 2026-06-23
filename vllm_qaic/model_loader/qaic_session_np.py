@@ -11,7 +11,7 @@ from typing import Any
 
 import numpy as np
 
-from vllm.logger import init_logger
+from vllm_qaic.logger import init_logger
 
 try:
     import qaicrt

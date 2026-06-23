@@ -25,7 +25,7 @@ from transformers.utils.import_utils import (
     is_torchvision_v2_available,
 )
 
-from vllm.logger import init_logger
+from vllm_qaic.logger import init_logger
 from vllm.model_executor.models.gemma3_mm import (
     Gemma3DummyInputsBuilder,
     Gemma3ForConditionalGeneration,
@@ -70,10 +70,10 @@ from vllm.model_executor.models.qwen3_vl_moe import (
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     ImageItem,
-    ModalityData,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
+from vllm.inputs import ModalityData
 from vllm.multimodal.parse import (
     DictEmbeddingItems,
     ImageEmbeddingItems,
@@ -542,11 +542,16 @@ class QaicQwen2_5_VLProcessingInfo(
                 self._hf_processor.image_processor = image_processor
         return self._hf_processor
 
+    def get_data_parser(self) -> MultiModalDataParser:
+        return QaicQwen2VLMultiModalDataParser(
+            self.get_hf_config().vision_config.spatial_merge_size,
+            image_grid_thw_lookup=self.image_grid_thw_lookup,
+        )
 
 class QaicQwen2_5_VLMultiModalProcessor(Qwen2_5_VLMultiModalProcessor):
-    def _get_data_parser(self) -> MultiModalDataParser:
+    def get_data_parser(self) -> MultiModalDataParser:
         return QaicQwen2VLMultiModalDataParser(
-            self.info.get_hf_config().vision_config.spatial_merge_size,
+            self.get_hf_config().vision_config.spatial_merge_size,
             image_grid_thw_lookup=self.info.image_grid_thw_lookup,
         )
 
@@ -583,11 +588,17 @@ class QaicQwen3VLProcessingInfo(
                 self._hf_processor.image_processor = image_processor
         return self._hf_processor
 
+    def get_data_parser(self) -> MultiModalDataParser:
+        return QaicQwen2VLMultiModalDataParser(
+            self.get_hf_config().vision_config.spatial_merge_size,
+            image_grid_thw_lookup=self.image_grid_thw_lookup,
+        )
+
 
 class QaicQwen3VLMultiModalProcessor(Qwen3VLMultiModalProcessor):
-    def _get_data_parser(self) -> MultiModalDataParser:
+    def get_data_parser(self) -> MultiModalDataParser:
         return QaicQwen2VLMultiModalDataParser(
-            self.info.get_hf_config().vision_config.spatial_merge_size,
+            self.get_hf_config().vision_config.spatial_merge_size,
             video_needs_metadata=True,
             image_grid_thw_lookup=self.info.image_grid_thw_lookup,
         )

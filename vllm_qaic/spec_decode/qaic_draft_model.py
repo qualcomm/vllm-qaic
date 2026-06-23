@@ -11,7 +11,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from vllm.config import VllmConfig
-from vllm.logger import init_logger
+from vllm_qaic.logger import init_logger
+from vllm.platforms import current_platform
 
 from vllm_qaic.model_loader.qaic import load_qaic_model
 

@@ -12,7 +12,7 @@ from typing import ClassVar
 import torch
 
 from vllm.config import VllmConfig
-from vllm.logger import init_logger
+from vllm_qaic.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -21,8 +21,8 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     AttentionType,
     CommonAttentionMetadata,
-    is_quantized_kv_cache,
 )
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backends.registry import (
     AttentionBackendEnum,
     register_backend,
@@ -369,7 +369,11 @@ class QAicAttentionBackendImpl(AttentionImpl):
         self._prev_req_ids = current_ids
 
         query_start_loc = attn_metadata.query_start_loc  # [num_seqs + 1]
+        if query_start_loc.device.type != "cpu":
+            query_start_loc = query_start_loc.cpu()
         seq_lens = attn_metadata.seq_lens  # [num_seqs]
+        if seq_lens.device.type != "cpu":
+            seq_lens = seq_lens.cpu()
 
         for i, req_id in enumerate(req_ids):
             tok_start = query_start_loc[i].item()

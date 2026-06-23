@@ -12,7 +12,7 @@ from typing import ClassVar
 import torch
 
 from vllm.config import VllmConfig
-from vllm.logger import init_logger
+from vllm_qaic.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -21,8 +21,8 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     AttentionType,
     CommonAttentionMetadata,
-    is_quantized_kv_cache,
 )
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backends.registry import (
     AttentionBackendEnum,
     register_backend,

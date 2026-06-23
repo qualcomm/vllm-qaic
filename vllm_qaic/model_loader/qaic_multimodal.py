@@ -11,7 +11,7 @@ import numpy as np
 import torch
 
 from vllm.config import VllmConfig
-from vllm.logger import init_logger
+from vllm_qaic.logger import init_logger
 from vllm.model_executor.layers.pooler.abstract import Pooler
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,

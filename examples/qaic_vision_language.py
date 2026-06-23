@@ -481,6 +481,9 @@ def main(args):
         "seed": args.seed,
         "mm_processor_cache_gb": 0 if args.disable_mm_processor_cache else 4,
     }
+    # asdict() serializes CompilationConfig as a dict with None sentinel fields
+    # which pydantic rejects when re-validating; drop it to let LLM use defaults.
+    engine_args.pop("compilation_config", None)
 
     # Set engine args specific to vision encoder
     engine_args_vision = copy.deepcopy(engine_args)

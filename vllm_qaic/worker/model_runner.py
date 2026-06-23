@@ -29,8 +29,9 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.forward_context import get_forward_context, set_forward_context
-from vllm.logger import init_logger
+from vllm_qaic.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, SupportedTask
 from vllm.utils.import_utils import PlaceholderModule
@@ -53,7 +54,7 @@ from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import record_function_or_nullcontext
 from vllm.v1.worker.gpu_input_batch import InputBatch
-from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+from vllm.v1.worker.gpu_model_runner import GPUModelRunner, AsyncGPUPoolingModelRunnerOutput
 
 try:
     import torch_qaic.profile as qaic_profile
@@ -256,7 +257,6 @@ class QaicAsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
             logits,
             hidden_states,
             state.scheduler_output.total_num_scheduled_tokens,
-            state.spec_decode_metadata,
         )
 
         # 4. Set event to unblock future batches
@@ -354,7 +354,7 @@ class QaicModelRunnerPyt(GPUModelRunner):
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
         with optional_qaic_profiling(
-            profiling_dir=envs.VLLM_TORCH_PROFILER_DIR,
+            profiling_dir=getattr(envs, "VLLM_TORCH_PROFILER_DIR", None),
             profiling_wrapper=qaic_profile.ProfileForwardWithSampling,
             model=self.model,  # type: ignore[has-type]
             n_samples=10,
@@ -538,7 +538,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
         self.input_batch.block_table[0].block_table.np = self.input_batch.block_table[
             0
         ].block_table.cpu.numpy()
-        self.positions_np = self.positions.np
+        self.positions_np = self.positions.numpy()
         if self.uses_mrope:
             self.mrope_positions_np = self.mrope_positions.np
 
@@ -666,7 +666,6 @@ class QaicModelRunnerAoT(GPUModelRunner):
         if spec_tokens and any(len(v) > 0 for v in spec_tokens.values()):
             return self.decode_ks[-1]  # proposals exist → full SpD kernel
         return 0  # no proposals → cheap fallback kernel
-
     def _pool(
         self,
         hidden_states: torch.Tensor,
@@ -715,9 +714,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
         finished_mask_qaicpooler = [
             seq_len == prompt_len
             for seq_len, prompt_len in zip(
-                seq_lens_qaicpooler,
-                pooling_metadata_qaicpooler.prompt_lens,
-                strict=False,
+                seq_lens_qaicpooler, pooling_metadata_qaicpooler.prompt_lens
             )
         ]
 
@@ -770,14 +767,16 @@ class QaicModelRunnerAoT(GPUModelRunner):
         # num_scheduled_tokens, [2, 5, 3]
         # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
         req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
-        cu_num_tokens, arange = self._get_cumsum_and_arange(num_scheduled_tokens)
-        self.cu_num_tokens = cu_num_tokens
-        positions_np = self.positions_np[:total_num_scheduled_tokens]
-        np.add(
-            self.input_batch.num_computed_tokens_cpu[req_indices],
-            arange,
-            out=positions_np,
+        cu_num_tokens = self._get_cumsum_and_arange(
+            num_scheduled_tokens, self.query_pos.np
         )
+        self.cu_num_tokens = cu_num_tokens
+        total_tokens = cu_num_tokens[-1]
+        self.positions_np[:total_tokens] = (
+            self.input_batch.num_computed_tokens_cpu[req_indices]
+            + self.query_pos.np[:total_tokens]
+        )
+        positions_np = self.positions_np[:total_tokens]
         if self.uses_mrope:
             self._calc_mrope_positions(scheduler_output)
 
@@ -794,9 +793,12 @@ class QaicModelRunnerAoT(GPUModelRunner):
             self.input_batch.block_table[0].get_numpy_array()[:num_reqs, 0] - 1
         )
 
-        self.seq_lens.np[:num_reqs] = (
-            self.input_batch.num_computed_tokens_cpu[:num_reqs] + num_scheduled_tokens
+        torch.add(
+            self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs],
+            torch.from_numpy(num_scheduled_tokens),
+            out=self.optimistic_seq_lens_cpu[:num_reqs],
         )
+        self.optimistic_seq_lens_cpu[num_reqs:].fill_(0)
         # Compute max_seq_len if SpD
         if self.max_decode_tokens > 1:
             # value matches GPU SpecDecodeCommonAttnMetadata.max_seq_len
@@ -810,7 +812,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
         num_tokens_np = np.array(num_tokens, dtype=np.int32)
 
         self.discard_request_mask.np[:num_reqs] = (
-            self.seq_lens.np[:num_reqs] < num_tokens_np
+            self.optimistic_seq_lens_cpu[:num_reqs].numpy() < num_tokens_np
         )
         if self.input_batch.prev_sampled_token_ids is not None:
             self._prepare_input_ids(
@@ -1428,7 +1430,6 @@ class QaicModelRunnerAoT(GPUModelRunner):
             logits,
             hidden_states,
             scheduler_output.total_num_scheduled_tokens,
-            spec_decode_metadata,
         )
 
         if propose_drafts_after_bookkeeping:

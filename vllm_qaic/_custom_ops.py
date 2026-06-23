@@ -7,7 +7,7 @@ import os
 import torch
 from torch import Tensor
 
-from vllm.logger import init_logger
+from vllm_qaic.logger import init_logger
 from vllm.platforms import current_platform
 import torch_qaic.custom_ops as _qaic_custom_ops
 

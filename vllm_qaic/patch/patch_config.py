@@ -17,7 +17,7 @@ from pydantic.dataclasses import dataclass
 from vllm.config.cache import CacheConfig, CacheDType
 from vllm.config.device import DeviceConfig
 from vllm.config.utils import config
-from vllm.logger import init_logger
+from vllm_qaic.logger import init_logger
 
 logger = init_logger(__name__)
 

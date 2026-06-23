@@ -56,7 +56,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
 )
-from vllm.logger import init_logger
+from vllm_qaic.logger import init_logger
 from vllm.utils.network_utils import is_valid_ipv6_address, make_zmq_socket
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder

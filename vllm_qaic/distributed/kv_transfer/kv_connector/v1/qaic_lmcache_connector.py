@@ -16,7 +16,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector import (
     LMCacheConnectorV1,
     LMCacheKVEvents,
 )
-from vllm.logger import init_logger
+from vllm_qaic.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig

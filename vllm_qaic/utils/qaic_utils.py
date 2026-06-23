@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 import regex as re
 
-from vllm.logger import init_logger
+from vllm_qaic.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig

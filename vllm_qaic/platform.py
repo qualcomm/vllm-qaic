@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 # ------------------------------------------------------------------
 
-from vllm.logger import init_logger
+from vllm_qaic.logger import init_logger
 from .platform_base import QaicPlatform as QaicPlatformBase
 
 from .utils import (

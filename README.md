@@ -7,6 +7,16 @@ vLLM Qualcomm Cloud AI (QAIC) Plugin
 | <a href="https://www.qualcomm.com/artificial-intelligence/data-center"><b>Qualcomm Data Center AI</b></a> | <a href="https://quic.github.io/cloud-ai-sdk-pages/"><b>User Guide</b></a> | <a href="https://quic.github.io/cloud-ai-sdk-pages/latest/API/"><b>API Documentation</b></a> | <a href="docs/installation.md"><b>Installation Guide</b></a> |
 </p>
 
+> **This branch is under active development — plugin rebase to vLLM v0.23.0.**
+>
+> This is not a stable release.
+>
+> **Features not yet ported:**
+> - Speculative Decoding (SpD)
+> - LoRaX adapter serving
+>
+> For production use, please switch to the `main` branch or `release/v0.15.0`.
+
 ---
 
 **Qualcomm Cloud AI 100** is an AI inference accelerator designed to deliver exceptional performance and power efficiency for Large Language Models and other AI workloads. Built on Qualcomm's advanced HexNN architecture and Neural Signal Processors (NSPs), the Cloud AI 100 provides scalable, high-throughput inference capabilities optimized for enterprise and cloud deployments.
@@ -38,7 +48,7 @@ For more information about Qualcomm Cloud AI 100, check out:
 - **Software**:
     - Python 3.12
     - [Qualcomm Cloud AI SDK](https://www.qualcomm.com/artificial-intelligence/data-center/cloud-ai-100-ultra#Software) >= 1.22.0
-    - vLLM v0.15.0
+    - vLLM v0.23.0
 
 ## Getting Started
 
@@ -46,7 +56,7 @@ Please use the following recommended versions to get started quickly:
 
 | vllm-qaic version | vLLM version | Apps SDK version | Release type | Doc |
 |---|---|---|---|---|
-| v0.15.0.dev0 | v0.15.0 | >= 1.22.0 | Development | See [QuickStart](#installation) and [Installation Guide](docs/installation.md) for more details |
+| v0.23.0.dev0 | v0.23.0 | >= 1.22.0 | Development | See [QuickStart](#installation) and [Installation Guide](docs/installation.md) for more details |
 
 ## Branches
 

@@ -245,6 +245,7 @@ class QAicMMEncoderAttention(MMEncoderAttention):
         value: torch.Tensor,
         cu_seqlens: torch.Tensor | None = None,
         max_seqlen: torch.Tensor | None = None,  # Only used for Flash Attention
+        sequence_lengths: torch.Tensor | None = None,  # Only used for FlashInfer/CuDNN
     ) -> torch.Tensor:
         """Input shape:
         (batch_size x seq_len x hidden_size) or
@@ -254,9 +255,12 @@ class QAicMMEncoderAttention(MMEncoderAttention):
         kv_len = key.size(1)
         is_reshaped = query.dim() != 4
 
-        query, key, value = self.maybe_reshape_qkv_to_4d(
-            query, key, value, bsz, q_len, kv_len
-        )
+        query = query.view(bsz, q_len, self.num_heads, self.head_size)
+        key = key.view(bsz, kv_len, self.num_kv_heads, self.head_size)
+        value = value.view(bsz, kv_len, self.num_kv_heads, self.head_size)
+        if (num_repeat := self.num_heads // self.num_kv_heads) > 1:
+            key = torch.repeat_interleave(key, num_repeat, dim=2)
+            value = torch.repeat_interleave(value, num_repeat, dim=2)
 
         output = _qaic_sdpa(
             q=query,

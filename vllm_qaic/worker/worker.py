@@ -30,7 +30,7 @@ from vllm.distributed.kv_transfer import (
     has_kv_transfer_group,
 )
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
-from vllm.logger import init_logger
+from vllm_qaic.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.platforms import current_platform
@@ -50,7 +50,7 @@ from vllm.v1.outputs import (
 from vllm.v1.utils import compute_iteration_details
 from vllm.v1.worker.gpu_worker import init_worker_distributed_environment
 from vllm.v1.worker.worker_base import WorkerBase
-
+from vllm.v1.worker.worker_base import CompilationTimes
 
 from vllm_qaic.worker.model_runner import (
     QaicModelRunnerAoT,
@@ -60,7 +60,7 @@ from vllm_qaic.worker.model_runner import (
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
-    from vllm.v1.core.scheduler_output import SchedulerOutput
+    from vllm.v1.core.sched.output import SchedulerOutput
 
 
 class QaicWorker(WorkerBase):
@@ -157,6 +157,7 @@ class QaicWorker(WorkerBase):
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
+        ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
         self.model_runner.initialize_kv_cache(kv_cache_config)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
@@ -439,11 +440,10 @@ class QaicWorkerPyt(QaicWorker):
     # to hijack tensor allocation.
     def load_model(self) -> None:
         # adapted from gpu_worker.py
-        eep_scale_up = os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1"
         with self._maybe_get_memory_pool_context(
             tag="weights"
         ) and set_current_vllm_config(self.vllm_config):
-            self.model_runner.load_model(eep_scale_up=eep_scale_up)
+            self.model_runner.load_model()
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
         if self.vllm_config.model_config.enable_sleep_mode:
@@ -458,7 +458,7 @@ class QaicWorkerPyt(QaicWorker):
         else:
             return nullcontext()
 
-    def compile_or_warm_up_model(self) -> None:
+    def compile_or_warm_up_model(self) -> CompilationTimes:
         # Adapted from gpu_worker.py
         warmup_sizes = []
 
@@ -583,6 +583,7 @@ class QaicWorkerPyt(QaicWorker):
             # the model initialization and profiling.
             set_random_seed(self.model_config.seed)
         # self.model_runner.warming_up_model()
+        return CompilationTimes(language_model=0.0, encoder=0.0)
 
     def execute_model(
         self,
@@ -674,8 +675,9 @@ class QaicWorkerAoT(QaicWorker):
         """Load model from QEfficient Transformer library"""
         self.model_runner.load_model()
 
-    def compile_or_warm_up_model(self) -> None:
+    def compile_or_warm_up_model(self) -> CompilationTimes:
         self.model_runner._qaic_dummy_run()
+        return CompilationTimes(language_model=0.0, encoder=0.0)
 
     def reload_weights(self) -> None:
         logger.warning("reloading weights is not supported on QAIC in AoT mode.")
@@ -749,7 +751,6 @@ class QaicWorkerAoT(QaicWorker):
             1,
             1,
         )
-        ensure_kv_transfer_initialized(vllm_config)
 
     def execute_model(
         self,

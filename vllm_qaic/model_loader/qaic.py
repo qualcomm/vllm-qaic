@@ -22,7 +22,7 @@ from peft import PeftConfig
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
-from vllm.logger import init_logger
+from vllm_qaic.logger import init_logger
 from vllm.model_executor.layers.pooler.common import ClassifierFn
 from vllm.model_executor.layers.pooler.seqwise import (
     SequencePoolingFn,
@@ -105,12 +105,14 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                         pooling=pooling,
                         act_fn=None,  # softmax not applied; raw logits returned
                     ),
-                    "score": pooler_for_classify(
-                        pooler_config,
-                        pooling=pooling,
-                        classifier=classifier,
-                        act_fn=None,  # sigmoid not applied; raw logits returned
-                    ),
+                    # TODO: "score" removed: not a valid PoolingTask in upstream vllm 0.23.0
+                    # (DispatchPooler validates keys; "score" was added in the Qualcomm fork)
+                    # "score": pooler_for_classify(
+                    #     pooler_config,
+                    #     pooling=pooling,
+                    #     classifier=classifier,
+                    #     act_fn=None,  # sigmoid not applied; raw logits returned
+                    # ),
                 }
             )
             self.hidden_dimension = model_config.get_hidden_size()

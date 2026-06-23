@@ -8,6 +8,7 @@
 
 """This patch is required for AOT, as the torch device must be set to CPU."""
 
+import gc
 import torch
 import vllm.distributed.parallel_state
 from torch.distributed import Backend
@@ -18,6 +19,14 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.system_utils import suppress_stdout
+from vllm.distributed.parallel_state import (
+    destroy_distributed_environment,
+    destroy_model_parallel,
+)
+from vllm_qaic.logger import init_logger
+import vllm.envs as envs
+
+logger = init_logger(__name__)
 
 
 class QaicGroupCoordinator(GroupCoordinator):
@@ -105,3 +114,42 @@ class QaicGroupCoordinator(GroupCoordinator):
 
 
 vllm.distributed.parallel_state.GroupCoordinator = QaicGroupCoordinator
+
+
+def _patched_cleanup_dist_env_and_memory(shutdown_ray: bool = False) -> None:
+    logger.debug(
+        "[shutdown] Distributed: cleanup start shutdown_ray=%s",
+        shutdown_ray,
+    )
+    # Reset environment variable cache
+    envs.disable_envs_cache()
+
+    destroy_model_parallel()
+    destroy_distributed_environment()
+    if shutdown_ray:
+        import ray
+
+        ray.shutdown()
+    gc.collect()
+
+    from vllm.platforms import current_platform
+
+    empty_cache = current_platform.empty_cache
+    if empty_cache is not None:
+        empty_cache()
+    try:
+        if not current_platform.is_cpu():
+            torch._C._host_emptyCache()
+    except AttributeError:
+        logger.warning("torch._C._host_emptyCache() only available in Pytorch >=2.5")
+
+
+vllm.distributed.parallel_state.cleanup_dist_env_and_memory = (
+    _patched_cleanup_dist_env_and_memory
+)
+
+# core.py does a direct `from ... import cleanup_dist_env_and_memory`, so its
+# local name is already bound — patch the reference there too.
+import vllm.v1.engine.core as _core
+
+_core.cleanup_dist_env_and_memory = _patched_cleanup_dist_env_and_memory

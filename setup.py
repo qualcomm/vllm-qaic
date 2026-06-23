@@ -23,7 +23,7 @@ def load_module_from_path(module_name, path):
     return module
 
 
-VERSION = "0.15.0.dev0"
+VERSION = "0.23.0.dev0"
 ROOT_DIR = Path(__file__).parent
 logger = logging.getLogger(__name__)
 
