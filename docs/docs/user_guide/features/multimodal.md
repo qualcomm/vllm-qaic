@@ -6,20 +6,20 @@ QAIC supports vision-language models (VLMs) using a **kv_offload architecture** 
 
 ```
 Input (Image + Text)
-        │
-        ▼
-┌─────────────────────┐
-│   Vision Encoder    │  ← LLM instance (pooling mode)
-│   (Device Group A)  │     Encodes image → embeddings
-└─────────────────────┘
-        │ embeddings
-        ▼
-┌─────────────────────┐
-│  Language Decoder   │  ← LLM instance (generation mode)
-│   (Device Group B)  │     Text + image embeddings → tokens
-└─────────────────────┘
-        │
-        ▼
+        |
+        v
++-----------------------+
+|   Vision Encoder      |  <-- LLM instance (pooling mode)
+|   (Device Group A)    |      Encodes image -> embeddings
++-----------------------+
+        | embeddings
+        v
++-----------------------+
+|   Language Decoder    |  <-- LLM instance (generation mode)
+|   (Device Group B)    |      Text + image embeddings -> tokens
++-----------------------+
+        |
+        v
     Generated Text
 ```
 
@@ -86,7 +86,7 @@ url = "https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparenc
 image = Image.open(requests.get(url, stream=True).raw).convert("RGB")
 
 # Encode image
-inputs = [{"prompt": "<prompt_with_image_placeholder>", "multi_modal_data": {"image": image}}]
+inputs = [{"prompt": "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>Describe this image.<|im_end|>\n<|im_start|>assistant\n", "multi_modal_data": {"image": image}}]
 embeddings = llm_vision.encode(inputs, pooling_task="embed")
 
 # Generate with embeddings
@@ -111,7 +111,6 @@ additional_config={
 
 If an input image doesn't match a compiled resolution exactly, it's resized to the best available match.
 
-## Limitations
-
-- Vision encoder runs at batch_size=1 on device (vLLM batches preprocessing)
-- `async_scheduling=False` required for the vision encoder instance
+!!! warning "Constraints"
+    - Vision encoder runs at batch_size=1 on device (vLLM batches preprocessing)
+    - `async_scheduling=False` required for the vision encoder instance

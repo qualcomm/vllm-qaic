@@ -5,8 +5,7 @@
 
 **vllm-qaic** enables LLM Serving via vLLM on Qualcomm Cloud AI accelerators. Same models, same OpenAI-compatible API, hardware-optimized execution underneath.
 
-# Rewrite
-Install vllm-qaic, and inference runs natively on Cloud AI accelerators — no source changes to vLLM required. The plugin integrates through vLLM's standard platform plugin interface.
+Install `vllm-qaic` and inference runs natively on Cloud AI accelerators. The plugin integrates through vLLM's standard platform plugin interface.
 
 ---
 
@@ -85,7 +84,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 | Feature | Description |
 |---------|-------------|
-| **Speculative Decoding** | N-gram, suffix, and draft-model methods — 1.5-2.5x decode speedup |
+| **Speculative Decoding** | N-gram, suffix, and draft-model methods for decode acceleration |
 | **Disaggregated Serving** | Separate prefill/decode for independent TTFT/TPOT optimization |
 | **MX Quantization** | mxfp6 compute, mxint8 KV cache — hardware-native memory efficiency |
 | **Multimodal** | Vision-language models via kv_offload architecture |
@@ -155,4 +154,4 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 |----------|------|
 | QEfficient Library | [Documentation](https://quic.github.io/efficient-transformers/) |
 | Cloud AI SDK | [User Guide](https://quic.github.io/cloud-ai-sdk-pages/) |
-| API Reference | [Cloud AI SDK API](https://quic.github.io/cloud-ai-sdk-pages/latest/API/) |
+| API Reference | [Cloud AI SDK Python API](https://quic.github.io/cloud-ai-sdk-pages/latest/Python-API/index.html) |

@@ -16,7 +16,7 @@ The Qualcomm Cloud AI SDK consists of two layers:
 
 ### vLLM Integration
 
-`vllm-qaic` connects vLLM to Qualcomm Cloud AI accelerators through a layered software stack — enabling any application built on the OpenAI API (LangChain, CrewAI, curl) to serve LLMs on Cloud AI hardware without code changes.
+`vllm-qaic` connects vLLM to Qualcomm Cloud AI accelerators through a layered software stack — enabling any application built on the OpenAI API (LangChain, CrewAI, curl) to serve LLMs on Cloud AI hardware.
 
 <div style="text-align:center;">
 <img src="../assets/vllm_architecture.svg" alt="vLLM Architecture on Qualcomm Cloud AI" style="width:60%;">
@@ -24,11 +24,11 @@ The Qualcomm Cloud AI SDK consists of two layers:
 
 | Layer | Components | Description |
 |---|---|---|
-| **Applications** | curl, LangChain, OpenAI SDK | Any OpenAI-compatible client connects without changes |
+| **Applications** | curl, LangChain, OpenAI SDK | Any OpenAI-compatible client connects directly |
 | **vLLM Server** | OpenAI-Compatible Endpoints | HTTP/gRPC serving with continuous batching and request scheduling |
 | **QAIC Backend** | Prefill Engine, Decode Engine, KV Cache Manager, Sampler | vLLM backend dispatching to Cloud AI hardware |
 | **QEfficient / Apps SDK** | ONNX Export, Quantization, Compiler (`qaic-compile`) | One-time AOT compilation of HuggingFace models to QPC binaries |
-| **QPC** | Compiled model binary | Static-shape binary optimised for Cloud AI execution |
+| **QPC** | Compiled model binary | Static-shape binary optimized for Cloud AI execution |
 | **Cloud AI Accelerator** | Multi-Card (Tensor Slicing), Disaggregated Serving (Prefill / Decode) | Hardware execution across one or more Cloud AI cards |
 
 Two execution paths are supported:

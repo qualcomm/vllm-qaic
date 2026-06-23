@@ -1,8 +1,10 @@
 # Architecture
 
-![vLLM QAIC Plugin Architecture](../assets/vllm_plugin%20Architecture.png)
+![vLLM QAIC Plugin Architecture](../assets/vllm_plugin_architecture.png)
 
 The vLLM QAIC plugin integrates with vLLM's hardware plugin system to run inference on Qualcomm Cloud AI 100 accelerators. Unlike in-tree backends (GPU, CPU), this plugin is distributed as a separate pip package that registers itself at import time — vLLM discovers it automatically when Cloud AI hardware is present.
+
+---
 
 ## Plugin Registration
 
@@ -24,22 +26,22 @@ At startup, vLLM discovers and loads the QAIC platform plugin, which registers:
 
 ```
 vllm.v1.engine
-  └── QaicWorker
-        ├── Device initialization
-        ├── Session management
-        ├── Distributed comm setup
-        └── QaicModelRunner
-              ├── Static-shape input prep
-              ├── Prefill/decode scheduling
-              ├── SpD integration
-              ├── Profile instrumentation
-              ├── QPC Model Loader
-              │     ├── QPC path resolution
-              │     ├── Session configuration
-              │     └── Multi-modal loading
-              └── Attention Backend
-                    ├── KV cache management
-                    └── Attention computation
+  +-- QaicWorker
+        +-- Device initialization
+        +-- Session management
+        +-- Distributed comm setup
+        +-- QaicModelRunner
+              +-- Static-shape input prep
+              +-- Prefill/decode scheduling
+              +-- SpD integration
+              +-- Profile instrumentation
+              +-- QPC Model Loader
+              |     +-- QPC path resolution
+              |     +-- Session configuration
+              |     +-- Multi-modal loading
+              +-- Attention Backend
+                    +-- KV cache management
+                    +-- Attention computation
 ```
 
 ## Platform Class
@@ -59,27 +61,27 @@ vllm.v1.engine
 ### AOT Mode (Primary)
 
 ```
-HuggingFace Model → QEfficient (export + compile) → QPC → QAIC Device Session → Output Tokens
-                    ─────────────────────────────         ───────────────────
-                    one-time compilation step              qaic_model_runner
+HuggingFace Model -> QEfficient (export + compile) -> QPC -> QAIC Device Session -> Output Tokens
+                     --------------------------------        -------------------
+                     one-time compilation step                qaic_model_runner
 ```
 
 ### PYT Mode (Eager)
 
 ```
-HuggingFace Model → PyTorch loading → torch_qaic backend → Output Tokens
-                                       ──────────────────
-                                       dynamic dispatch to QAIC hardware
+HuggingFace Model -> PyTorch loading -> torch_qaic backend -> Output Tokens
+                                        ------------------
+                                        dynamic dispatch to QAIC hardware
 ```
 
 ## Device Topology
 
 ```
 Cloud AI 100 Ultra Card (64 NSP cores total)
-├── QID 0:  16 NSP Cores
-├── QID 1:  16 NSP Cores
-├── QID 2:  16 NSP Cores
-└── QID 3:  16 NSP Cores
++-- QID 0:  16 NSP Cores
++-- QID 1:  16 NSP Cores
++-- QID 2:  16 NSP Cores
++-- QID 3:  16 NSP Cores
 ```
 
 ## File Map

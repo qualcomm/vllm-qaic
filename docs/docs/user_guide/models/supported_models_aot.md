@@ -62,8 +62,8 @@ Support varies by QPC mode (Single vs Dual). Dual QPC uses the `kv_offload` arch
 | **LlavaNextForConditionalGeneration** | Granite Vision | [ibm-granite/granite-vision-3.2-2b](https://huggingface.co/ibm-granite/granite-vision-3.2-2b) | :x: | :white_check_mark: |
 | **Llama4ForConditionalGeneration** | Llama-4-Scout | [meta-llama/Llama-4-Scout-17B-16E-Instruct](https://huggingface.co/meta-llama/Llama-4-Scout-17B-16E-Instruct) | :white_check_mark: | :white_check_mark: |
 | **Qwen2_5_VLForConditionalGeneration** | Qwen2.5-VL | [Qwen/Qwen2.5-VL-3B-Instruct](https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct) | :x: | :white_check_mark: |
-| **Qwen3VLForConditionalGeneration** | Qwen2.5-VL | [Qwen/Qwen3-VL-32B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-32B-Instruct) | :x: | :white_check_mark: |
-| **Qwen3VLMoeForConditionalGeneration** | Qwen2.5-VL | [Qwen/Qwen3-VL-30B-A3B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-30B-A3B-Instruct) | :x: | :white_check_mark: |
+| **Qwen3VLForConditionalGeneration** | Qwen3-VL | [Qwen/Qwen3-VL-32B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-32B-Instruct) | :x: | :white_check_mark: |
+| **Qwen3VLMoeForConditionalGeneration** | Qwen3-VL MoE | [Qwen/Qwen3-VL-30B-A3B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-30B-A3B-Instruct) | :x: | :white_check_mark: |
 
 !!! warning "Multimodal limitations"
     - Multimodal models use the `kv_offload` architecture (vision encoder on separate device group)

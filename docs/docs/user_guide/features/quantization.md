@@ -30,7 +30,7 @@ Qualcomm's Microscaling (MX) formats are hardware-native on Cloud AI 100:
 | mxfp6 | 6-bit float | Weight and activation computation |
 | mxint8 | 8-bit int | KV cache storage (saves memory bandwidth) |
 
-MX formats provide better accuracy-per-bit than standard INT quantization because they use per-block scaling factors.
+MX formats provide better accuracy-per-bit than standard INT quantization because they use per-block scaling factors. See the [Microscaling Formats paper (arXiv:2310.10537)](https://arxiv.org/abs/2310.10537) for technical details.
 
 ## Usage Examples
 

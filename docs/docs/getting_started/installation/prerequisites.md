@@ -8,6 +8,18 @@ Qualcomm Cloud AI 100 accelerator with QAIC Platform/Apps SDK >= 1.22.0 on Linux
 
 <!-- --8<-- [start:requirements] -->
 
+## Platform Requirements
+
+| Requirement | AOT Mode | PYT Mode |
+|-------------|----------|----------|
+| OS | Ubuntu 22.04+ | Ubuntu 22.04+ |
+| Python | 3.12 | 3.12 |
+| QAIC Platform SDK | >= 1.22.0 | >= 1.22.0 |
+| QAIC Apps SDK | >= 1.22.0 | >= 1.22.0 (with `--install-torch-qaic`) |
+| torch | 2.7.0+cpu | 2.10.0+cpu |
+| vLLM | 0.15.0 | 0.15.0 |
+| QEfficient | main | — |
+
 ## Hardware
 
 | Platform | Description |
@@ -15,15 +27,6 @@ Qualcomm Cloud AI 100 accelerator with QAIC Platform/Apps SDK >= 1.22.0 on Linux
 | Qualcomm Cloud AI 100 Ultra | 4 QIDs per card, 16 NSP cores per QID |
 | Qualcomm Cloud AI 100 Standard | Data center inference accelerator |
 | Qualcomm Cloud AI 080 | Entry-level Cloud AI accelerator |
-
-## Software Requirements
-
-| Requirement | Version |
-|-------------|---------|
-| OS | Linux (Ubuntu 22.04+) |
-| Python | 3.12 |
-| QAIC Platform SDK | >= 1.22.0 |
-| QAIC Apps SDK | >= 1.22.0 |
 
 <!-- --8<-- [end:requirements] -->
 
