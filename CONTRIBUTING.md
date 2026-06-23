@@ -50,7 +50,7 @@ In general, contributors should develop on branches based off of `main` and pull
 
     The `-u` is shorthand for `--set-upstream`. This will set up the tracking reference so subsequent runs of `git push` or `git pull` can omit the remote and branch.
 
-1. [Submit a pull request](https://github.com/qualcomm/<REPLACE-ME>/pulls) from your branch to `main`.
+1. [Submit a pull request](https://github.com/qualcomm/vllm-qaic/pulls) from your branch to `main`.
 1. Pat yourself on the back and wait for your pull request to be reviewed.
 
 ## Security Analysis of Pull Requests
