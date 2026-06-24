@@ -1,7 +1,5 @@
 # Architecture
 
-![vLLM QAIC Plugin Architecture](../assets/vllm_plugin_architecture.png)
-
 The vLLM QAIC plugin integrates with vLLM's hardware plugin system to run inference on Qualcomm Cloud AI 100 accelerators. Unlike in-tree backends (GPU, CPU), this plugin is distributed as a separate pip package that registers itself at import time — vLLM discovers it automatically when Cloud AI hardware is present.
 
 ---
@@ -58,20 +56,30 @@ vllm.v1.engine
 
 ## Execution Modes
 
+The vLLM QAIC plugin supports two execution modes, enabling flexibility between optimized static compilation and dynamic PyTorch-based inference:
+
+| | AoT (Ahead-of-Time) | PYT (PyTorch Eager / JIT) |
+|---|---|---|
+| **Model Source** | HuggingFace models | vLLM models (selected models) |
+| **Model Transformation** | QEfficient (export + quantize) | vLLM / vLLM-QAIC |
+| **Compilation** | QAIC Glow Compiler → QPC binary | Torch.compile via Triton or eager ATen ops |
+| **Fused Kernels** | Hardware-native via QPC | vLLM fused kernels (RMSNorm, TopK Softmax, etc.) |
+| **Runtime** | AoT runtime | JIT runtime |
+
 ### AOT Mode (Primary)
 
 ```
-HuggingFace Model -> QEfficient (export + compile) -> QPC -> QAIC Device Session -> Output Tokens
-                     --------------------------------        -------------------
-                     one-time compilation step                qaic_model_runner
+HuggingFace Model -> QEfficient (export + compile) -> QPC -> qaic_model_runner (AOT) -> Output Tokens
+                     --------------------------------        ---------------------
+                       one-time compilation step               QAIC Device Session
 ```
 
 ### PYT Mode (Eager)
 
 ```
-HuggingFace Model -> PyTorch loading -> torch_qaic backend -> Output Tokens
-                                        ------------------
-                                        dynamic dispatch to QAIC hardware
+vLLM Models -> qaic_model_runner (PYT) -> PyTorch execution on torch_qaic backend -> Output Tokens
+               --------------------        ----------------------------------------
+                 Model execution             Kernel dispatch to QAIC hardware
 ```
 
 ## Device Topology
