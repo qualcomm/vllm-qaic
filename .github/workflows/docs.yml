@@ -27,7 +27,7 @@ jobs:
           python-version: '3.12'
       - run: pip install -r docs/requirements-docs.txt
       - run: mkdocs build --config-file docs/mkdocs.yml
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: docs/site
 
