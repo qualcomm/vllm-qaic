@@ -230,7 +230,7 @@ class QaicPlatform(Platform):
         # before any downstream code reads from it, mirroring what
         # _get_qaic_compile_config previously did via its local _clean_config.
         if override_qaic_config:
-            from vllm.utils.qaic_utils import _clean_config
+            from vllm_qaic.utils.qaic_utils import _clean_config
 
             cleaned = _clean_config(override_qaic_config, vllm_config)
             override_qaic_config.update(cleaned)
