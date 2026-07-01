@@ -29,7 +29,7 @@ For more information about Qualcomm Cloud AI 100, check out:
 - 🚀 [Qualcomm Data Center AI Solutions](https://www.qualcomm.com/artificial-intelligence/data-center)
 - 📚 [Cloud AI SDK User Guide](https://quic.github.io/cloud-ai-sdk-pages/)
 - 🎯 [Cloud AI SDK API Reference](https://quic.github.io/cloud-ai-sdk-pages/latest/Python-API/index.html)
-- ✅ [Validated Models and Configurations](https://quic.github.io/efficient-transformers/source/validate.html)
+- ✅ [Validated Models and Configurations](https://qualcomm.github.io/vllm-qaic/user_guide/models/supported_models_aot/)
 
 ## Prerequisites
 
@@ -140,17 +140,11 @@ for output in outputs:
 
 ### Ahead-of-Time Compiled Mode
 
-For the most up-to-date list of supported models and their validation status, please check our [model compatibility matrix](https://quic.github.io/efficient-transformers/source/validate.html).
+For the most up-to-date list of supported models and their validation status, please check [Supported Models through AoT](https://qualcomm.github.io/vllm-qaic/user_guide/models/supported_models_aot/).
 
-### Eager Mode
+### PyTorch Eager Mode
 
-We currently support the following models:
-- Qwen/Qwen2.5-VL-3B-Instruct
-- Qwen/Qwen2.5-VL-7B-Instruct
-- Qwen/Qwen2.5-VL-32B-Instruct
-- Qwen/Qwen3-VL-32B-Instruct
-- OpenGVLab/InternVL3_5-8B-Instruct
-- OpenGVLab/InternVL2_5-38B
+For the most up-to-date list of supported models and their validation status, please check [Supported Models through PyTorch Eager Mode](https://qualcomm.github.io/vllm-qaic/user_guide/models/supported_models_eager/).
 
 ## Support
 
