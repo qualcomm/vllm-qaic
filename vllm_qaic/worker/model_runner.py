@@ -439,27 +439,32 @@ class QaicModelRunnerAoT(GPUModelRunner):
         ):
             # The parent's __init__ creates a GPU DraftModelProposer; override with
             # the QAIC-specific proposer. Model weights are loaded in load_model().
-            from vllm.v1.spec_decode.draft_model import (  # noqa: PLC0415
-                create_vllm_config_for_draft_model,
-            )
+            from vllm.config.utils import replace as config_replace  # noqa: PLC0415
 
             from vllm_qaic.spec_decode.qaic_draft_model import (  # noqa: PLC0415
                 QaicDraftModelProposer,
             )
 
-            draft_vllm_config = create_vllm_config_for_draft_model(self.vllm_config)
+            # Build a VllmConfig for the draft model using the target's config
+            # as a base, overriding with draft-specific model/parallel config.
+            spec_cfg = self.speculative_config
+            draft_vllm_config = config_replace(
+                self.vllm_config,
+                model_config=spec_cfg.draft_model_config,
+                quant_config=None,
+            )
             _draft_override = (self.vllm_config.additional_config or {}).get(
                 "draft_override_qaic_config"
             )
             if _draft_override is not None:
                 # Give the draft model its own additional_config dict; cannot mutate
-                # the shared parent dict (create_vllm_config_for_draft_model does not
-                # deep-copy additional_config).
-                draft_vllm_config = draft_vllm_config.replace(
+                # the shared parent dict.
+                draft_vllm_config = config_replace(
+                    draft_vllm_config,
                     additional_config={
-                        **draft_vllm_config.additional_config,
+                        **(draft_vllm_config.additional_config or {}),
                         "override_qaic_config": _draft_override,
-                    }
+                    },
                 )
             self.drafter = QaicDraftModelProposer(draft_vllm_config)
         # Extract configuration params
@@ -840,13 +845,18 @@ class QaicModelRunnerAoT(GPUModelRunner):
         cu_num_scheduled_tokens: np.ndarray,
     ) -> SpecDecodeMetadata:
         num_sampled_tokens = num_draft_tokens + 1
-        cu_num_sampled_tokens, arange = self._get_cumsum_and_arange(
-            num_sampled_tokens, cumsum_dtype=np.int32
+        # Use a temporary buffer for the batched arange output to avoid
+        # corrupting self.arange_np (which _get_cumsum_and_arange reads from).
+        arange_buf = np.empty_like(self.arange_np)
+        cu_num_sampled_tokens = self._get_cumsum_and_arange(
+            num_sampled_tokens, arange_buf, cumsum_dtype=np.int32
         )
         bonus_logits_indices = cu_num_sampled_tokens - 1
-        cu_num_draft_tokens, arange = self._get_cumsum_and_arange(
-            num_draft_tokens, cumsum_dtype=np.int32
+        cu_num_draft_tokens = self._get_cumsum_and_arange(
+            num_draft_tokens, arange_buf, cumsum_dtype=np.int32
         )
+        total_draft = int(cu_num_draft_tokens[-1]) if cu_num_draft_tokens.size else 0
+        arange = arange_buf[:total_draft]
         target_logits_indices = np.repeat(
             cu_num_sampled_tokens - num_sampled_tokens, num_draft_tokens
         )
