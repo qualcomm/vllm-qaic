@@ -71,6 +71,28 @@
 #       Because vLLM defaults to fork-based subprocesses, patching here (in the
 #       main process before fork) is sufficient.
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#
+# ** 6. File: patch_triton_import.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. vllm.triton_utils.HAS_TRITON / triton / tl / tldevice
+#    Why:
+#       Triton is required to run kernels on the QAIC Triton Backend, but
+#       upstream's HAS_TRITON check can end up False even when a usable
+#       Triton install is present (e.g. its Triton-CPU-backend check reads
+#       `importlib.metadata.version("vllm")`, which raises when vllm is
+#       installed under a different distribution name).
+#    How:
+#       Re-import triton and check for QAIC Triton Backend in
+#       triton.backends.backends; if found, re-enable HAS_TRITON and rebind
+#       triton/tl/tldevice on vllm.triton_utils to the real modules.
+#    Note:
+#       Must run before any vllm module does
+#       `from vllm.triton_utils import ...`, since that binds triton/tl/
+#       HAS_TRITON into the importing module's own namespace at that
+#       moment. Applied here (during pre_register_and_update) is early
+#       enough, since all such imports live under model_executor/layers/
+#       and v1/worker/, which only load during model/worker construction.
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # =================
 
 import vllm_qaic.patch.patch_config  # noqa
@@ -80,3 +102,4 @@ import vllm_qaic.patch.patch_rejection_sampler  # noqa
 import vllm_qaic.patch.patch_graph_pickler  # noqa
 import vllm_qaic.patch.patch_mem_utils  # noqa
 import vllm_qaic.patch.patch_block_table  # noqa
+import vllm_qaic.patch.patch_triton_import  # noqa

@@ -51,6 +51,8 @@ class QaicPlatform(Platform):
         "vllm_qaic.attention.backends"
         ".qaic_attn.QAicTorchAttentionBackend"
     )
+    if os.environ.get("VLLM_QAIC_ENABLE_TRITON_ATTN") == "1":
+        primary_attn_backend_cls = "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"
     device_name: str = "qaic"
     # Set device type to cpu if it's AOT.
     # This is a workaround for online serving's AsyncEngineArgs.
