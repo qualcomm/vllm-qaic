@@ -117,7 +117,7 @@ class QaicAsyncPoolingModelRunnerOutput(AsyncModelRunnerOutput):
     def __init__(
         self,
         model_runner: QaicModelRunnerAoT,
-        pending_prefill_exec_queue: Queue,
+        pending_prefill_exec_queue: Queue | None,
         num_scheduled_tokens: int,
         num_scheduled_tokens_np: np.ndarray,
         kv_connector_output: KVConnectorOutput,
@@ -391,6 +391,10 @@ class QaicModelRunnerAoT(GPUModelRunner):
         | QaicDraftModelProposer
         | None
     )
+
+    # Declared on the parent GPUModelRunner (untyped to this checker); annotate
+    # so reads during __init__ do not trigger [has-type].
+    use_async_scheduling: bool
 
     def __init__(
         self,

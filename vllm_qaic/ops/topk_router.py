@@ -6,10 +6,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import torch
 
 _PATCH_APPLIED_ATTR = "_qaic_topk_router_patch_applied"
-_QAIC_REGULAR_TOPK = None
+_QAIC_REGULAR_TOPK: Callable | None = None
 
 
 def _get_qaic_regular_topk():
@@ -66,6 +68,7 @@ def _topk_torch(
         topk_weights.shape[1],
         e_score_correction_bias,
     ):
+        assert qaic_regular_topk is not None
         weights, ids = qaic_regular_topk(
             gating_output,
             None,

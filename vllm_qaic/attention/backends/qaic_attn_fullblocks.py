@@ -469,6 +469,7 @@ class QAicAttentionBackendImpl(AttentionImpl):
     ) -> torch.Tensor:
         sdpa_start_loc = attn_metadata.sdpa_start_loc
         num_decode_tokens = attn_metadata.num_decode_tokens
+        assert sdpa_start_loc is not None
         sdpa_start_loc = sdpa_start_loc[num_decode_tokens:] - num_decode_tokens
 
         if self.alibi_slopes is not None:

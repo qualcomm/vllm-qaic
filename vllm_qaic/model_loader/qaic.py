@@ -86,7 +86,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         pooler_config = vllm_config.model_config.pooler_config
         self._pooler = None
         self.is_pooling_model = False
-        self.task = None
+        self.task: str | None = None
         if vllm_config.model_config.runner_type == "pooling":
             self.is_pooling_model = True
             self._pooler = DispatchPooler(
@@ -123,7 +123,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 self.is_qaic_pooler = True
                 self.normalize = bool(override_qaic_config.get("normalize", False))
                 self.softmax = bool(override_qaic_config.get("softmax", False))
-            self.task: str | None = override_qaic_config.get("task", None)
+            self.task = override_qaic_config.get("task", None)
 
         # TODO: Add new variables for turbo
 
@@ -969,6 +969,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         Called either immediately (sync path) or after complete_inf (async path).
         """
         output = self.encode_num_logits_buffer
+        assert output is not None, "encode buffer not initialized"
         output_array = output[output_key][: len(prefill_cum_sum)]
         output_tensor = torch.tensor(output_array)
 
@@ -1039,6 +1040,9 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         Returns:
             dict: output buffer dict containing the hidden-state / pooled output
         """
+        assert encode_num_logits_buffer is not None, (
+            "run_encode requires an output buffer"
+        )
         if (
             self.encode_num_logits_buffer is None
             or encode_num_logits_buffer[output_key].shape
@@ -1047,6 +1051,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             self.session.set_buffers(encode_num_logits_buffer)
             self.encode_num_logits_buffer = encode_num_logits_buffer
 
+        assert self.encode_num_logits_buffer is not None
         encode_exec_obj_idx = self.session.np_run(
             {**qpc_inputs, **self.encode_num_logits_buffer}
         )

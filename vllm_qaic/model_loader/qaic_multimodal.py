@@ -65,7 +65,7 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
 
             # TODO: need to update if we can support reranker
             # TODO: Add additional args for vision embedding models
-            self.pooler = VisionEncoderPooler()
+            self._pooler = VisionEncoderPooler()
 
         self.default_mm_kwargs: dict[str, np.ndarray] | None = None
         self.video_pruning_rate: float | None = getattr(

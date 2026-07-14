@@ -346,6 +346,8 @@ class QAicAttentionBackendImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
+        assert attn_metadata is not None
+        assert output is not None
         req_ids = attn_metadata.req_ids
         if req_ids is None:
             # Fallback: no req_ids available, skip computation
@@ -487,6 +489,7 @@ class QAicAttentionBackendImpl(AttentionImpl):
         causal_attn = attn_type == AttentionType.DECODER
 
         sdpa_start_loc = attn_metadata.sdpa_start_loc  # .numpy()  # type: ignore
+        assert sdpa_start_loc is not None
         for i in range(len(attn_masks)):
             mask = attn_masks[i]
             start_q = sdpa_start_loc[i]
