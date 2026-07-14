@@ -40,6 +40,18 @@ repos:
     entry: python tools/pre_commit/check_qualcomm_header.py
     language: python
     types: [python]
+  - id: signoff-commit
+    name: Sign-off Commit
+    entry: bash
+    args:
+      - -c
+      - |
+        if ! grep -q "^Signed-off-by: $(git config user.name) <$(git config user.email)>" "$(git rev-parse --git-path COMMIT_EDITMSG)"; then
+          printf "\nSigned-off-by: $(git config user.name) <$(git config user.email)>\n" >> "$(git rev-parse --git-path COMMIT_EDITMSG)"
+        fi
+    language: system
+    verbose: true
+    stages: [commit-msg]
   - id: mypy-local
     name: Run mypy for local Python installation
     entry: tools/mypy.sh 0 "local"
