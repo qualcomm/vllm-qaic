@@ -49,5 +49,5 @@
 
 import vllm_qaic.patch.patch_config  # noqa
 import vllm_qaic.patch.patch_parallel_state  # noqa
-import vllm_qaic.patch.patch_utils  # noqa
 import vllm_qaic.patch.patch_rejection_sampler  # noqa
+import vllm_qaic.patch.patch_utils  # noqa

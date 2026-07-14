@@ -49,6 +49,7 @@ Models validated for AOT mode on Cloud AI 100 with vLLM.
       --kv-cache-dtype mxint8 \
       --speculative-config '{"method":"ngram","num_speculative_tokens":5}'
     ```
+
 ---
 
 ## Multimodal / Vision-Language Models

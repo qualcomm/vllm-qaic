@@ -2,13 +2,11 @@
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 # ------------------------------------------------------------------
-
 """Shared QAIC utilities used across vLLM"""
 
 from typing import TYPE_CHECKING, Any
 
 import regex as re
-
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:

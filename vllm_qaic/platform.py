@@ -4,12 +4,9 @@
 # ------------------------------------------------------------------
 
 from vllm.logger import init_logger
-from .platform_base import QaicPlatform as QaicPlatformBase
 
-from .utils import (
-    QAIC_KV_CACHE_DTYPE,
-    QAIC_QUANTIZATION_METHOD,
-)
+from .platform_base import QaicPlatform as QaicPlatformBase
+from .utils import QAIC_KV_CACHE_DTYPE, QAIC_QUANTIZATION_METHOD
 
 logger = init_logger(__name__)
 

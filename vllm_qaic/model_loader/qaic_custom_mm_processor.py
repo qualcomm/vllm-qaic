@@ -24,7 +24,6 @@ from transformers.utils.import_utils import (
     is_torchvision_available,
     is_torchvision_v2_available,
 )
-
 from vllm.logger import init_logger
 from vllm.model_executor.models.gemma3_mm import (
     Gemma3DummyInputsBuilder,
@@ -37,9 +36,6 @@ from vllm.model_executor.models.gemma4_mm import (
     Gemma4ForConditionalGeneration,
     Gemma4MultiModalProcessor,
     Gemma4ProcessingInfo,
-)
-from vllm.model_executor.models.transformers import (
-    TransformersMultiModalForCausalLM,
 )
 from vllm.model_executor.models.qwen2_5_vl import (
     Qwen2_5_VLDummyInputsBuilder,
@@ -67,6 +63,7 @@ from vllm.model_executor.models.qwen3_vl_moe import (
     Qwen3VLMoeForConditionalGeneration,
     Qwen3VLMoeProcessingInfo,
 )
+from vllm.model_executor.models.transformers import TransformersMultiModalForCausalLM
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     ImageItem,

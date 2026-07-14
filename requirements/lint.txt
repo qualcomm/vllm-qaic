@@ -3,5 +3,4 @@
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 # ------------------------------------------------------------------
 
-# formatting
 pre-commit==4.0.1

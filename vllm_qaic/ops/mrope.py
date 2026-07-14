@@ -2,11 +2,9 @@
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 # ------------------------------------------------------------------
-
 """Custom MRoPE implementation for QAIC platform with torch.compile support."""
 
 import torch
-
 from vllm.model_executor.layers.rotary_embedding.mrope import (
     MRotaryEmbedding,
     apply_interleaved_rope,

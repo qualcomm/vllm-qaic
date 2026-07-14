@@ -2,11 +2,9 @@
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 # ------------------------------------------------------------------
-
 """Custom activation implementations for QAIC platform with torch.compile support."""
 
 import torch
-
 from vllm.model_executor.layers.activation import SiluAndMul
 
 

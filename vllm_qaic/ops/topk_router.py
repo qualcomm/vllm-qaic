@@ -2,7 +2,6 @@
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 # ------------------------------------------------------------------
-
 """Register QAIC regular top-k router overrides for vLLM custom ops."""
 
 from __future__ import annotations

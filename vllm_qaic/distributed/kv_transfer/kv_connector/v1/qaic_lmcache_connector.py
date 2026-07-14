@@ -6,7 +6,6 @@
 from typing import TYPE_CHECKING
 
 from lmcache.integration.vllm.qaic_vllm_v1_adapter import QaicLMCacheConnectorV1Impl
-
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,

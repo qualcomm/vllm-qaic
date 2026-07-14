@@ -18,17 +18,17 @@ class HeaderStatus(Enum):
 
 
 RULE_LINE = "# " + "-" * 66
-COPYRIGHT_LINE = (
-    "# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries."
-)
+COPYRIGHT_LINE = "# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries."
 LICENSE_LINE = "# SPDX-License-Identifier: BSD-3-Clause-Clear"
 
-FULL_HEADER = "\n".join([
-    RULE_LINE,
-    COPYRIGHT_LINE,
-    LICENSE_LINE,
-    RULE_LINE,
-])
+FULL_HEADER = "\n".join(
+    [
+        RULE_LINE,
+        COPYRIGHT_LINE,
+        LICENSE_LINE,
+        RULE_LINE,
+    ]
+)
 
 
 def check_header_status(file_path):

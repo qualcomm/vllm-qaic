@@ -2,14 +2,12 @@
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 # ------------------------------------------------------------------
-
 """Register QAIC native forward for unquantized fused MoE."""
 
 from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
-
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )

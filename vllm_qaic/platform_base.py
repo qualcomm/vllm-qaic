@@ -4,23 +4,20 @@
 # ------------------------------------------------------------------
 
 import ast
+import functools
 import importlib
 import importlib.util
 import json
 import os
 from typing import TYPE_CHECKING
-import functools
 
 import torch
-
 from vllm.logger import init_logger
 from vllm.platforms import Platform, PlatformEnum
 from vllm.utils.import_utils import PlaceholderModule
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-from .utils import (
-    QAIC_QUANTIZATION_LIST,
-)
+from .utils import QAIC_QUANTIZATION_LIST
 
 try:
     import torch_qaic
@@ -48,8 +45,7 @@ DYNAMIC_RESOLUTION_MODELS = [
 class QaicPlatform(Platform):
     _enum = PlatformEnum.OOT
     primary_attn_backend_cls = (
-        "vllm_qaic.attention.backends"
-        ".qaic_attn.QAicTorchAttentionBackend"
+        "vllm_qaic.attention.backends.qaic_attn.QAicTorchAttentionBackend"
     )
     device_name: str = "qaic"
     # Set device type to cpu if it's AOT.
@@ -280,8 +276,8 @@ class QaicPlatform(Platform):
             )
             if vllm_config.speculative_config:
                 raise ValueError(
-                    "Speculative decoding (SpD) is not supported in eager mode on QAIC. "
-                    "SpD requires AOT (non-eager) compilation."
+                    "Speculative decoding (SpD) is not supported in eager "
+                    "mode on QAIC. SpD requires AOT (non-eager) compilation."
                 )
             if scheduler_config.async_scheduling:
                 logger.warning_once(
@@ -514,9 +510,10 @@ class QaicPlatform(Platform):
         """
         Configure multimodal processor settings for models with
         dynamic resolution support. Some vision-language models
-        (e.g. Qwen2.5VL, Qwen3VL) can handle dynamic image resolutions by mapping them to
-        a variable number of visual tokens. On QAIC hardware, the vision encoder requires
-        fixed-size inputs, so this method registers a set of supported ``(height, width)``
+        (e.g. Qwen2.5VL, Qwen3VL) can handle dynamic image resolutions by
+        mapping them to a variable number of visual tokens. On QAIC hardware,
+        the vision encoder requires fixed-size inputs, so this method registers
+        a set of supported ``(height, width)``
         resolutions that a custom processor will snap images to at runtime.
 
         Currently only Qwen2.5VL and Qwen3VL are supported.

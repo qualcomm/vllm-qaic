@@ -2,7 +2,6 @@
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 # ------------------------------------------------------------------
-
 """Utilities for selecting and loading qaic models."""
 
 import json
@@ -19,7 +18,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from peft import PeftConfig
-
 from vllm.config import ModelConfig, VllmConfig
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
 from vllm.logger import init_logger
@@ -654,7 +652,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     # Single batch-wide bucket chosen before the loop; held constant.
                     if comp_ctx_val is not None:
                         chunk_inputs["comp_ctx_lengths"] = comp_ctx_val
-                    # TODO: Workaround for CCL—LRT requires a buffer matching logits shape
+                    # TODO: Workaround for CCL—LRT requires a buffer matching
+                    # logits shape
                     if logits is not None:
                         chunk_inputs["logits"] = logits[index : index + 1]
 
@@ -662,7 +661,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     if callback:
                         callback()
                     logger.debug(
-                        "All execObjs allocated; waiting for pending execObj completion."
+                        "All execObjs allocated; waiting for pending execObj "
+                        "completion."
                     )
                     eid = pending_exec_queue.get(timeout=120)
                     self.complete_inf(eid, True, pipeline_prefill_en=True)
@@ -800,7 +800,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
 
                 if pending_exec_count == self.session.prefill_num_execObj:
                     logger.debug(
-                        "All execObjs allocated; waiting for pending execObj completion."
+                        "All execObjs allocated; waiting for pending execObj "
+                        "completion."
                     )
                     eid = pending_exec_queue.get()
                     self.session.complete_inf(eid, True)
@@ -971,7 +972,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         output_array = output[output_key][: len(prefill_cum_sum)]
         output_tensor = torch.tensor(output_array)
 
-        if not self.is_qaic_pooler and not output_key == "logits":
+        if not self.is_qaic_pooler and output_key != "logits":
             hidden_states = torch.cat(
                 [
                     output_tensor[i, : prompt_lens[i]]
@@ -1033,7 +1034,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         Args:
             qpc_inputs: input tensors (e.g. input_ids, attention_mask)
             output_key: key for the output buffer ("output" or "logits")
-            encode_num_logits_buffer: output buffer dict; re-registered when shape changes
+            encode_num_logits_buffer: output buffer dict; re-registered when
+                shape changes
         Returns:
             dict: output buffer dict containing the hidden-state / pooled output
         """
@@ -1060,7 +1062,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         """assert prefill and decode work by running dummy inputs
 
         also creates attention_mask and decode input buffers
-        that will be used throughout the lifeycle of worker
+        that will be used throughout the lifecycle of worker
         """
 
         # Prepare dummy run inputs
@@ -1327,7 +1329,8 @@ def load_qaic_model(
 
     if speculative_model_type not in QAIC_DEVICE_CONFIG:
         raise ValueError(
-            f"Unable to find default profile for model type {speculative_model_type}!!\n"
+            "Unable to find default profile for model type "
+            f"{speculative_model_type}!!\n"
         )
 
     qaic_compile_config = _get_qaic_compile_config(vllm_config, speculative_model_type)
@@ -1347,11 +1350,13 @@ def load_qaic_model(
         assert override_qaic_config.get("pooling_device"), (
             "pooling_device must be provided in override_qaic_config for pooling task"
         )
-        if override_qaic_config.get("pooling_device", None) == "qaic":
-            if override_qaic_config.get("task") not in ("score", "classify"):
-                assert override_qaic_config.get("pooling_method"), (
-                    "pooling_method must be provided in override_qaic_config for qaic pooling task"
-                )
+        if override_qaic_config.get("pooling_device", None) == "qaic" and (
+            override_qaic_config.get("task") not in ("score", "classify")
+        ):
+            assert override_qaic_config.get("pooling_method"), (
+                "pooling_method must be provided in override_qaic_config "
+                "for qaic pooling task"
+            )
 
     # if provided qpc is valid
     if qpc_path and not check_qpc_exists(qpc_path):
@@ -1663,8 +1668,8 @@ def get_hf_model(
         QEFFAutoModel,
         QEFFAutoModelForCausalLM,
         QEFFAutoModelForImageTextToText,
-        QEFFAutoModelForSpeechSeq2Seq,
         QEFFAutoModelForSequenceClassification,
+        QEFFAutoModelForSpeechSeq2Seq,
     )
     from QEfficient.peft.lora import QEffAutoLoraModelForCausalLM
 
@@ -1732,10 +1737,7 @@ def get_hf_model(
             del args["qaic_config"]
     if model_config.runner_type == "pooling" and not model_config.is_multimodal_model:
         _task = (override_qaic_config or {}).get("task", None)
-        if _task in ("score", "classify"):
-            model_type = "seq_classify"
-        else:
-            model_type = "encode"
+        model_type = "seq_classify" if _task in ("score", "classify") else "encode"
         del args["continuous_batching"]
         del args["qaic_config"]
         del args["kv_offload"]
@@ -1985,7 +1987,8 @@ def _get_qaic_compile_config(
             cfg["prefill_seq_len"] = 1
 
         if kv_offload:
-            # Dual QPC approach: select which QPC to load based on which path is skipped.
+            # Dual QPC approach: select which QPC to load based on which path
+            # is skipped.
             skip_lang = cfg.get("skip_lang", False)
             skip_vision = cfg.get("skip_vision", False)
             if not skip_lang and not skip_vision:

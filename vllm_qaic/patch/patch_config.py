@@ -6,7 +6,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Adapted from vllm/vllm/config/cache.py
 
-
 from typing import Literal
 
 import torch

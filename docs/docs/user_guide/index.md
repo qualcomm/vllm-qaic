@@ -45,44 +45,44 @@ Two execution paths are supported:
 
 <div class="grid cards" markdown>
 
--   :bar_chart:{ .lg .middle } **Support Matrix**
+- :bar_chart:{ .lg .middle } **Support Matrix**
 
-    ---
+  ---
 
-    Feature availability across AOT and Eager execution modes.
+  Feature availability across AOT and Eager execution modes.
 
-    [:octicons-arrow-right-24: Support Matrix](features/index.md)
+  [:octicons-arrow-right-24: Support Matrix](features/index.md)
 
--   :brain:{ .lg .middle } **Supported Models**
+- :brain:{ .lg .middle } **Supported Models**
 
-    ---
+  ---
 
-    20+ validated models across text, vision, embedding, and audio.
+  20+ validated models across text, vision, embedding, and audio.
 
-    [:octicons-arrow-right-24: AOT Models](models/supported_models_aot.md) · [:octicons-arrow-right-24: Eager Models](models/supported_models_eager.md)
+  [:octicons-arrow-right-24: AOT Models](models/supported_models_aot.md) · [:octicons-arrow-right-24: Eager Models](models/supported_models_eager.md)
 
--   :globe_with_meridians:{ .lg .middle } **Serving**
+- :globe_with_meridians:{ .lg .middle } **Serving**
 
-    ---
+  ---
 
-    Online API server (OpenAI-compatible) and offline batch inference.
+  Online API server (OpenAI-compatible) and offline batch inference.
 
-    [:octicons-arrow-right-24: Online Serving](serving/online_serving.md) · [:octicons-arrow-right-24: Offline](serving/offline_inference.md)
+  [:octicons-arrow-right-24: Online Serving](serving/online_serving.md) · [:octicons-arrow-right-24: Offline](serving/offline_inference.md)
 
--   :zap:{ .lg .middle } **Features**
+- :zap:{ .lg .middle } **Features**
 
-    ---
+  ---
 
-    Speculative decoding, quantization, multimodal, disaggregated serving, LoRA.
+  Speculative decoding, quantization, multimodal, disaggregated serving, LoRA.
 
-    [:octicons-arrow-right-24: Speculative Decoding](features/speculative_decoding.md)
+  [:octicons-arrow-right-24: Speculative Decoding](features/speculative_decoding.md)
 
--   :gear:{ .lg .middle } **Configuration**
+- :gear:{ .lg .middle } **Configuration**
 
-    ---
+  ---
 
-    Engine arguments, environment variables, and device management.
+  Engine arguments, environment variables, and device management.
 
-    [:octicons-arrow-right-24: Engine Args](configuration/engine_args.md)
+  [:octicons-arrow-right-24: Engine Args](configuration/engine_args.md)
 
 </div>

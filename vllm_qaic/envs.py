@@ -7,12 +7,7 @@ import os
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from vllm.envs import (
-    environment_variables,
-    maybe_convert_bool,
-    maybe_convert_int,
-)
-
+from vllm.envs import environment_variables, maybe_convert_bool, maybe_convert_int
 
 if TYPE_CHECKING:
     VLLM_QAIC_COMPILER_ARGS: str | None = None

@@ -608,7 +608,8 @@ def main(args):
             # been seen, vision embeddings are returned directly from cache
             # without needing to run the encoder on device.
             print(
-                "Sending a second batch of requests with empty media and matching UUIDs."
+                "Sending a second batch of requests with empty media and "
+                "matching UUIDs."
             )
             with time_counter(args.time_generate):
                 outputs = llm_vision.encode(

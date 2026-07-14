@@ -2,7 +2,6 @@
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 # ------------------------------------------------------------------
-
 """
 QaicCache KV Cache Connector for Disaggregated Serving
 
@@ -49,7 +48,6 @@ from qaic_disagg.kv_handoff.protocol import (
     QaicKvHandOffPutReq,
     QaicKvHandOffReqType,
 )
-
 from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -92,7 +90,7 @@ class ReqMeta:
     is_prefill_partial: bool
     # Block Id of the request
     block_id: int | None = None
-    # Keeping List[str] for backward compatibilty with QAIC handoff server;
+    # Keeping List[str] for backward compatibility with QAIC handoff server;
     # even though will store only KV shm name.
     kv_handoff_metadata: list[str] | None = None
 
@@ -184,7 +182,7 @@ class ShmBuffer:
                 self.name = self.shared_memory.name
             except Exception as e:
                 raise ValueError(
-                    "Exception occured during creation of shared memory!"
+                    "Exception occurred during creation of shared memory!"
                 ) from e
         else:
             # we are opening an existing buffer
@@ -544,7 +542,7 @@ class QaicConnector(KVConnectorBase_V1):
         paged buffer.
 
         This interface will be useful for layer-by-layer pipelining.
-        NOTE: Currently KV cache tranfer is not managed layer by layer.
+        NOTE: Currently KV cache transfer is not managed layer by layer.
 
         Args:
             layer_name: the name of that layer
@@ -616,7 +614,7 @@ class QaicConnector(KVConnectorBase_V1):
         from save_kv_layer is complete before finishing the forward.
 
         This prevents overwrites of paged KV buffer before saving done.
-        NOTE: Currently aysc KV cache tranfer is not supported.
+        NOTE: Currently aysc KV cache transfer is not supported.
         """
         return
 

@@ -22,7 +22,6 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from torch import nn
-
 from vllm import envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig, set_current_vllm_config
@@ -191,7 +190,7 @@ class QaicAsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
             sampler_output = mr._make_sampler_output(
                 torch.zeros((len(self._input_batch_req_ids), 1), dtype=torch.int64)
             )
-            # 3. Discard samped tokens for partial prefills
+            # 3. Discard sampled tokens for partial prefills
             kv_connector_output = self._kv_connector_output
             discard_sampled_tokens_req_indices = np.nonzero(
                 state.discard_request_mask_np
@@ -600,22 +599,22 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 prev_draft_token_indices.extend(range(start, start + draft_len))
                 indices_match &= prev_index == flattened_index
                 max_flattened_index = max(max_flattened_index, flattened_index)
-        num_commmon_tokens = len(sample_flattened_indices)
-        if num_commmon_tokens == 0:
+        num_common_tokens = len(sample_flattened_indices)
+        if num_common_tokens == 0:
             # No requests in common with the previous iteration
             # So input_ids.cpu will have all the input ids.
             return
-        if indices_match and max_flattened_index == (num_commmon_tokens - 1):
+        if indices_match and max_flattened_index == (num_common_tokens - 1):
             # Common-case optimization: the batch is unchanged
             # and no reordering happened.
             # The indices are both the same permutation of 0..N-1 so
             # we can copy directly using a single slice.
-            self.input_ids.cpu[:num_commmon_tokens].copy_(
-                prev_sampled_token_ids[:num_commmon_tokens, 0],
+            self.input_ids.cpu[:num_common_tokens].copy_(
+                prev_sampled_token_ids[:num_common_tokens, 0],
                 non_blocking=True,
             )
             if self.enable_prompt_embeds:
-                self.is_token_ids.cpu[:num_commmon_tokens] = True
+                self.is_token_ids.cpu[:num_common_tokens] = True
             return
         # Upload the index tensors asynchronously so the scatter can be non-blocking.
         sampled_tokens_index_tensor = torch.tensor(

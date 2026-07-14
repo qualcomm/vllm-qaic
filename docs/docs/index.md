@@ -96,53 +96,53 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 <div class="grid cards" markdown>
 
--   :rocket:{ .lg .middle } **Quick Start**
+- :rocket:{ .lg .middle } **Quick Start**
 
-    ---
+  ---
 
-    Get an OpenAI-compatible server running in minutes with Docker.
+  Get an OpenAI-compatible server running in minutes with Docker.
 
-    [:octicons-arrow-right-24: Quickstart](getting_started/quickstart.md)
+  [:octicons-arrow-right-24: Quickstart](getting_started/quickstart.md)
 
--   :bar_chart:{ .lg .middle } **Support Matrix**
+- :bar_chart:{ .lg .middle } **Support Matrix**
 
-    ---
+  ---
 
-    Feature availability across AOT and Eager execution modes.
+  Feature availability across AOT and Eager execution modes.
 
-    [:octicons-arrow-right-24: Support Matrix](user_guide/features/index.md)
+  [:octicons-arrow-right-24: Support Matrix](user_guide/features/index.md)
 
--   :brain:{ .lg .middle } **Supported Models**
+- :brain:{ .lg .middle } **Supported Models**
 
-    ---
+  ---
 
-    20+ validated models across text, vision, embedding, and audio tasks.
+  20+ validated models across text, vision, embedding, and audio tasks.
 
-    [:octicons-arrow-right-24: AOT Models](user_guide/models/supported_models_aot.md) · [:octicons-arrow-right-24: Eager Models](user_guide/models/supported_models_eager.md)
+  [:octicons-arrow-right-24: AOT Models](user_guide/models/supported_models_aot.md) · [:octicons-arrow-right-24: Eager Models](user_guide/models/supported_models_eager.md)
 
--   :zap:{ .lg .middle } **Features**
+- :zap:{ .lg .middle } **Features**
 
-    ---
+  ---
 
-    SpD, quantization, disaggregated serving, multimodal, LoRA, and more.
+  SpD, quantization, disaggregated serving, multimodal, LoRA, and more.
 
-    [:octicons-arrow-right-24: Features](user_guide/features/speculative_decoding.md)
+  [:octicons-arrow-right-24: Features](user_guide/features/speculative_decoding.md)
 
--   :gear:{ .lg .middle } **Configuration**
+- :gear:{ .lg .middle } **Configuration**
 
-    ---
+  ---
 
-    Engine args, env vars, and device management for your workload.
+  Engine args, env vars, and device management for your workload.
 
-    [:octicons-arrow-right-24: Configuration](user_guide/configuration/engine_args.md)
+  [:octicons-arrow-right-24: Configuration](user_guide/configuration/engine_args.md)
 
--   :construction_worker:{ .lg .middle } **Developer Guide**
+- :construction_worker:{ .lg .middle } **Developer Guide**
 
-    ---
+  ---
 
-    Architecture, profiling, testing, and contribution guidelines.
+  Architecture, profiling, testing, and contribution guidelines.
 
-    [:octicons-arrow-right-24: Developer Guide](developer_guide/index.md)
+  [:octicons-arrow-right-24: Developer Guide](developer_guide/index.md)
 
 </div>
 

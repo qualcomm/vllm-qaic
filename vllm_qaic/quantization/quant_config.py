@@ -10,9 +10,7 @@ from typing import Any
 
 import torch
 from vllm.model_executor.layers.quantization import register_quantization_config
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig,
-)
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 
 from vllm_qaic.utils import QAIC_QUANTIZATION_LIST, QAIC_QUANTIZATION_METHOD
 

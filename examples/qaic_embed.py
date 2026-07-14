@@ -9,8 +9,12 @@
 from vllm import LLM
 
 # Set example specific arguments
-# For cpu pooling pass 'override_qaic_config={"pooling_device":"cpu"}' and for qaic pooling an example would be: 'override_qaic_config={"pooling_device":"qaic", "pooling_method":"mean"}'
-# To compile for multiple sequence lengths pass multi_seq_lens in the following format: 'override_qaic_config={"embed_seq_len":[32,512]}'. Always include max_model_len in embed_seq_len.
+# For cpu pooling pass 'override_qaic_config={"pooling_device":"cpu"}' and for
+# qaic pooling an example would be:
+# 'override_qaic_config={"pooling_device":"qaic", "pooling_method":"mean"}'
+# To compile for multiple sequence lengths pass multi_seq_lens in the following
+# format: 'override_qaic_config={"embed_seq_len":[32,512]}'. Always include
+# max_model_len in embed_seq_len.
 
 
 def print_embeds(prompts, outputs):

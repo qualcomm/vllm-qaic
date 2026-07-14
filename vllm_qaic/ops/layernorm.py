@@ -8,11 +8,7 @@
 
 import torch
 import torch.nn.functional as F
-from vllm.model_executor.layers.layernorm import (
-    GemmaRMSNorm,
-    RMSNorm,
-    RMSNormGated,
-)
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm, RMSNormGated
 
 from vllm_qaic._custom_ops import rms_norm_hexagon as _call_hexagon_rms_norm
 
