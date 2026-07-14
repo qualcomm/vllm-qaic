@@ -35,6 +35,11 @@ repos:
     args: [--config, .pymarkdown.json, fix]
 - repo: local
   hooks:
+  - id: check-qualcomm-header
+    name: Check Qualcomm headers
+    entry: python tools/pre_commit/check_qualcomm_header.py
+    language: python
+    types: [python]
   - id: mypy-local
     name: Run mypy for local Python installation
     entry: tools/mypy.sh 0 "local"
