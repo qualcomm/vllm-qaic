@@ -1,0 +1,44 @@
+default_install_hook_types:
+  - pre-commit
+  - commit-msg
+default_stages:
+  - pre-commit # Run locally
+  - manual # Run in CI
+exclude: '^(build|examples)/.*'
+repos:
+- repo: https://github.com/PyCQA/isort
+  rev: 5.13.2
+  hooks:
+  - id: isort
+    args: [--settings-path, pyproject.toml]
+- repo: https://github.com/google/yapf
+  rev: v0.43.0
+  hooks:
+  - id: yapf
+    args: [--in-place, --recursive]
+- repo: https://github.com/astral-sh/ruff-pre-commit
+  rev: v0.14.0
+  hooks:
+  - id: ruff-check
+    args: [--output-format, github, --fix]
+  - id: ruff-format
+- repo: https://github.com/crate-ci/typos
+  rev: v1.38.1
+  hooks:
+  - id: typos
+    args: [--config, typos.toml, --force-exclude]
+- repo: https://github.com/jackdewinter/pymarkdown
+  rev: v0.9.29
+  hooks:
+  - id: pymarkdown
+    exclude: '.*\.inc\.md'
+    args: [--config, .pymarkdown.json, fix]
+- repo: local
+  hooks:
+  - id: mypy-local
+    name: Run mypy for local Python installation
+    entry: tools/mypy.sh 0 "local"
+    language: python
+    types: [python]
+    additional_dependencies: [mypy==1.11.1, types-PyYAML, types-regex, types-requests, types-setuptools]
+    stages: [manual] # Don't run in pre-commit, only when invoked explicitly

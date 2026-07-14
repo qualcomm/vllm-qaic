@@ -1,0 +1,11 @@
+{
+  "plugins": {
+    "md013": { "enabled": false },
+    "md004": { "style": "sublist" },
+    "md041": { "enabled": false },
+    "md007": { "indent": 4, "start_indented": true },
+    "md033": { "enabled": false },
+    "md046": { "enabled": false },
+    "md024": { "allow_different_nesting": true }
+  }
+}
