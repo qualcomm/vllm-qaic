@@ -120,10 +120,6 @@ them explicitly when needed:
 pre-commit run markdownlint --hook-stage manual --all-files
 ```
 
-> Note: `isort`, `yapf`, and `pymarkdown` were previously used but have been
-> removed. `ruff` now covers linting/formatting/import sorting, and
-> `markdownlint` replaces `pymarkdown` for docs.
-
 ## Pull Request Process
 
 1. Fork the repository and clone your fork
