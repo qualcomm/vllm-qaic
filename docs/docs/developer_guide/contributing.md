@@ -85,22 +85,44 @@ pip install -e . --no-build-isolation
 
 ### Pre-commit hooks
 
-Formatting and lint checks (isort, yapf, ruff, typos, pymarkdown, Qualcomm
-license headers, and DCO sign-off) are enforced with
-[pre-commit](https://pre-commit.com/). Install and enable the hooks once after
-cloning:
+Formatting and lint checks are enforced with
+[pre-commit](https://pre-commit.com/), aligned with the upstream vLLM project.
+The following hooks run automatically on `git commit`:
+
+- `ruff-check` / `ruff-format` — Python linting and formatting (also handles
+  import sorting).
+- `typos` — spell checking (config in `typos.toml`).
+- `clang-format` — C/C++/CUDA formatting for `csrc/` (config in `.clang-format`).
+- `actionlint` — GitHub Actions workflow linting.
+- `check-qualcomm-header` — verifies the Qualcomm license header on Python files.
+- `check-filenames` — rejects filenames containing spaces.
+- `mypy-local` — static type checking of `vllm_qaic` and `examples`.
+- `signoff-commit` — appends the DCO `Signed-off-by` trailer at commit time.
+
+Install and enable the hooks once after cloning:
 
 ```bash
 pip install -r requirements/lint.txt
 pre-commit install
 ```
 
-The hooks then run automatically on `git commit`. To run all checks against the
-entire repository manually:
+To run all commit-stage checks against the entire repository manually:
 
 ```bash
 pre-commit run --all-files
 ```
+
+Some hooks only run in CI (the `manual` stage) and are skipped on commit. Run
+them explicitly when needed:
+
+```bash
+# Markdown linting (config in .markdownlint.yaml)
+pre-commit run markdownlint --hook-stage manual --all-files
+```
+
+> Note: `isort`, `yapf`, and `pymarkdown` were previously used but have been
+> removed. `ruff` now covers linting/formatting/import sorting, and
+> `markdownlint` replaces `pymarkdown` for docs.
 
 ## Pull Request Process
 

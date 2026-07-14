@@ -6,7 +6,7 @@
 #include "grouped_topk_router_common.h"
 
 QAIC_KERNEL_API int32_t
-multinsp_multithreaded_topk_router(const AicJitEntryPointConfig *entryConfig,
-                                   const AicJitPointerArray *pointerArray) {
+multinsp_multithreaded_topk_router(const AicJitEntryPointConfig* entryConfig,
+                                   const AicJitPointerArray* pointerArray) {
   return grouped_topk_router::regular_kernel_main(entryConfig, pointerArray);
 }
