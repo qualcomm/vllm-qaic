@@ -19,10 +19,8 @@ def register_qaic_customop():
 
     from vllm.model_executor.custom_op import CustomOp
 
+    # relative import for cross-compatibility in plugin and fork
     from .activation import QAicSiluAndMul
-
-    # relative import for cross-compatibility in
-    # plugin and fork
     from .grouped_topk_router import register_qaic_grouped_topk_router
     from .layernorm import QAicGemmaRMSNorm, QAicRMSNorm, QAicRMSNormGated
     from .mm_encoder_attention import QAicMMEncoderAttention
