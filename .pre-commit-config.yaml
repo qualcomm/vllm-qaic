@@ -17,6 +17,22 @@ repos:
   hooks:
   - id: typos
     args: [--config, typos.toml, --force-exclude]
+- repo: https://github.com/pre-commit/mirrors-clang-format
+  rev: v21.1.2
+  hooks:
+  - id: clang-format
+    types_or: [c++, c, cuda]
+    args: [--style=file, --verbose]
+- repo: https://github.com/igorshubovych/markdownlint-cli
+  rev: v0.45.0
+  hooks:
+  - id: markdownlint
+    exclude: '.*\.inc\.md'
+    stages: [manual] # Only run in CI
+- repo: https://github.com/rhysd/actionlint
+  rev: v1.7.7
+  hooks:
+  - id: actionlint
 - repo: local
   hooks:
   - id: check-qualcomm-header
@@ -36,10 +52,19 @@ repos:
     language: system
     verbose: true
     stages: [commit-msg]
+  - id: check-filenames
+    name: Check for spaces in all filenames
+    entry: bash
+    args:
+      - -c
+      - 'git ls-files | grep " " && echo "Filenames should not contain spaces!" && exit 1 || exit 0'
+    language: system
+    always_run: true
+    pass_filenames: false
   - id: mypy-local
     name: Run mypy for local Python installation
-    entry: tools/mypy.sh 0 "local"
+    entry: tools/mypy.sh 0 "3.10"
     language: python
     types: [python]
     additional_dependencies: [mypy==1.11.1, types-PyYAML, types-regex, types-requests, types-setuptools]
-    stages: [manual] # Don't run in pre-commit, only when invoked explicitly
+    stages: [pre-commit] # Run locally on every commit
