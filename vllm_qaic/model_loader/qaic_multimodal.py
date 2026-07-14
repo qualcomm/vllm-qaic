@@ -9,7 +9,6 @@ from collections.abc import Iterator, Set
 
 import numpy as np
 import torch
-
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.pooler.abstract import Pooler
@@ -66,7 +65,7 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
 
             # TODO: need to update if we can support reranker
             # TODO: Add additional args for vision embedding models
-            self.pooler = VisionEncoderPooler()
+            self._pooler = VisionEncoderPooler()
 
         self.default_mm_kwargs: dict[str, np.ndarray] | None = None
         self.video_pruning_rate: float | None = getattr(
@@ -355,7 +354,8 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
             else:
                 raise ValueError(f"Unsupported pixel_values type {type(pixel_values)}")
         elif "input_features" in kwargs:
-            # Audio model. Currently only whisper is supported with a single audio input.
+            # Audio model. Currently only whisper is supported with a single
+            # audio input.
             num_mm_inputs = 1
         else:
             raise ValueError(f"Unsupported multimodal inputs {kwargs.keys()}")

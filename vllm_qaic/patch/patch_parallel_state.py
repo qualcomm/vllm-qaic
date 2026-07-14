@@ -5,7 +5,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # SPDX-License-Identifier: Apache-2.0
 # Adapted from vllm/vllm/distributed/parallel_state.py
-
 """This patch is required for AOT, as the torch device must be set to CPU."""
 
 import torch
@@ -81,9 +80,7 @@ class QaicGroupCoordinator(GroupCoordinator):
                 unique_name=self.unique_name,
             )
 
-        from vllm.distributed.device_communicators.shm_broadcast import (
-            MessageQueue,
-        )
+        from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
 
         self.mq_broadcaster: MessageQueue | None = None
         if use_message_queue_broadcaster and self.world_size > 1:

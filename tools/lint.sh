@@ -95,9 +95,7 @@ fi
 
 # -------------------------------------------------------------------------
 # 3. ruff — linting
-#    [tool.ruff] + [tool.ruff.lint] in pyproject.toml:
-#      line-length = 90
-#      exclude = ["tests/**"]
+#    [tool.ruff.lint] in pyproject.toml:
 #      select = [E, F, UP, B, SIM, G]
 #      ignore = [F405, F403, E731, B007, UP032]
 # -------------------------------------------------------------------------

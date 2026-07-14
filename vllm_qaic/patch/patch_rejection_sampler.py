@@ -5,7 +5,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # SPDX-License-Identifier: Apache-2.0
 # Adapted from vllm/vllm/v1/sample/rejection_sampler.py
-
 """Monkey-patch for vllm.v1.sample.rejection_sampler.RejectionSampler.
 
 QAIC-specific optimizations in the rejection-sampling forward pass:
@@ -26,7 +25,6 @@ QAIC-specific optimizations in the rejection-sampling forward pass:
 from dataclasses import replace
 
 import torch
-
 from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.rejection_sampler import (
     MAX_SPEC_LEN,

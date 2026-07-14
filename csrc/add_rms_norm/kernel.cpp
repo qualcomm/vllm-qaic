@@ -28,17 +28,17 @@ static inline uint32_t align_up_u32(uint32_t x, uint32_t a) {
   return (x + a - 1) & ~(a - 1);
 }
 
-static inline uint8_t *align_up_ptr(uint8_t *p, uintptr_t a) {
+static inline uint8_t* align_up_ptr(uint8_t* p, uintptr_t a) {
   uintptr_t v = (uintptr_t)p;
   v = (v + a - 1) & ~(a - 1);
-  return (uint8_t *)v;
+  return (uint8_t*)v;
 }
 
 static QShimUDmaHandle qaic_linear_udma_submit(uint32_t threadId, AicJitPtr src,
                                                uint32_t size, AicJitPtr dst,
                                                uint32_t udmaDescAttrsOrder,
                                                bool requireHandle,
-                                               uint32_t *status) {
+                                               uint32_t* status) {
   AicJitUdmaDescCommonAttrs udmaDescAttrs = {};
   udmaDescAttrs.order = udmaDescAttrsOrder;
   // udmaDescAttrs.bypassOverride = 0;
@@ -47,8 +47,8 @@ static QShimUDmaHandle qaic_linear_udma_submit(uint32_t threadId, AicJitPtr src,
                                requireHandle, status);
 }
 
-static inline uint32_t dma_copy_wait(uint32_t threadId, void *dst,
-                                     const void *src, uint32_t bytes,
+static inline uint32_t dma_copy_wait(uint32_t threadId, void* dst,
+                                     const void* src, uint32_t bytes,
                                      uint32_t order = 0) {
   uint32_t status = JIT_DEV_STATUS_SUCCESS;
 
@@ -62,12 +62,12 @@ static inline uint32_t dma_copy_wait(uint32_t threadId, void *dst,
   return qshimUDmaWait(h);
 }
 
-static inline QShimUDmaHandle dma_copy_submit(uint32_t threadId, void *dst,
-                                              const void *src, uint32_t bytes,
-                                              uint32_t *status,
+static inline QShimUDmaHandle dma_copy_submit(uint32_t threadId, void* dst,
+                                              const void* src, uint32_t bytes,
+                                              uint32_t* status,
                                               uint32_t order = 0) {
-  return qaic_linear_udma_submit(threadId, (AicJitPtr)src, bytes, (AicJitPtr)dst,
-                                 order, true, status);
+  return qaic_linear_udma_submit(threadId, (AicJitPtr)src, bytes,
+                                 (AicJitPtr)dst, order, true, status);
 }
 
 // Per-row fused add+RMS-norm kernel (FP16).
@@ -75,12 +75,11 @@ static inline QShimUDmaHandle dma_copy_submit(uint32_t threadId, void *dst,
 // Threads within a core stripe-mine the row in chunks of elems_per_vec.
 // partial_sums[0..threadsPerCore-1] is a VTCM scratch shared across threads.
 extern "C" void _single_nsp_rms_norm(
-    const float16 *attn_out, const float16 *x, const float16 *weight,
-    float16 *out, // residual output (attn_out + x), written in phase 1
-    float16 *dst, // normalized output, written in phase 2
+    const float16* attn_out, const float16* x, const float16* weight,
+    float16* out,  // residual output (attn_out + x), written in phase 1
+    float16* dst,  // normalized output, written in phase 2
     float epsilon, int N, uint32_t threadID, uint32_t localThreadID,
-    uint32_t threadsPerCore, float *partial_sums) {
-
+    uint32_t threadsPerCore, float* partial_sums) {
   constexpr int elems_per_vec = sizeof(HVX_Vector) / sizeof(float16);
   const int vlen = N / elems_per_vec;
   float local_sum_f32 = 0.0f;
@@ -88,17 +87,17 @@ extern "C" void _single_nsp_rms_norm(
 
   // Phase 1: add residual and accumulate sum-of-squares for RMS.
   for (int i = (int)localThreadID; i < vlen; i += (int)threadsPerCore) {
-    const float16 *src1_ptr = attn_out + i * elems_per_vec;
-    const float16 *src2_ptr = x + i * elems_per_vec;
-    float16 *tmp_ptr = out + i * elems_per_vec;
+    const float16* src1_ptr = attn_out + i * elems_per_vec;
+    const float16* src2_ptr = x + i * elems_per_vec;
+    float16* tmp_ptr = out + i * elems_per_vec;
 
-    HVX_Vector vec1 = *(HVX_Vector *)src1_ptr;
-    HVX_Vector vec2 = *(HVX_Vector *)src2_ptr;
+    HVX_Vector vec1 = *(HVX_Vector*)src1_ptr;
+    HVX_Vector vec2 = *(HVX_Vector*)src2_ptr;
 
     HVX_Vector sum_qf = Q6_Vqf16_vadd_VhfVhf(vec1, vec2);
     HVX_Vector sum_hf = Q6_Vhf_equals_Vqf16(sum_qf);
 
-    *(HVX_Vector *)tmp_ptr = sum_hf;
+    *(HVX_Vector*)tmp_ptr = sum_hf;
 
     HVX_VectorPair sq_qf32_pair = Q6_Wqf32_vmpy_Vqf16Vqf16(sum_qf, sum_qf);
     HVX_Vector sq_f32_lo = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(sq_qf32_pair));
@@ -136,18 +135,18 @@ extern "C" void _single_nsp_rms_norm(
   HVX_Vector inv_rms_vec = Q6_V_vsplat_R(inv_rms_bits);
 
   for (int i = (int)localThreadID; i < vlen; i += (int)threadsPerCore) {
-    float16 *residual_ptr = out + i * elems_per_vec;
-    const float16 *weight_ptr = weight + i * elems_per_vec;
-    float16 *dst_ptr = dst + i * elems_per_vec;
-    HVX_Vector residual_hf = *(HVX_Vector *)residual_ptr;
-    HVX_Vector w_v = *(HVX_Vector *)weight_ptr;
+    float16* residual_ptr = out + i * elems_per_vec;
+    const float16* weight_ptr = weight + i * elems_per_vec;
+    float16* dst_ptr = dst + i * elems_per_vec;
+    HVX_Vector residual_hf = *(HVX_Vector*)residual_ptr;
+    HVX_Vector w_v = *(HVX_Vector*)weight_ptr;
 
     HVX_Vector norm_qf = Q6_Vqf16_vmpy_VhfVhf(residual_hf, inv_rms_vec);
 
     HVX_Vector out_qf = Q6_Vqf16_vmpy_Vqf16Vhf(norm_qf, w_v);
     HVX_Vector out_hf = Q6_Vhf_equals_Vqf16(out_qf);
 
-    *(HVX_Vector *)dst_ptr = out_hf;
+    *(HVX_Vector*)dst_ptr = out_hf;
   }
 
   sync_hvx_threads(threadID, threadsPerCore);
@@ -158,14 +157,14 @@ extern "C" void _single_nsp_rms_norm(
 // [5]=params{eps,M,N} Each core owns a stripe of rows (coreID, coreID+numCores,
 // ...). Double-buffered DMA (slots 0/1) overlaps prefetch of row m+1 with
 // compute on row m.
-QAIC_KERNEL_API uint32_t rms_norm_multi_nsp(const AicJitEntryPointConfig *cfg,
-                                            const AicJitPointerArray *ptrs) {
-  const float16 *attn_out_ddr = (const float16 *)ptrs->pointers[0];
-  const float16 *x_ddr = (const float16 *)ptrs->pointers[1];
-  const float16 *weight_ddr = (const float16 *)ptrs->pointers[2];
-  float16 *out_ddr = (float16 *)ptrs->pointers[3];
-  float16 *dst_ddr = (float16 *)ptrs->pointers[4];
-  const float *params = (const float *)ptrs->pointers[5];
+QAIC_KERNEL_API uint32_t rms_norm_multi_nsp(const AicJitEntryPointConfig* cfg,
+                                            const AicJitPointerArray* ptrs) {
+  const float16* attn_out_ddr = (const float16*)ptrs->pointers[0];
+  const float16* x_ddr = (const float16*)ptrs->pointers[1];
+  const float16* weight_ddr = (const float16*)ptrs->pointers[2];
+  float16* out_ddr = (float16*)ptrs->pointers[3];
+  float16* dst_ddr = (float16*)ptrs->pointers[4];
+  const float* params = (const float*)ptrs->pointers[5];
 
   float epsilon = params[0];
   int M = (int)params[1];
@@ -217,36 +216,36 @@ QAIC_KERNEL_API uint32_t rms_norm_multi_nsp(const AicJitEntryPointConfig *cfg,
     return JIT_DEV_ERROR_INVALID_PARAMETER;
   }
 
-  uint8_t *vtcmBase = qshimGetBaseVtcmAddr();
-  uint8_t *vtcmPtr = align_up_ptr(vtcmBase, kAlign);
+  uint8_t* vtcmBase = qshimGetBaseVtcmAddr();
+  uint8_t* vtcmPtr = align_up_ptr(vtcmBase, kAlign);
 
-  float16 *attn_vtcm[2];
-  attn_vtcm[0] = (float16 *)vtcmPtr;
+  float16* attn_vtcm[2];
+  attn_vtcm[0] = (float16*)vtcmPtr;
   vtcmPtr += rowBytesAligned;
-  attn_vtcm[1] = (float16 *)vtcmPtr;
-  vtcmPtr += rowBytesAligned;
-
-  float16 *x_vtcm[2];
-  x_vtcm[0] = (float16 *)vtcmPtr;
-  vtcmPtr += rowBytesAligned;
-  x_vtcm[1] = (float16 *)vtcmPtr;
+  attn_vtcm[1] = (float16*)vtcmPtr;
   vtcmPtr += rowBytesAligned;
 
-  float16 *weight_vtcm = (float16 *)vtcmPtr;
+  float16* x_vtcm[2];
+  x_vtcm[0] = (float16*)vtcmPtr;
   vtcmPtr += rowBytesAligned;
-  float16 *out_vtcm = (float16 *)vtcmPtr;
-  vtcmPtr += rowBytesAligned;
-  float16 *dst_vtcm = (float16 *)vtcmPtr;
+  x_vtcm[1] = (float16*)vtcmPtr;
   vtcmPtr += rowBytesAligned;
 
-  float *partial_sums = (float *)align_up_ptr(vtcmPtr, kAlign);
-  vtcmPtr = (uint8_t *)partial_sums + partialBytes;
+  float16* weight_vtcm = (float16*)vtcmPtr;
+  vtcmPtr += rowBytesAligned;
+  float16* out_vtcm = (float16*)vtcmPtr;
+  vtcmPtr += rowBytesAligned;
+  float16* dst_vtcm = (float16*)vtcmPtr;
+  vtcmPtr += rowBytesAligned;
 
-  uint32_t *status_vtcm = (uint32_t *)align_up_ptr(vtcmPtr, kAlign);
-  vtcmPtr = (uint8_t *)status_vtcm + statusBytes;
+  float* partial_sums = (float*)align_up_ptr(vtcmPtr, kAlign);
+  vtcmPtr = (uint8_t*)partial_sums + partialBytes;
 
-  QShimUDmaHandle *prefetch_handle_vtcm =
-      (QShimUDmaHandle *)align_up_ptr(vtcmPtr, kAlign);
+  uint32_t* status_vtcm = (uint32_t*)align_up_ptr(vtcmPtr, kAlign);
+  vtcmPtr = (uint8_t*)status_vtcm + statusBytes;
+
+  QShimUDmaHandle* prefetch_handle_vtcm =
+      (QShimUDmaHandle*)align_up_ptr(vtcmPtr, kAlign);
 
   // Weight is the same for all rows; load it once before the main loop
   if (localThreadID == 0) {
@@ -293,8 +292,8 @@ QAIC_KERNEL_API uint32_t rms_norm_multi_nsp(const AicJitEntryPointConfig *cfg,
     const int cur_slot = iter & 1;
     const int next_slot = cur_slot ^ 1;
 
-    float16 *row_dst_ddr = validRow ? (dst_ddr + m * N) : dst_ddr;
-    float16 *row_out_ddr = validRow ? (out_ddr + m * N) : out_ddr;
+    float16* row_dst_ddr = validRow ? (dst_ddr + m * N) : dst_ddr;
+    float16* row_out_ddr = validRow ? (out_ddr + m * N) : out_ddr;
 
     // Thread 0 submits async DMA for the next row while all threads compute the
     // current row. attn prefetch is waited immediately (sequential); x prefetch

@@ -10,7 +10,6 @@ from queue import Queue
 from typing import Any
 
 import numpy as np
-
 from vllm.logger import init_logger
 
 try:
@@ -448,8 +447,8 @@ class QAICInferenceSession:
             contiguous = np.ascontiguousarray(buffer)
             if contiguous is not buffer:
                 logger.warning(
-                    "Non-contingous buffer used while set_buffers."
-                    " Copying data to a continguous buffer."
+                    "Non-contiguous buffer used while set_buffers."
+                    " Copying data to a contiguous buffer."
                 )
                 buffers[buffer_name] = contiguous
             buffer = contiguous

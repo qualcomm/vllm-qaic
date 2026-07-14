@@ -28,7 +28,7 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
 
 Profiling produces per-iteration trace directories:
 
-```
+```text
 $VLLM_TORCH_PROFILER_DIR/
   lrt_trace_iter0_pid0/
   lrt_trace_iter1_pid0/

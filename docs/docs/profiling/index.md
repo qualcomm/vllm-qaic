@@ -1,6 +1,6 @@
 ---
 search:
-  exclude: true
+exclude: true
 ---
 
 # Profiling

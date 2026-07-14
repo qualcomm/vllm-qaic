@@ -160,28 +160,28 @@ vllm serve TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
 
 <div class="grid cards" markdown>
 
--   :bar_chart: **Feature Matrix**
+- :bar_chart: **Feature Matrix**
 
-    See what's supported on your hardware
+  See what's supported on your hardware
 
-    [:octicons-arrow-right-24: Features](../user_guide/features/index.md)
+  [:octicons-arrow-right-24: Features](../user_guide/features/index.md)
 
--   :gear: **Configuration**
+- :gear: **Configuration**
 
-    Tune engine args for your workload
+  Tune engine args for your workload
 
-    [:octicons-arrow-right-24: Engine Args](../user_guide/configuration/engine_args.md)
+  [:octicons-arrow-right-24: Engine Args](../user_guide/configuration/engine_args.md)
 
--   :fast_forward: **Speculative Decoding**
+- :fast_forward: **Speculative Decoding**
 
-    Accelerate decode throughput with N-gram or draft models
+  Accelerate decode throughput with N-gram or draft models
 
-    [:octicons-arrow-right-24: SpD Guide](../user_guide/features/speculative_decoding.md)
+  [:octicons-arrow-right-24: SpD Guide](../user_guide/features/speculative_decoding.md)
 
--   :brain: **Supported Models**
+- :brain: **Supported Models**
 
-    Full list of validated models
+  Full list of validated models
 
-    [:octicons-arrow-right-24: Models](../user_guide/models/supported_models_aot.md)
+  [:octicons-arrow-right-24: Models](../user_guide/models/supported_models_aot.md)
 
 </div>

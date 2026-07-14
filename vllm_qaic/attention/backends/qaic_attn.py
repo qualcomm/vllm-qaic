@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from typing import ClassVar
 
 import torch
-
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
@@ -23,13 +22,8 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     is_quantized_kv_cache,
 )
-from vllm.v1.attention.backends.registry import (
-    AttentionBackendEnum,
-    register_backend,
-)
-from vllm.v1.attention.backends.utils import (
-    split_decodes_and_prefills,
-)
+from vllm.v1.attention.backends.registry import AttentionBackendEnum, register_backend
+from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
@@ -147,7 +141,8 @@ class QAicAttentionMetadataBuilder(AttentionMetadataBuilder[QAicAttentionMetadat
         self.isa = _get_attn_isa(self.dtype, self.block_size, self.head_dim)
 
     def update_req_ids(self, req_ids: list[str]) -> None:
-        """Called by the model runner before build() to supply the current batch's request IDs."""
+        """Called by the model runner before build() to supply the current
+        batch's request IDs."""
         self.current_req_ids = req_ids
 
     def build(
@@ -156,7 +151,6 @@ class QAicAttentionMetadataBuilder(AttentionMetadataBuilder[QAicAttentionMetadat
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> QAicAttentionMetadata:
-        num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
         max_seq_len = common_attn_metadata.max_seq_len
@@ -182,7 +176,6 @@ class QAicAttentionMetadataBuilder(AttentionMetadataBuilder[QAicAttentionMetadat
                 decode_threshold=self.reorder_batch_threshold,
                 require_uniform=True,
             )
-            num_reqs = num_decodes + num_prefills
 
         scheduler_metadata = None
 
@@ -353,6 +346,8 @@ class QAicAttentionBackendImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
+        assert attn_metadata is not None
+        assert output is not None
         req_ids = attn_metadata.req_ids
         if req_ids is None:
             # Fallback: no req_ids available, skip computation
@@ -494,6 +489,7 @@ class QAicAttentionBackendImpl(AttentionImpl):
         causal_attn = attn_type == AttentionType.DECODER
 
         sdpa_start_loc = attn_metadata.sdpa_start_loc  # .numpy()  # type: ignore
+        assert sdpa_start_loc is not None
         for i in range(len(attn_masks)):
             mask = attn_masks[i]
             start_q = sdpa_start_loc[i]

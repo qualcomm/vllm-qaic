@@ -9,7 +9,6 @@
 from typing import TYPE_CHECKING
 
 import numpy as np
-
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 

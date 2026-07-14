@@ -2,7 +2,6 @@
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 # ------------------------------------------------------------------
-
 """Register QAIC grouped top-k router overrides.
 
 The grouped router needs to override module/class routing behavior, not just a
@@ -14,9 +13,7 @@ layout as ``layernorm.py``.
 from __future__ import annotations
 
 import torch
-
 from vllm.model_executor.layers.fused_moe.router import grouped_topk_router
-
 
 _PATCH_APPLIED_ATTR = "_qaic_grouped_topk_router_patch_applied"
 _ORIGINAL_GROUPED_TOPK_ATTR = "_qaic_original_grouped_topk"

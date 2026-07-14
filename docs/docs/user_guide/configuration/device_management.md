@@ -6,7 +6,7 @@ Understanding and managing Qualcomm Cloud AI device topology.
 
 Each Cloud AI 100 Ultra card contains **4 QIDs** (Qualcomm device IDs), and each QID has **16 NSP cores**:
 
-```
+```text
 Cloud AI 100 Ultra Card (1 board serial)
 +-- QID 0  (16 NSP cores)
 +-- QID 1  (16 NSP cores)

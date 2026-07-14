@@ -36,30 +36,30 @@ enum class ScoreMode : int32_t {
 };
 
 // Convert the Python-facing score mode id into the kernel enum.
-inline bool score_mode_from_id(int32_t score_mode_id, ScoreMode *score_mode) {
+inline bool score_mode_from_id(int32_t score_mode_id, ScoreMode* score_mode) {
   switch (score_mode_id) {
-  case 0:
-    *score_mode = ScoreMode::kSoftmax;
-    return true;
-  case 1:
-    *score_mode = ScoreMode::kSoftmaxF32;
-    return true;
-  case 2:
-    *score_mode = ScoreMode::kSigmoid;
-    return true;
-  case 3:
-    *score_mode = ScoreMode::kSigmoidF32;
-    return true;
-  default:
-    return false;
+    case 0:
+      *score_mode = ScoreMode::kSoftmax;
+      return true;
+    case 1:
+      *score_mode = ScoreMode::kSoftmaxF32;
+      return true;
+    case 2:
+      *score_mode = ScoreMode::kSigmoid;
+      return true;
+    case 3:
+      *score_mode = ScoreMode::kSigmoidF32;
+      return true;
+    default:
+      return false;
   }
 }
 
 struct RouterTileParams {
-  const float16 *input;
-  const float16 *bias;
-  float *topk_weights;
-  int32_t *topk_ids;
+  const float16* input;
+  const float16* bias;
+  float* topk_weights;
+  int32_t* topk_ids;
   int32_t num_tokens;
   int32_t num_experts;
   int32_t num_groups;
@@ -71,8 +71,8 @@ struct RouterTileParams {
   ScoreMode score_mode;
   int32_t token_begin;
   int32_t token_end;
-  float16 *vtcm_scores;
-  float16 *vtcm_selection_scores;
+  float16* vtcm_scores;
+  float16* vtcm_selection_scores;
 };
 
 // Integer ceiling division used for work partitioning.
@@ -106,8 +106,8 @@ inline float sigmoid_f32(float x) { return 0.5F * tanhf(0.5F * x) + 0.5F; }
 inline HVX_Vector sigmoid_hf(HVX_Vector input_vhf) {
   static constexpr float16 one_hf = 1.0F;
   static constexpr float16 half_hf = 0.5F;
-  const HVX_Vector one_vhf = Q6_Vh_vsplat_R(*(const uint16_t *)&one_hf);
-  const HVX_Vector half_vhf = Q6_Vh_vsplat_R(*(const uint16_t *)&half_hf);
+  const HVX_Vector one_vhf = Q6_Vh_vsplat_R(*(const uint16_t*)&one_hf);
+  const HVX_Vector half_vhf = Q6_Vh_vsplat_R(*(const uint16_t*)&half_hf);
   const HVX_Vector half_input_vhf = Q6_Vhf_vmpy_VhfVhf(input_vhf, half_vhf);
   const HVX_Vector tanh_vhf = qaic_tanh_hf(half_input_vhf);
   const HVX_Vector shifted_vhf = Q6_Vhf_vadd_VhfVhf(tanh_vhf, one_vhf);
@@ -115,8 +115,8 @@ inline HVX_Vector sigmoid_hf(HVX_Vector input_vhf) {
 }
 
 // Materialize fp16 softmax scores with HVX reducers and fp16 intermediates.
-inline void materialize_softmax_scores_hvx_hf(const float16 *token_input,
-                                              float16 *token_scores,
+inline void materialize_softmax_scores_hvx_hf(const float16* token_input,
+                                              float16* token_scores,
                                               int32_t num_experts) {
   constexpr int32_t kVecElts = HVX_VectorSize / sizeof(float16);
   const int32_t full_vec_elems = (num_experts / kVecElts) * kVecElts;
@@ -125,11 +125,11 @@ inline void materialize_softmax_scores_hvx_hf(const float16 *token_input,
   MaxReducerFloat16 max_reducer;
   for (int32_t expert = 0; expert < full_vec_elems; expert += kVecElts) {
     max_reducer.reduce(
-        LoadUnaligned<HVX_Vector>((const int8_t *)&token_input[expert]));
+        LoadUnaligned<HVX_Vector>((const int8_t*)&token_input[expert]));
   }
   if (rem_elems > 0) {
     max_reducer.reduce(
-        LoadUnaligned<HVX_Vector>((const int8_t *)&token_input[full_vec_elems],
+        LoadUnaligned<HVX_Vector>((const int8_t*)&token_input[full_vec_elems],
                                   rem_elems * sizeof(float16)),
         rem_elems);
   }
@@ -139,18 +139,18 @@ inline void materialize_softmax_scores_hvx_hf(const float16 *token_input,
   SumReducerFloat16 sum_reducer;
   for (int32_t expert = 0; expert < full_vec_elems; expert += kVecElts) {
     const HVX_Vector in_vec =
-        LoadUnaligned<HVX_Vector>((const int8_t *)&token_input[expert]);
+        LoadUnaligned<HVX_Vector>((const int8_t*)&token_input[expert]);
     const HVX_Vector exp_vec = diff_exp(in_vec, max_vec);
     sum_reducer.reduce(exp_vec);
-    StoreUnalignedHVX((int8_t *)&token_scores[expert], exp_vec);
+    StoreUnalignedHVX((int8_t*)&token_scores[expert], exp_vec);
   }
   if (rem_elems > 0) {
     const HVX_Vector in_vec =
-        LoadUnaligned<HVX_Vector>((const int8_t *)&token_input[full_vec_elems],
+        LoadUnaligned<HVX_Vector>((const int8_t*)&token_input[full_vec_elems],
                                   rem_elems * sizeof(float16));
     const HVX_Vector exp_vec = diff_exp(in_vec, max_vec);
     sum_reducer.reduce(exp_vec, rem_elems);
-    StoreUnalignedHVX((int8_t *)&token_scores[full_vec_elems], exp_vec,
+    StoreUnalignedHVX((int8_t*)&token_scores[full_vec_elems], exp_vec,
                       rem_elems * sizeof(float16));
   }
 
@@ -168,23 +168,23 @@ inline void materialize_softmax_scores_hvx_hf(const float16 *token_input,
   NormalizerFloat16 normalizer(&inv_sum_h);
   for (int32_t expert = 0; expert < full_vec_elems; expert += kVecElts) {
     const HVX_Vector exp_vec =
-        LoadUnaligned<HVX_Vector>((const int8_t *)&token_scores[expert]);
+        LoadUnaligned<HVX_Vector>((const int8_t*)&token_scores[expert]);
     const HVX_Vector norm_vec = normalizer.normalize(exp_vec);
-    StoreUnalignedHVX((int8_t *)&token_scores[expert], norm_vec);
+    StoreUnalignedHVX((int8_t*)&token_scores[expert], norm_vec);
   }
   if (rem_elems > 0) {
     const HVX_Vector exp_vec =
-        LoadUnaligned<HVX_Vector>((const int8_t *)&token_scores[full_vec_elems],
+        LoadUnaligned<HVX_Vector>((const int8_t*)&token_scores[full_vec_elems],
                                   rem_elems * sizeof(float16));
     const HVX_Vector norm_vec = normalizer.normalize(exp_vec);
-    StoreUnalignedHVX((int8_t *)&token_scores[full_vec_elems], norm_vec,
+    StoreUnalignedHVX((int8_t*)&token_scores[full_vec_elems], norm_vec,
                       rem_elems * sizeof(float16));
   }
 }
 
 // Materialize fp16 sigmoid scores with HVX vector math.
-inline void materialize_sigmoid_scores_hvx_hf(const float16 *token_input,
-                                              float16 *token_scores,
+inline void materialize_sigmoid_scores_hvx_hf(const float16* token_input,
+                                              float16* token_scores,
                                               int32_t num_experts) {
   constexpr int32_t kVecElts = HVX_VectorSize / sizeof(float16);
   const int32_t full_vec_elems = (num_experts / kVecElts) * kVecElts;
@@ -192,23 +192,23 @@ inline void materialize_sigmoid_scores_hvx_hf(const float16 *token_input,
 
   for (int32_t expert = 0; expert < full_vec_elems; expert += kVecElts) {
     const HVX_Vector in_vec =
-        LoadUnaligned<HVX_Vector>((const int8_t *)&token_input[expert]);
+        LoadUnaligned<HVX_Vector>((const int8_t*)&token_input[expert]);
     const HVX_Vector sigmoid_vec = sigmoid_hf(in_vec);
-    StoreUnalignedHVX((int8_t *)&token_scores[expert], sigmoid_vec);
+    StoreUnalignedHVX((int8_t*)&token_scores[expert], sigmoid_vec);
   }
   if (rem_elems > 0) {
     const HVX_Vector in_vec =
-        LoadUnaligned<HVX_Vector>((const int8_t *)&token_input[full_vec_elems],
+        LoadUnaligned<HVX_Vector>((const int8_t*)&token_input[full_vec_elems],
                                   rem_elems * sizeof(float16));
     const HVX_Vector sigmoid_vec = sigmoid_hf(in_vec);
-    StoreUnalignedHVX((int8_t *)&token_scores[full_vec_elems], sigmoid_vec,
+    StoreUnalignedHVX((int8_t*)&token_scores[full_vec_elems], sigmoid_vec,
                       rem_elems * sizeof(float16));
   }
 }
 
 // Scalar score materialization fallback for softmax/sigmoid modes.
-inline void materialize_scores_scalar_hf(const float16 *token_input,
-                                         float16 *token_scores,
+inline void materialize_scores_scalar_hf(const float16* token_input,
+                                         float16* token_scores,
                                          int32_t num_experts,
                                          ScoreMode score_mode) {
   if (score_mode == ScoreMode::kSoftmax) {
@@ -241,8 +241,8 @@ inline void materialize_scores_scalar_hf(const float16 *token_input,
 }
 
 // Softmax computed entirely in fp32, result stored back as fp16.
-inline void materialize_softmax_scores_f32_hf(const float16 *token_input,
-                                              float16 *token_scores,
+inline void materialize_softmax_scores_f32_hf(const float16* token_input,
+                                              float16* token_scores,
                                               int32_t num_experts) {
   constexpr int32_t kVecEltsF16 = HVX_VectorSize / sizeof(float16);
   constexpr int32_t kVecEltsSF = HVX_VectorSize / sizeof(float);
@@ -253,21 +253,20 @@ inline void materialize_softmax_scores_f32_hf(const float16 *token_input,
   MaxReducerFloat max_reducer;
   for (int32_t e = 0; e < full_vec_elems; e += kVecEltsF16) {
     const HVX_Vector in_hf =
-        LoadUnaligned<HVX_Vector>((const int8_t *)&token_input[e]);
+        LoadUnaligned<HVX_Vector>((const int8_t*)&token_input[e]);
     const HVX_VectorPair in_sf = Q6_Wsf_vcvt_Vhf(in_hf);
     max_reducer.reduce(Q6_V_lo_W(in_sf));
     max_reducer.reduce(Q6_V_hi_W(in_sf));
   }
   if (rem_elems > 0) {
     const HVX_Vector in_hf =
-        LoadUnaligned<HVX_Vector>((const int8_t *)&token_input[full_vec_elems],
+        LoadUnaligned<HVX_Vector>((const int8_t*)&token_input[full_vec_elems],
                                   rem_elems * sizeof(float16));
     const HVX_VectorPair in_sf = Q6_Wsf_vcvt_Vhf(in_hf);
     const int32_t rem_lo = rem_elems < kVecEltsSF ? rem_elems : kVecEltsSF;
     const int32_t rem_hi = rem_elems > kVecEltsSF ? rem_elems - kVecEltsSF : 0;
     max_reducer.reduce(Q6_V_lo_W(in_sf), rem_lo);
-    if (rem_hi > 0)
-      max_reducer.reduce(Q6_V_hi_W(in_sf), rem_hi);
+    if (rem_hi > 0) max_reducer.reduce(Q6_V_hi_W(in_sf), rem_hi);
   }
   const HVX_Vector max_vsf = max_reducer.finishSplat();
 
@@ -280,30 +279,30 @@ inline void materialize_softmax_scores_f32_hf(const float16 *token_input,
 
   for (int32_t e = 0; e < full_vec_elems; e += kVecEltsF16) {
     const HVX_Vector in_hf =
-        LoadUnaligned<HVX_Vector>((const int8_t *)&token_input[e]);
+        LoadUnaligned<HVX_Vector>((const int8_t*)&token_input[e]);
     const HVX_VectorPair in_sf = Q6_Wsf_vcvt_Vhf(in_hf);
     const HVX_Vector exp_lo = diff_exp(Q6_V_lo_W(in_sf), max_vsf);
     const HVX_Vector exp_hi = diff_exp(Q6_V_hi_W(in_sf), max_vsf);
     sum_reducer.reduce(exp_lo);
     sum_reducer.reduce(exp_hi);
-    StoreUnalignedHVX((int8_t *)&exp_scratch[e], exp_lo);
-    StoreUnalignedHVX((int8_t *)&exp_scratch[e + kVecEltsSF], exp_hi);
+    StoreUnalignedHVX((int8_t*)&exp_scratch[e], exp_lo);
+    StoreUnalignedHVX((int8_t*)&exp_scratch[e + kVecEltsSF], exp_hi);
   }
   if (rem_elems > 0) {
     const HVX_Vector in_hf =
-        LoadUnaligned<HVX_Vector>((const int8_t *)&token_input[full_vec_elems],
+        LoadUnaligned<HVX_Vector>((const int8_t*)&token_input[full_vec_elems],
                                   rem_elems * sizeof(float16));
     const HVX_VectorPair in_sf = Q6_Wsf_vcvt_Vhf(in_hf);
     const int32_t rem_lo = rem_elems < kVecEltsSF ? rem_elems : kVecEltsSF;
     const int32_t rem_hi = rem_elems > kVecEltsSF ? rem_elems - kVecEltsSF : 0;
     const HVX_Vector exp_lo = diff_exp(Q6_V_lo_W(in_sf), max_vsf);
     sum_reducer.reduce(exp_lo, rem_lo);
-    StoreUnalignedHVX((int8_t *)&exp_scratch[full_vec_elems], exp_lo,
+    StoreUnalignedHVX((int8_t*)&exp_scratch[full_vec_elems], exp_lo,
                       rem_lo * sizeof(float));
     if (rem_hi > 0) {
       const HVX_Vector exp_hi = diff_exp(Q6_V_hi_W(in_sf), max_vsf);
       sum_reducer.reduce(exp_hi, rem_hi);
-      StoreUnalignedHVX((int8_t *)&exp_scratch[full_vec_elems + kVecEltsSF],
+      StoreUnalignedHVX((int8_t*)&exp_scratch[full_vec_elems + kVecEltsSF],
                         exp_hi, rem_hi * sizeof(float));
     }
   }
@@ -314,8 +313,7 @@ inline void materialize_softmax_scores_f32_hf(const float16 *token_input,
   StoreHVX(&sum_arr[0], sum_vsf);
   const float exp_sum = sum_arr[0];
   if (exp_sum == 0.0F) {
-    for (int32_t e = 0; e < num_experts; ++e)
-      token_scores[e] = (float16)0.0F;
+    for (int32_t e = 0; e < num_experts; ++e) token_scores[e] = (float16)0.0F;
     return;
   }
   const float inv_sum = 1.0F / exp_sum;
@@ -325,35 +323,35 @@ inline void materialize_softmax_scores_f32_hf(const float16 *token_input,
   // ---- pass 3: normalize fp32 exp values, demote to fp16 ----
   for (int32_t e = 0; e < full_vec_elems; e += kVecEltsF16) {
     const HVX_Vector exp_lo =
-        LoadUnaligned<HVX_Vector>((const int8_t *)&exp_scratch[e]);
+        LoadUnaligned<HVX_Vector>((const int8_t*)&exp_scratch[e]);
     const HVX_Vector exp_hi =
-        LoadUnaligned<HVX_Vector>((const int8_t *)&exp_scratch[e + kVecEltsSF]);
+        LoadUnaligned<HVX_Vector>((const int8_t*)&exp_scratch[e + kVecEltsSF]);
     const HVX_Vector norm_lo = normalizer.normalize(exp_lo);
     const HVX_Vector norm_hi = normalizer.normalize(exp_hi);
     const HVX_Vector result_hf = Q6_Vhf_vcvt_VsfVsf(norm_lo, norm_hi);
-    StoreUnalignedHVX((int8_t *)&token_scores[e], result_hf);
+    StoreUnalignedHVX((int8_t*)&token_scores[e], result_hf);
   }
   if (rem_elems > 0) {
     const int32_t rem_lo = rem_elems < kVecEltsSF ? rem_elems : kVecEltsSF;
     const int32_t rem_hi = rem_elems > kVecEltsSF ? rem_elems - kVecEltsSF : 0;
     const HVX_Vector exp_lo = LoadUnaligned<HVX_Vector>(
-        (const int8_t *)&exp_scratch[full_vec_elems], rem_lo * sizeof(float));
+        (const int8_t*)&exp_scratch[full_vec_elems], rem_lo * sizeof(float));
     HVX_Vector exp_hi = Q6_V_vzero();
     if (rem_hi > 0) {
       exp_hi = LoadUnaligned<HVX_Vector>(
-          (const int8_t *)&exp_scratch[full_vec_elems + kVecEltsSF],
+          (const int8_t*)&exp_scratch[full_vec_elems + kVecEltsSF],
           rem_hi * sizeof(float));
     }
     const HVX_Vector norm_lo = normalizer.normalize(exp_lo);
     const HVX_Vector norm_hi = normalizer.normalize(exp_hi);
     const HVX_Vector result_hf = Q6_Vhf_vcvt_VsfVsf(norm_lo, norm_hi);
-    StoreUnalignedHVX((int8_t *)&token_scores[full_vec_elems], result_hf,
+    StoreUnalignedHVX((int8_t*)&token_scores[full_vec_elems], result_hf,
                       rem_elems * sizeof(float16));
   }
 }
 
-inline void materialize_sigmoid_scores_f32_hf(const float16 *token_input,
-                                              float16 *token_scores,
+inline void materialize_sigmoid_scores_f32_hf(const float16* token_input,
+                                              float16* token_scores,
                                               int32_t num_experts) {
   constexpr int32_t kVecEltsF16 = HVX_VectorSize / sizeof(float16);
   constexpr int32_t kVecEltsSF = HVX_VectorSize / sizeof(float);
@@ -363,12 +361,12 @@ inline void materialize_sigmoid_scores_f32_hf(const float16 *token_input,
   // half_sf and one_sf constants
   static constexpr float kHalfF = 0.5F;
   static constexpr float kOneF = 1.0F;
-  const HVX_Vector half_vsf = Q6_V_vsplat_R(*(const uint32_t *)&kHalfF);
-  const HVX_Vector one_vsf = Q6_V_vsplat_R(*(const uint32_t *)&kOneF);
+  const HVX_Vector half_vsf = Q6_V_vsplat_R(*(const uint32_t*)&kHalfF);
+  const HVX_Vector one_vsf = Q6_V_vsplat_R(*(const uint32_t*)&kOneF);
 
   for (int32_t e = 0; e < full_vec_elems; e += kVecEltsF16) {
     const HVX_Vector in_hf =
-        LoadUnaligned<HVX_Vector>((const int8_t *)&token_input[e]);
+        LoadUnaligned<HVX_Vector>((const int8_t*)&token_input[e]);
     const HVX_VectorPair in_sf = Q6_Wsf_vcvt_Vhf(in_hf);
     // sigmoid(x) = 0.5 * tanh(0.5 * x) + 0.5
     const HVX_Vector half_x_lo = Q6_Vsf_vmpy_VsfVsf(Q6_V_lo_W(in_sf), half_vsf);
@@ -380,11 +378,11 @@ inline void materialize_sigmoid_scores_f32_hf(const float16 *token_input,
     const HVX_Vector sig_hi =
         Q6_Vsf_vadd_VsfVsf(Q6_Vsf_vmpy_VsfVsf(tanh_hi, half_vsf), half_vsf);
     const HVX_Vector result_hf = Q6_Vhf_vcvt_VsfVsf(sig_lo, sig_hi);
-    StoreUnalignedHVX((int8_t *)&token_scores[e], result_hf);
+    StoreUnalignedHVX((int8_t*)&token_scores[e], result_hf);
   }
   if (rem_elems > 0) {
     const HVX_Vector in_hf =
-        LoadUnaligned<HVX_Vector>((const int8_t *)&token_input[full_vec_elems],
+        LoadUnaligned<HVX_Vector>((const int8_t*)&token_input[full_vec_elems],
                                   rem_elems * sizeof(float16));
     const HVX_VectorPair in_sf = Q6_Wsf_vcvt_Vhf(in_hf);
     const HVX_Vector half_x_lo = Q6_Vsf_vmpy_VsfVsf(Q6_V_lo_W(in_sf), half_vsf);
@@ -396,14 +394,14 @@ inline void materialize_sigmoid_scores_f32_hf(const float16 *token_input,
     const HVX_Vector sig_hi =
         Q6_Vsf_vadd_VsfVsf(Q6_Vsf_vmpy_VsfVsf(tanh_hi, half_vsf), half_vsf);
     const HVX_Vector result_hf = Q6_Vhf_vcvt_VsfVsf(sig_lo, sig_hi);
-    StoreUnalignedHVX((int8_t *)&token_scores[full_vec_elems], result_hf,
+    StoreUnalignedHVX((int8_t*)&token_scores[full_vec_elems], result_hf,
                       rem_elems * sizeof(float16));
   }
 }
 
 // Dispatch score materialization to the requested score mode implementation.
-inline void materialize_scores_hf(const float16 *token_input,
-                                  float16 *token_scores, int32_t num_experts,
+inline void materialize_scores_hf(const float16* token_input,
+                                  float16* token_scores, int32_t num_experts,
                                   ScoreMode score_mode) {
   if (score_mode == ScoreMode::kSoftmax) {
     materialize_softmax_scores_hvx_hf(token_input, token_scores, num_experts);
@@ -417,9 +415,9 @@ inline void materialize_scores_hf(const float16 *token_input,
 }
 
 // Build biased/unbiased selection scores in fp16 scratch.
-inline void materialize_selection_scores_hvx_hf(const float16 *token_scores,
-                                                const float16 *bias,
-                                                float16 *selection_scores,
+inline void materialize_selection_scores_hvx_hf(const float16* token_scores,
+                                                const float16* bias,
+                                                float16* selection_scores,
                                                 int32_t num_experts,
                                                 bool use_bias) {
   constexpr int32_t kVecElts = HVX_VectorSize / sizeof(float16);
@@ -428,39 +426,39 @@ inline void materialize_selection_scores_hvx_hf(const float16 *token_scores,
 
   for (int32_t expert = 0; expert < full_vec_elems; expert += kVecElts) {
     const HVX_Vector score_vec =
-        LoadUnaligned<HVX_Vector>((const int8_t *)&token_scores[expert]);
+        LoadUnaligned<HVX_Vector>((const int8_t*)&token_scores[expert]);
     HVX_Vector selection_vec = score_vec;
     if (use_bias) {
       const HVX_Vector bias_vec =
-          LoadUnaligned<HVX_Vector>((const int8_t *)&bias[expert]);
+          LoadUnaligned<HVX_Vector>((const int8_t*)&bias[expert]);
       selection_vec = Q6_Vhf_vadd_VhfVhf(score_vec, bias_vec);
     }
-    StoreUnalignedHVX((int8_t *)&selection_scores[expert], selection_vec);
+    StoreUnalignedHVX((int8_t*)&selection_scores[expert], selection_vec);
   }
   if (rem_elems > 0) {
     const HVX_Vector score_vec =
-        LoadUnaligned<HVX_Vector>((const int8_t *)&token_scores[full_vec_elems],
+        LoadUnaligned<HVX_Vector>((const int8_t*)&token_scores[full_vec_elems],
                                   rem_elems * sizeof(float16));
     HVX_Vector selection_vec = score_vec;
     if (use_bias) {
       const HVX_Vector bias_vec = LoadUnaligned<HVX_Vector>(
-          (const int8_t *)&bias[full_vec_elems], rem_elems * sizeof(float16));
+          (const int8_t*)&bias[full_vec_elems], rem_elems * sizeof(float16));
       selection_vec = Q6_Vhf_vadd_VhfVhf(score_vec, bias_vec);
     }
-    StoreUnalignedHVX((int8_t *)&selection_scores[full_vec_elems],
-                      selection_vec, rem_elems * sizeof(float16));
+    StoreUnalignedHVX((int8_t*)&selection_scores[full_vec_elems], selection_vec,
+                      rem_elems * sizeof(float16));
   }
 }
 
 // Read a pre-materialized selection score as fp32.
-inline float selection_score_at(const float16 *selection_scores,
+inline float selection_score_at(const float16* selection_scores,
                                 int32_t expert) {
   return (float)selection_scores[expert];
 }
 
 // Read either biased or unbiased selection score for one expert.
-inline float selection_score_at(const float16 *token_scores,
-                                const float16 *bias, int32_t expert,
+inline float selection_score_at(const float16* token_scores,
+                                const float16* bias, int32_t expert,
                                 bool use_bias) {
   float value = (float)token_scores[expert];
   if (use_bias) {
@@ -470,25 +468,25 @@ inline float selection_score_at(const float16 *token_scores,
 }
 
 // Clear the small bitset used to track selected experts.
-inline void clear_selected_experts(uint64_t *selected_words) {
+inline void clear_selected_experts(uint64_t* selected_words) {
   for (int32_t i = 0; i < (kMaxExperts + 63) / 64; ++i) {
     selected_words[i] = 0ULL;
   }
 }
 
 // Test whether an expert id is already selected in the bitset.
-inline bool expert_selected(const uint64_t *selected_words, int32_t expert) {
+inline bool expert_selected(const uint64_t* selected_words, int32_t expert) {
   const uint64_t bit = 1ULL << (expert & 63);
   return (selected_words[expert >> 6] & bit) != 0ULL;
 }
 
 // Mark an expert id as selected in the bitset.
-inline void mark_expert_selected(uint64_t *selected_words, int32_t expert) {
+inline void mark_expert_selected(uint64_t* selected_words, int32_t expert) {
   selected_words[expert >> 6] |= 1ULL << (expert & 63);
 }
 
 // Compute max fp16 selection score over a contiguous expert span with HVX.
-inline float max_score_hvx_hf(const float16 *selection_scores, int32_t begin,
+inline float max_score_hvx_hf(const float16* selection_scores, int32_t begin,
                               int32_t count) {
   if (count <= 0) {
     return kNegInf;
@@ -500,13 +498,13 @@ inline float max_score_hvx_hf(const float16 *selection_scores, int32_t begin,
 
   MaxReducerFloat16 max_reducer;
   for (int32_t i = 0; i < full_vec_elems; i += kVecElts) {
-    max_reducer.reduce(LoadUnaligned<HVX_Vector>(
-        (const int8_t *)&selection_scores[begin + i]));
+    max_reducer.reduce(
+        LoadUnaligned<HVX_Vector>((const int8_t*)&selection_scores[begin + i]));
   }
   if (rem_elems > 0) {
     max_reducer.reduce(
         LoadUnaligned<HVX_Vector>(
-            (const int8_t *)&selection_scores[begin + full_vec_elems],
+            (const int8_t*)&selection_scores[begin + full_vec_elems],
             rem_elems * sizeof(float16)),
         rem_elems);
   }
@@ -518,7 +516,7 @@ inline float max_score_hvx_hf(const float16 *selection_scores, int32_t begin,
 }
 
 // Compute max fp32 score over a contiguous span with HVX.
-inline float max_score_hvx_f32(const float *scores, int32_t count) {
+inline float max_score_hvx_f32(const float* scores, int32_t count) {
   if (count <= 0) {
     return kNegInf;
   }
@@ -529,11 +527,11 @@ inline float max_score_hvx_f32(const float *scores, int32_t count) {
 
   MaxReducerFloat max_reducer;
   for (int32_t i = 0; i < full_vec_elems; i += kVecElts) {
-    max_reducer.reduce(LoadUnaligned<HVX_Vector>((const int8_t *)&scores[i]));
+    max_reducer.reduce(LoadUnaligned<HVX_Vector>((const int8_t*)&scores[i]));
   }
   if (rem_elems > 0) {
     max_reducer.reduce(
-        LoadUnaligned<HVX_Vector>((const int8_t *)&scores[full_vec_elems],
+        LoadUnaligned<HVX_Vector>((const int8_t*)&scores[full_vec_elems],
                                   rem_elems * sizeof(float)),
         rem_elems);
   }
@@ -547,12 +545,12 @@ inline float max_score_hvx_f32(const float *scores, int32_t count) {
 // Return an HVX vector splatted with negative fp16 max value.
 inline HVX_Vector neg_max_hf_vec() {
   const float16 neg_max_h = (float16)-65504.0F;
-  return Q6_Vh_vsplat_R(*(const uint16_t *)&neg_max_h);
+  return Q6_Vh_vsplat_R(*(const uint16_t*)&neg_max_h);
 }
 
 // Merge two candidate vectors into top-1 and top-2 vectors lane-wise.
 inline void merge_top2_vectors_hf(HVX_Vector candidate1, HVX_Vector candidate2,
-                                  HVX_Vector &best1, HVX_Vector &best2) {
+                                  HVX_Vector& best1, HVX_Vector& best2) {
   const HVX_Vector new_best1 = Q6_Vhf_vfmax_VhfVhf(best1, candidate1);
   const HVX_Vector lower_best1 = Q6_Vhf_vfmin_VhfVhf(best1, candidate1);
   const HVX_Vector best2_candidates = Q6_Vhf_vfmax_VhfVhf(best2, candidate2);
@@ -561,7 +559,7 @@ inline void merge_top2_vectors_hf(HVX_Vector candidate1, HVX_Vector candidate2,
 }
 
 // Compute the sum of top-2 fp16 scores in an expert span using HVX.
-inline float top2_sum_score_hvx_hf(const float16 *selection_scores,
+inline float top2_sum_score_hvx_hf(const float16* selection_scores,
                                    int32_t begin, int32_t end) {
   const int32_t count = end - begin;
   if (count <= 0) {
@@ -576,13 +574,13 @@ inline float top2_sum_score_hvx_hf(const float16 *selection_scores,
   int32_t offset = 0;
   for (; offset + kVecElts <= count; offset += kVecElts) {
     const HVX_Vector values = LoadUnaligned<HVX_Vector>(
-        (const int8_t *)&selection_scores[begin + offset]);
+        (const int8_t*)&selection_scores[begin + offset]);
     merge_top2_vectors_hf(values, neg_vec, best1, best2);
   }
   if (offset < count) {
     const int32_t rem_elems = count - offset;
     const HVX_Vector values = LoadUnaligned<HVX_Vector>(
-        (const int8_t *)&selection_scores[begin + offset],
+        (const int8_t*)&selection_scores[begin + offset],
         rem_elems * sizeof(float16));
     const HVX_VectorPred pred = Q6_Q_vsetq2_R(rem_elems * sizeof(float16));
     const HVX_Vector padded_values = Q6_V_vmux_QVV(pred, values, neg_vec);
@@ -607,8 +605,8 @@ inline float top2_sum_score_hvx_hf(const float16 *selection_scores,
 }
 
 // Compute max of token score plus bias over a span using HVX.
-inline float max_score_with_bias_hvx_hf(const float16 *token_scores,
-                                        const float16 *bias, int32_t begin,
+inline float max_score_with_bias_hvx_hf(const float16* token_scores,
+                                        const float16* bias, int32_t begin,
                                         int32_t count) {
   if (count <= 0) {
     return kNegInf;
@@ -621,17 +619,17 @@ inline float max_score_with_bias_hvx_hf(const float16 *token_scores,
   MaxReducerFloat16 max_reducer;
   for (int32_t i = 0; i < full_vec_elems; i += kVecElts) {
     const HVX_Vector score_vec =
-        LoadUnaligned<HVX_Vector>((const int8_t *)&token_scores[begin + i]);
+        LoadUnaligned<HVX_Vector>((const int8_t*)&token_scores[begin + i]);
     const HVX_Vector bias_vec =
-        LoadUnaligned<HVX_Vector>((const int8_t *)&bias[begin + i]);
+        LoadUnaligned<HVX_Vector>((const int8_t*)&bias[begin + i]);
     max_reducer.reduce(Q6_Vhf_vadd_VhfVhf(score_vec, bias_vec));
   }
   if (rem_elems > 0) {
     const HVX_Vector score_vec = LoadUnaligned<HVX_Vector>(
-        (const int8_t *)&token_scores[begin + full_vec_elems],
+        (const int8_t*)&token_scores[begin + full_vec_elems],
         rem_elems * sizeof(float16));
     const HVX_Vector bias_vec =
-        LoadUnaligned<HVX_Vector>((const int8_t *)&bias[begin + full_vec_elems],
+        LoadUnaligned<HVX_Vector>((const int8_t*)&bias[begin + full_vec_elems],
                                   rem_elems * sizeof(float16));
     max_reducer.reduce(Q6_Vhf_vadd_VhfVhf(score_vec, bias_vec), rem_elems);
   }
@@ -643,7 +641,7 @@ inline float max_score_with_bias_hvx_hf(const float16 *token_scores,
 }
 
 // Scalar top-2 sum over precomputed selection scores.
-inline float top2_sum_score_hf(const float16 *selection_scores, int32_t begin,
+inline float top2_sum_score_hf(const float16* selection_scores, int32_t begin,
                                int32_t end) {
   const int32_t count = end - begin;
   if (count <= 0) {
@@ -673,8 +671,8 @@ inline float top2_sum_score_hf(const float16 *selection_scores, int32_t begin,
 }
 
 // Scalar top-2 sum over token scores plus bias.
-inline float top2_sum_score_with_bias_hf(const float16 *token_scores,
-                                         const float16 *bias, int32_t begin,
+inline float top2_sum_score_with_bias_hf(const float16* token_scores,
+                                         const float16* bias, int32_t begin,
                                          int32_t end) {
   const int32_t count = end - begin;
   if (count <= 0) {
@@ -704,8 +702,8 @@ inline float top2_sum_score_with_bias_hf(const float16 *token_scores,
 }
 
 // Scalar select of top groups by group score.
-inline void select_top_groups(float *group_scores, int32_t num_groups,
-                              int32_t topk_group, int32_t *selected_groups) {
+inline void select_top_groups(float* group_scores, int32_t num_groups,
+                              int32_t topk_group, int32_t* selected_groups) {
   for (int32_t rank = 0; rank < topk_group; ++rank) {
     float best_value = kNegInf;
     int32_t best_group = 0;
@@ -724,7 +722,7 @@ inline void select_top_groups(float *group_scores, int32_t num_groups,
 }
 
 // Find the first unmasked group matching a target score.
-inline int32_t first_group_with_score(const float *group_scores,
+inline int32_t first_group_with_score(const float* group_scores,
                                       int32_t num_groups, float target_score) {
   for (int32_t group = 0; group < num_groups; ++group) {
     if (group_scores[group] == target_score) {
@@ -735,9 +733,9 @@ inline int32_t first_group_with_score(const float *group_scores,
 }
 
 // HVX-assisted top-group selection.
-inline void select_top_groups_hvx(float *group_scores, int32_t num_groups,
+inline void select_top_groups_hvx(float* group_scores, int32_t num_groups,
                                   int32_t topk_group,
-                                  int32_t *selected_groups) {
+                                  int32_t* selected_groups) {
   for (int32_t rank = 0; rank < topk_group; ++rank) {
     const float best_value = max_score_hvx_f32(group_scores, num_groups);
     const int32_t best_group =
@@ -748,7 +746,7 @@ inline void select_top_groups_hvx(float *group_scores, int32_t num_groups,
 }
 
 // Find the first expert in a span matching a target fp16 score.
-inline int32_t first_expert_with_score_hf(const float16 *selection_scores,
+inline int32_t first_expert_with_score_hf(const float16* selection_scores,
                                           int32_t begin, int32_t end,
                                           float target_score) {
   for (int32_t expert = begin; expert < end; ++expert) {
@@ -762,32 +760,31 @@ inline int32_t first_expert_with_score_hf(const float16 *selection_scores,
 // Produce shuffled even/odd vectors for one bitonic step.
 inline void bitonic_sort_step_shuffle_hvx(unsigned step_idx,
                                           int32_t element_bytes,
-                                          const HVX_Vector &values,
-                                          HVX_Vector &shuffled_lo,
-                                          HVX_Vector &shuffled_hi) {
+                                          const HVX_Vector& values,
+                                          HVX_Vector& shuffled_lo,
+                                          HVX_Vector& shuffled_hi) {
   HVX_VectorPair pair =
       Q6_W_vdeal_VVR(values, values, element_bytes << step_idx);
   shuffled_lo = Q6_V_lo_W(pair);
   shuffled_hi = Q6_V_hi_W(pair);
 }
 
-inline HVX_VectorPred vcmp_gt_xacc_hf(const HVX_VectorPred &predicate,
-                                      const HVX_Vector &v1,
-                                      const HVX_Vector &v2) {
+inline HVX_VectorPred vcmp_gt_xacc_hf(const HVX_VectorPred& predicate,
+                                      const HVX_Vector& v1,
+                                      const HVX_Vector& v2) {
   const HVX_VectorPred gt_pred = Q6_Q_vcmp_gt_VhfVhf(v1, v2);
   return Q6_Q_xor_QQ(predicate, gt_pred);
 }
 
-inline HVX_VectorPred vcmp_gt_xacc_w(const HVX_VectorPred &predicate,
-                                     const HVX_Vector &v1,
-                                     const HVX_Vector &v2) {
+inline HVX_VectorPred vcmp_gt_xacc_w(const HVX_VectorPred& predicate,
+                                     const HVX_Vector& v1,
+                                     const HVX_Vector& v2) {
   return Q6_Q_vcmp_gtxacc_QVwVw(predicate, v1, v2);
 }
 
-inline HVX_VectorPred
-bitonic_sort_step_swap_mask_hf(unsigned step_idx, const HVX_Vector &step_masks,
-                               const HVX_Vector &shuffled_lo,
-                               const HVX_Vector &shuffled_hi) {
+inline HVX_VectorPred bitonic_sort_step_swap_mask_hf(
+    unsigned step_idx, const HVX_Vector& step_masks,
+    const HVX_Vector& shuffled_lo, const HVX_Vector& shuffled_hi) {
   static constexpr uint32_t mask_bit_select[7] = {
       0x01010101, 0x02020202, 0x04040404, 0x08080808,
       0x10101010, 0x20202020, 0x40404040};
@@ -796,10 +793,9 @@ bitonic_sort_step_swap_mask_hf(unsigned step_idx, const HVX_Vector &step_masks,
   return vcmp_gt_xacc_hf(comparison_reversal, shuffled_lo, shuffled_hi);
 }
 
-inline HVX_VectorPred
-bitonic_sort_step_swap_mask_w(unsigned step_idx, const HVX_Vector &step_masks,
-                              const HVX_Vector &shuffled_lo,
-                              const HVX_Vector &shuffled_hi) {
+inline HVX_VectorPred bitonic_sort_step_swap_mask_w(
+    unsigned step_idx, const HVX_Vector& step_masks,
+    const HVX_Vector& shuffled_lo, const HVX_Vector& shuffled_hi) {
   static constexpr uint32_t mask_bit_select[7] = {
       0x01010101, 0x02020202, 0x04040404, 0x08080808,
       0x10101010, 0x20202020, 0x40404040};
@@ -810,9 +806,9 @@ bitonic_sort_step_swap_mask_w(unsigned step_idx, const HVX_Vector &step_masks,
 
 // Apply one bitonic sort step to fp16 values and int32 ids.
 inline void bitonic_sort_step_hf_i32(unsigned step_idx,
-                                     const HVX_Vector &step_masks_hf,
+                                     const HVX_Vector& step_masks_hf,
                                      const HVX_Vector step_masks_i32[2],
-                                     HVX_Vector &vals, HVX_Vector idx[2]) {
+                                     HVX_Vector& vals, HVX_Vector idx[2]) {
   HVX_Vector idx_shuffle_even[2];
   HVX_Vector idx_shuffle_odd[2];
   if (step_idx < 5) {
@@ -870,9 +866,9 @@ inline void bitonic_sort_step_hf_i32(unsigned step_idx,
 
 template <bool DataAscending, bool IdxAscending>
 // Sort one HVX candidate vector by fp16 value and int32 id.
-inline void bitonic_sort_hf_i32(const HVX_Vector &step_masks_hf,
+inline void bitonic_sort_hf_i32(const HVX_Vector& step_masks_hf,
                                 const HVX_Vector step_masks_i32[2],
-                                HVX_Vector &vals, HVX_Vector idx[2]) {
+                                HVX_Vector& vals, HVX_Vector idx[2]) {
   HVX_Vector empty = Q6_V_vzero();
   HVX_Vector full = Q6_V_vsplat_R(0xffffffff);
   HVX_VectorPair pair;
@@ -914,8 +910,8 @@ inline void bitonic_sort_hf_i32(const HVX_Vector &step_masks_hf,
 template <bool DataAscending, bool IdxAscending>
 // Merge two sorted HVX vectors and keep the first vector's worth of candidates.
 inline void bitonic_sort_merge_keep_first_hf_i32(
-    const HVX_Vector &step_masks_hf, const HVX_Vector step_masks_i32[2],
-    HVX_Vector &v1, HVX_Vector v1_idx[2], const HVX_Vector &v2,
+    const HVX_Vector& step_masks_hf, const HVX_Vector step_masks_i32[2],
+    HVX_Vector& v1, HVX_Vector v1_idx[2], const HVX_Vector& v2,
     const HVX_Vector v2_idx[2]) {
   HVX_VectorPred swap_mask_pred;
   if (DataAscending) {
@@ -966,7 +962,7 @@ inline void bitonic_sort_merge_keep_first_hf_i32(
 }
 
 // Initialize reusable masks for fp16/int32 bitonic sorting.
-inline void bitonic_step_masks_hf_i32(HVX_Vector &step_masks_hf,
+inline void bitonic_step_masks_hf_i32(HVX_Vector& step_masks_hf,
                                       HVX_Vector step_masks_i32[2]) {
   alignas(HVX_VectorSize) static constexpr uint8_t bitonic_step_mask[128] = {
       0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b,
@@ -989,19 +985,19 @@ inline void bitonic_step_masks_hf_i32(HVX_Vector &step_masks_hf,
 }
 
 // Load one candidate chunk into HVX vectors, padding missing lanes.
-inline void load_bitonic_candidate_chunk_hf_i32(const float16 *candidate_scores,
-                                                const int32_t *candidate_ids,
+inline void load_bitonic_candidate_chunk_hf_i32(const float16* candidate_scores,
+                                                const int32_t* candidate_ids,
                                                 int32_t offset, int32_t count,
-                                                HVX_Vector &vals,
+                                                HVX_Vector& vals,
                                                 HVX_Vector idx[2]) {
   constexpr int32_t kValsInVec = HVX_VectorSize / sizeof(float16);
   constexpr int32_t kIdxInVec = HVX_VectorSize / sizeof(int32_t);
   const float16 neg_max_h = (float16)-65504.0F;
-  const HVX_Vector neg_max_vec = Q6_Vh_vsplat_R(*(const uint16_t *)&neg_max_h);
+  const HVX_Vector neg_max_vec = Q6_Vh_vsplat_R(*(const uint16_t*)&neg_max_h);
   const HVX_Vector int_max_vec = Q6_V_vsplat_R(INT32_MAX);
 
   const int32_t vals_to_load = count < kValsInVec ? count : kValsInVec;
-  vals = LoadUnaligned<HVX_Vector>((const int8_t *)&candidate_scores[offset],
+  vals = LoadUnaligned<HVX_Vector>((const int8_t*)&candidate_scores[offset],
                                    vals_to_load * sizeof(float16));
   if (vals_to_load < kValsInVec) {
     const HVX_VectorPred pred = Q6_Q_vsetq2_R(vals_to_load * sizeof(float16));
@@ -1010,7 +1006,7 @@ inline void load_bitonic_candidate_chunk_hf_i32(const float16 *candidate_scores,
 
   const int32_t lo_to_load =
       vals_to_load < kIdxInVec ? vals_to_load : kIdxInVec;
-  idx[0] = LoadUnaligned<HVX_Vector>((const int8_t *)&candidate_ids[offset],
+  idx[0] = LoadUnaligned<HVX_Vector>((const int8_t*)&candidate_ids[offset],
                                      lo_to_load * sizeof(int32_t));
   if (lo_to_load < kIdxInVec) {
     const HVX_VectorPred pred = Q6_Q_vsetq2_R(lo_to_load * sizeof(int32_t));
@@ -1021,7 +1017,7 @@ inline void load_bitonic_candidate_chunk_hf_i32(const float16 *candidate_scores,
       vals_to_load > kIdxInVec ? vals_to_load - kIdxInVec : 0;
   if (hi_to_load > 0) {
     idx[1] = LoadUnaligned<HVX_Vector>(
-        (const int8_t *)&candidate_ids[offset + kIdxInVec],
+        (const int8_t*)&candidate_ids[offset + kIdxInVec],
         hi_to_load * sizeof(int32_t));
     if (hi_to_load < kIdxInVec) {
       const HVX_VectorPred pred = Q6_Q_vsetq2_R(hi_to_load * sizeof(int32_t));
@@ -1034,12 +1030,12 @@ inline void load_bitonic_candidate_chunk_hf_i32(const float16 *candidate_scores,
 
 // Select top-k from a candidate list using HVX bitonic merge steps.
 inline void select_topk_candidates_bitonic_hf(
-    const float16 *token_scores, const float16 *candidate_scores,
-    const int32_t *candidate_ids, int32_t candidate_count,
-    int32_t selected_count, float *selected_weights, int32_t *selected_ids) {
+    const float16* token_scores, const float16* candidate_scores,
+    const int32_t* candidate_ids, int32_t candidate_count,
+    int32_t selected_count, float* selected_weights, int32_t* selected_ids) {
   constexpr int32_t kValsInVec = HVX_VectorSize / sizeof(float16);
   const float16 neg_max_h = (float16)-65504.0F;
-  HVX_Vector best_vals = Q6_Vh_vsplat_R(*(const uint16_t *)&neg_max_h);
+  HVX_Vector best_vals = Q6_Vh_vsplat_R(*(const uint16_t*)&neg_max_h);
   HVX_Vector best_idx[2] = {Q6_V_vsplat_R(INT32_MAX), Q6_V_vsplat_R(INT32_MAX)};
   HVX_Vector step_masks_hf;
   HVX_Vector step_masks_i32[2];
@@ -1070,10 +1066,10 @@ inline void select_topk_candidates_bitonic_hf(
 
 // Select top-k experts from selected groups using compacted bitonic candidates.
 inline void select_topk_from_groups_bitonic_hf(
-    const float16 *token_scores, const float16 *selection_scores,
-    const int32_t *selected_groups, int32_t topk_group,
-    int32_t experts_per_group, int32_t selected_count, float *selected_weights,
-    int32_t *selected_ids) {
+    const float16* token_scores, const float16* selection_scores,
+    const int32_t* selected_groups, int32_t topk_group,
+    int32_t experts_per_group, int32_t selected_count, float* selected_weights,
+    int32_t* selected_ids) {
   float16 candidate_scores[kMaxExperts]
       __attribute__((aligned(HVX_VectorSize)));
   int32_t candidate_ids[kMaxExperts] __attribute__((aligned(HVX_VectorSize)));
@@ -1111,12 +1107,12 @@ inline void select_topk_from_groups_bitonic_hf(
 }
 
 // Select regular top-k experts with bitonic candidates over all experts.
-inline void select_topk_regular_bitonic_hf(const float16 *token_scores,
-                                           const float16 *selection_scores,
+inline void select_topk_regular_bitonic_hf(const float16* token_scores,
+                                           const float16* selection_scores,
                                            int32_t num_experts,
                                            int32_t selected_count,
-                                           float *selected_weights,
-                                           int32_t *selected_ids) {
+                                           float* selected_weights,
+                                           int32_t* selected_ids) {
   int32_t candidate_ids[kMaxExperts] __attribute__((aligned(HVX_VectorSize)));
   for (int32_t expert = 0; expert < num_experts; ++expert) {
     candidate_ids[expert] = expert;
@@ -1129,10 +1125,10 @@ inline void select_topk_regular_bitonic_hf(const float16 *token_scores,
 
 // Scalar top-k selection from selected groups.
 inline void select_topk_from_groups_scalar_hf(
-    const float16 *token_scores, float16 *selection_scores,
-    const int32_t *selected_groups, int32_t topk_group,
-    int32_t experts_per_group, int32_t selected_count, float *selected_weights,
-    int32_t *selected_ids) {
+    const float16* token_scores, float16* selection_scores,
+    const int32_t* selected_groups, int32_t topk_group,
+    int32_t experts_per_group, int32_t selected_count, float* selected_weights,
+    int32_t* selected_ids) {
   for (int32_t rank = 0; rank < selected_count; ++rank) {
     float best_value = kNegInf;
     int32_t best_expert = 0;
@@ -1158,10 +1154,10 @@ inline void select_topk_from_groups_scalar_hf(
 
 // HVX-assisted repeated top-k selection from selected groups.
 inline void select_topk_from_groups_hvx_hf(
-    const float16 *token_scores, float16 *selection_scores,
-    const int32_t *selected_groups, int32_t topk_group,
-    int32_t experts_per_group, int32_t selected_count, float *selected_weights,
-    int32_t *selected_ids) {
+    const float16* token_scores, float16* selection_scores,
+    const int32_t* selected_groups, int32_t topk_group,
+    int32_t experts_per_group, int32_t selected_count, float* selected_weights,
+    int32_t* selected_ids) {
   for (int32_t rank = 0; rank < selected_count; ++rank) {
     float best_value = kNegInf;
     int32_t best_expert = 0;
@@ -1192,10 +1188,10 @@ inline void select_topk_from_groups_hvx_hf(
 }
 
 // Normalize selected weights, apply routing scale, and store ids/weights.
-inline void normalize_and_store(const float *selected_weights,
-                                const int32_t *selected_ids,
-                                int32_t selected_count, float *out_weights,
-                                int32_t *out_ids, int32_t topk,
+inline void normalize_and_store(const float* selected_weights,
+                                const int32_t* selected_ids,
+                                int32_t selected_count, float* out_weights,
+                                int32_t* out_ids, int32_t topk,
                                 bool renormalize, float routed_scaling_factor) {
   float denom = 0.0F;
   if (renormalize) {
@@ -1224,7 +1220,7 @@ inline void normalize_and_store(const float *selected_weights,
 }
 
 // Zero-fill output slots when a token cannot be routed.
-inline void zero_topk(float *out_weights, int32_t *out_ids, int32_t topk) {
+inline void zero_topk(float* out_weights, int32_t* out_ids, int32_t topk) {
   for (int32_t i = 0; i < topk; ++i) {
     out_ids[i] = 0;
     out_weights[i] = 0.0F;
@@ -1233,8 +1229,8 @@ inline void zero_topk(float *out_weights, int32_t *out_ids, int32_t topk) {
 
 // Route one token through grouped top-k selection.
 inline void route_grouped_token_hf(
-    const float16 *token_input, const float16 *bias, float16 *token_scores,
-    float16 *selection_scores, float *out_weights, int32_t *out_ids,
+    const float16* token_input, const float16* bias, float16* token_scores,
+    float16* selection_scores, float* out_weights, int32_t* out_ids,
     int32_t num_experts, int32_t num_groups, int32_t topk_group, int32_t topk,
     bool renormalize, float routed_scaling_factor, bool use_bias,
     ScoreMode score_mode) {
@@ -1307,8 +1303,8 @@ inline void route_grouped_token_hf(
 
 // Route one token through regular top-k selection.
 inline void route_regular_token_hf(
-    const float16 *token_input, const float16 *bias, float16 *token_scores,
-    float16 *selection_scores, float *out_weights, int32_t *out_ids,
+    const float16* token_input, const float16* bias, float16* token_scores,
+    float16* selection_scores, float* out_weights, int32_t* out_ids,
     int32_t num_experts, int32_t topk, bool renormalize,
     float routed_scaling_factor, bool use_bias, ScoreMode score_mode) {
   if (topk <= 0 || topk > kMaxTopK || num_experts <= 0 ||
@@ -1358,50 +1354,50 @@ inline void route_regular_token_hf(
 }
 
 // Assign per-thread VTCM score scratch slices.
-inline void init_vtcm_scratch_buffers(RouterTileParams *params,
+inline void init_vtcm_scratch_buffers(RouterTileParams* params,
                                       int32_t thread_id, int32_t num_threads) {
-  int8_t *vtcm_base = (int8_t *)qshimGetBaseVtcmAddr();
+  int8_t* vtcm_base = (int8_t*)qshimGetBaseVtcmAddr();
   const uint32_t vtcm_bytes = query_vtcm_size_by_two();
   const uint32_t thread_vtcm_bytes = vtcm_bytes / num_threads;
   uint64_t ptr = (uint64_t)(vtcm_base + thread_id * thread_vtcm_bytes);
   ptr = align_up_u64(ptr, HVX_VectorSize);
 
-  params->vtcm_scores = (float16 *)ptr;
+  params->vtcm_scores = (float16*)ptr;
   ptr += params->num_experts * sizeof(float16);
   ptr = align_up_u64(ptr, HVX_VectorSize);
-  params->vtcm_selection_scores = (float16 *)ptr;
+  params->vtcm_selection_scores = (float16*)ptr;
 }
 
 // Parse kernel arguments and assign each compute worker its token range.
-inline uint32_t init_common_params(const AicJitEntryPointConfig *entryConfig,
-                                   const AicJitPointerArray *pointerArray,
-                                   RouterTileParams *params, bool grouped) {
-  params->input = (const float16 *)pointerArray->pointers[0];
-  params->bias = (const float16 *)pointerArray->pointers[1];
-  params->topk_weights = (float *)pointerArray->pointers[2];
-  params->topk_ids = (int32_t *)pointerArray->pointers[3];
+inline uint32_t init_common_params(const AicJitEntryPointConfig* entryConfig,
+                                   const AicJitPointerArray* pointerArray,
+                                   RouterTileParams* params, bool grouped) {
+  params->input = (const float16*)pointerArray->pointers[0];
+  params->bias = (const float16*)pointerArray->pointers[1];
+  params->topk_weights = (float*)pointerArray->pointers[2];
+  params->topk_ids = (int32_t*)pointerArray->pointers[3];
 
-  params->num_tokens = *(const int32_t *)pointerArray->pointers[4];
-  params->num_experts = *(const int32_t *)pointerArray->pointers[5];
+  params->num_tokens = *(const int32_t*)pointerArray->pointers[4];
+  params->num_experts = *(const int32_t*)pointerArray->pointers[5];
   if (grouped) {
-    params->num_groups = *(const int32_t *)pointerArray->pointers[6];
-    params->topk_group = *(const int32_t *)pointerArray->pointers[7];
-    params->topk = *(const int32_t *)pointerArray->pointers[8];
-    params->renormalize = *(const int32_t *)pointerArray->pointers[9] != 0;
-    params->routed_scaling_factor = *(const float *)pointerArray->pointers[10];
-    params->use_bias = *(const int32_t *)pointerArray->pointers[11] != 0;
-    if (!score_mode_from_id(*(const int32_t *)pointerArray->pointers[12],
+    params->num_groups = *(const int32_t*)pointerArray->pointers[6];
+    params->topk_group = *(const int32_t*)pointerArray->pointers[7];
+    params->topk = *(const int32_t*)pointerArray->pointers[8];
+    params->renormalize = *(const int32_t*)pointerArray->pointers[9] != 0;
+    params->routed_scaling_factor = *(const float*)pointerArray->pointers[10];
+    params->use_bias = *(const int32_t*)pointerArray->pointers[11] != 0;
+    if (!score_mode_from_id(*(const int32_t*)pointerArray->pointers[12],
                             &params->score_mode)) {
       return JIT_DEV_ERROR_INVALID_PARAMETER;
     }
   } else {
     params->num_groups = 0;
     params->topk_group = 0;
-    params->topk = *(const int32_t *)pointerArray->pointers[6];
-    params->renormalize = *(const int32_t *)pointerArray->pointers[7] != 0;
-    params->routed_scaling_factor = *(const float *)pointerArray->pointers[8];
-    params->use_bias = *(const int32_t *)pointerArray->pointers[9] != 0;
-    if (!score_mode_from_id(*(const int32_t *)pointerArray->pointers[10],
+    params->topk = *(const int32_t*)pointerArray->pointers[6];
+    params->renormalize = *(const int32_t*)pointerArray->pointers[7] != 0;
+    params->routed_scaling_factor = *(const float*)pointerArray->pointers[8];
+    params->use_bias = *(const int32_t*)pointerArray->pointers[9] != 0;
+    if (!score_mode_from_id(*(const int32_t*)pointerArray->pointers[10],
                             &params->score_mode)) {
       return JIT_DEV_ERROR_INVALID_PARAMETER;
     }
@@ -1429,9 +1425,9 @@ inline uint32_t init_common_params(const AicJitEntryPointConfig *entryConfig,
 }
 
 // Process assigned tokens through grouped routing.
-inline void process_grouped_direct(const RouterTileParams &params,
+inline void process_grouped_direct(const RouterTileParams& params,
                                    ScoreMode score_mode) {
-  const float16 *bias = params.use_bias ? params.bias : nullptr;
+  const float16* bias = params.use_bias ? params.bias : nullptr;
   for (int32_t token = params.token_begin; token < params.token_end; ++token) {
     route_grouped_token_hf(
         params.input + token * params.num_experts, bias, params.vtcm_scores,
@@ -1443,9 +1439,9 @@ inline void process_grouped_direct(const RouterTileParams &params,
 }
 
 // Process assigned tokens through regular routing.
-inline void process_regular_direct(const RouterTileParams &params,
+inline void process_regular_direct(const RouterTileParams& params,
                                    ScoreMode score_mode) {
-  const float16 *bias = params.use_bias ? params.bias : nullptr;
+  const float16* bias = params.use_bias ? params.bias : nullptr;
   for (int32_t token = params.token_begin; token < params.token_end; ++token) {
     route_regular_token_hf(
         params.input + token * params.num_experts, bias, params.vtcm_scores,
@@ -1457,8 +1453,8 @@ inline void process_regular_direct(const RouterTileParams &params,
 }
 
 // Entry point for the grouped top-k router kernel.
-inline uint32_t grouped_kernel_main(const AicJitEntryPointConfig *entryConfig,
-                                    const AicJitPointerArray *pointerArray) {
+inline uint32_t grouped_kernel_main(const AicJitEntryPointConfig* entryConfig,
+                                    const AicJitPointerArray* pointerArray) {
   RouterTileParams params;
   uint32_t status =
       init_common_params(entryConfig, pointerArray, &params, true);
@@ -1474,8 +1470,8 @@ inline uint32_t grouped_kernel_main(const AicJitEntryPointConfig *entryConfig,
 }
 
 // Entry point for the regular top-k router kernel.
-inline uint32_t regular_kernel_main(const AicJitEntryPointConfig *entryConfig,
-                                    const AicJitPointerArray *pointerArray) {
+inline uint32_t regular_kernel_main(const AicJitEntryPointConfig* entryConfig,
+                                    const AicJitPointerArray* pointerArray) {
   RouterTileParams params;
   uint32_t status =
       init_common_params(entryConfig, pointerArray, &params, false);
@@ -1490,4 +1486,4 @@ inline uint32_t regular_kernel_main(const AicJitEntryPointConfig *entryConfig,
   return JIT_DEV_STATUS_SUCCESS;
 }
 
-} // namespace grouped_topk_router
+}  // namespace grouped_topk_router

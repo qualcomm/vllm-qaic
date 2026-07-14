@@ -22,7 +22,7 @@ At startup, vLLM discovers and loads the QAIC platform plugin, which registers:
 
 ## Component Hierarchy
 
-```
+```text
 vllm.v1.engine
   +-- QaicWorker
         +-- Device initialization
@@ -68,7 +68,7 @@ The vLLM QAIC plugin supports two execution modes, enabling flexibility between 
 
 ### AOT Mode (Primary)
 
-```
+```text
 HuggingFace Model -> QEfficient (export + compile) -> QPC -> qaic_model_runner (AOT) -> Output Tokens
                      --------------------------------        ---------------------
                        one-time compilation step               QAIC Device Session
@@ -76,7 +76,7 @@ HuggingFace Model -> QEfficient (export + compile) -> QPC -> qaic_model_runner (
 
 ### PYT Mode (Eager)
 
-```
+```text
 vLLM Models -> qaic_model_runner (PYT) -> PyTorch execution on torch_qaic backend -> Output Tokens
                --------------------        ----------------------------------------
                  Model execution             Kernel dispatch to QAIC hardware
@@ -84,7 +84,7 @@ vLLM Models -> qaic_model_runner (PYT) -> PyTorch execution on torch_qaic backen
 
 ## Device Topology
 
-```
+```text
 Cloud AI 100 Ultra Card (64 NSP cores total)
 +-- QID 0:  16 NSP Cores
 +-- QID 1:  16 NSP Cores

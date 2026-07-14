@@ -1,3 +1,12 @@
 
 [default.extend-words]
 arange = "arange"
+# `thw` is a valid tensor axis order (Temporal, Height, Width) used by
+# vision-language models (e.g. `image_grid_thw` in Qwen-VL), not a typo.
+thw = "thw"
+# `vor` appears in HVX intrinsic names (e.g. `Q6_V_vor_VV`), not a typo for "for".
+vor = "vor"
+
+[default.extend-identifiers]
+# Proper noun (contributor surname), not a typo for "Signal".
+Singal = "Singal"

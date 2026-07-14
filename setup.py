@@ -3,12 +3,12 @@
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 # ------------------------------------------------------------------
 
-import sys
 import glob
 import importlib.util
 import logging
 import os
 import os.path as osp
+import sys
 from pathlib import Path
 
 from setuptools import Extension, find_packages, setup
@@ -90,8 +90,9 @@ def get_qaic_extensions() -> list[Extension]:
 def get_qaic_build_ext():
     if not _torch_qaic_installed:
         return {}
-    from torch_qaic.custom_ops import QAicBuildExt, HexagonKernelExtension
     import os.path as osp
+
+    from torch_qaic.custom_ops import HexagonKernelExtension, QAicBuildExt
 
     class QAicBuildExtWithMkdir(QAicBuildExt):
         def get_ext_filename(self, ext_name):

@@ -122,7 +122,7 @@ docker run --rm -it --network host \
 
 On a Cloud AI 100 Ultra card (4 QIDs, 16 cores per QID), cores are split between the target model (TLM) and draft model (DLM) on each QID:
 
-```
+```text
 Per QID (16 NSP cores):
 +--------------------+----------------+
 | Target Model (10)  | Draft Model (6)|

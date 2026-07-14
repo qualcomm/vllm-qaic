@@ -5,7 +5,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # SPDX-License-Identifier: Apache-2.0
 # Adapted from vllm/vllm/model_executor/layers/attention/mm_encoder_attention.py
-
 """QAIC-specific ViT (multimodal encoder) attention CustomOp.
 
 Out-of-tree replacement for vLLM's
@@ -32,10 +31,7 @@ where we run an optimized batched SDPA. Three dispatch paths, in priority order:
 import einops
 import torch
 import torch.nn.functional as F
-
-from vllm.model_executor.layers.attention.mm_encoder_attention import (
-    MMEncoderAttention,
-)
+from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 
 
 def _batched_sdpa(

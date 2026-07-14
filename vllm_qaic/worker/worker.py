@@ -5,7 +5,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # SPDX-License-Identifier: Apache-2.0
 # Adapted from vllm/vllm/v1/worker/gpu_worker.py
-
 """A QAIC worker class."""
 
 import gc
@@ -15,7 +14,6 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
-
 import vllm.envs as envs
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CompilationMode
@@ -42,20 +40,12 @@ from vllm.utils.network_utils import get_distributed_init_method, get_ip, get_op
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.core.sched.output import GrammarOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
-from vllm.v1.outputs import (
-    AsyncModelRunnerOutput,
-    DraftTokenIds,
-    ModelRunnerOutput,
-)
+from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.utils import compute_iteration_details
 from vllm.v1.worker.gpu_worker import init_worker_distributed_environment
 from vllm.v1.worker.worker_base import WorkerBase
 
-
-from vllm_qaic.worker.model_runner import (
-    QaicModelRunnerAoT,
-    QaicModelRunnerPyt,
-)
+from vllm_qaic.worker.model_runner import QaicModelRunnerAoT, QaicModelRunnerPyt
 
 logger = init_logger(__name__)
 
@@ -407,7 +397,8 @@ class QaicWorkerPyt(QaicWorker):
             GiB(self.requested_memory),
         )
         logger.debug(
-            "Free memory after profiling: %.2f GiB (total), %.2f GiB (within requested)",
+            "Free memory after profiling: %.2f GiB (total), "
+            "%.2f GiB (within requested)",
             GiB(free_gpu_memory),
             GiB(free_gpu_memory - unrequested_memory),
         )

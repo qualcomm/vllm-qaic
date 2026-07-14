@@ -7,7 +7,7 @@
 | Method | Description | Time |
 |--------|-------------|------|
 | **Docker** (recommended for evaluation) | Pre-built container from GHCR | ~1 min |
-| **Scripted** (recommended for development) | `./scripts/install.sh aot | pyt` | ~5 min |
+| **Scripted** (recommended for development) | `./scripts/install.sh aot \| pyt` | ~5 min |
 | **Manual** | Step-by-step pip commands | ~10 min |
 | **Wheel** | Pre-built wheels from SDK or CI | ~3 min |
 
