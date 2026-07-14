@@ -83,6 +83,25 @@ pip install -e . --no-build-isolation
 - Type annotations where practical
 - Docstrings for public APIs
 
+### Pre-commit hooks
+
+Formatting and lint checks (isort, yapf, ruff, typos, pymarkdown, Qualcomm
+license headers, and DCO sign-off) are enforced with
+[pre-commit](https://pre-commit.com/). Install and enable the hooks once after
+cloning:
+
+```bash
+pip install -r requirements/lint.txt
+pre-commit install
+```
+
+The hooks then run automatically on `git commit`. To run all checks against the
+entire repository manually:
+
+```bash
+pre-commit run --all-files
+```
+
 ## Pull Request Process
 
 1. Fork the repository and clone your fork
