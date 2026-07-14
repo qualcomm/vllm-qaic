@@ -4,7 +4,7 @@ QAIC supports vision-language models (VLMs) using a **kv_offload architecture** 
 
 ## Architecture
 
-```
+```text
 Input (Image + Text)
         |
         v

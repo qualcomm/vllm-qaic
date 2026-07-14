@@ -144,6 +144,7 @@ For the most up-to-date list of supported models and their validation status, pl
 ### Eager Mode
 
 We currently support the following models:
+
 - Qwen/Qwen2.5-VL-3B-Instruct
 - Qwen/Qwen2.5-VL-7B-Instruct
 - Qwen/Qwen2.5-VL-32B-Instruct

@@ -15,7 +15,7 @@ Running both on the same hardware forces a compromised configuration. Disaggrega
 
 ## Architecture
 
-```
+```text
 Client (OpenAI-compatible request)
         |
         v
@@ -79,7 +79,7 @@ docker run --rm -it \
 
 SpD can be layered onto disaggregated serving — proposals are generated and verified entirely on the decode node:
 
-```
+```text
 Prefill Stage (Device Group 0..15)
   +-- Generates KV cache (no SpD overhead)
 

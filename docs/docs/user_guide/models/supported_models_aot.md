@@ -115,6 +115,7 @@ All text-only models listed above support:
 ---
 
 ## Notes
+
 - :material-information-outline: Set `trust_remote_code=True` for Falcon, Phi-3 family models
 - :material-information-outline: Pass `disable_sliding_window` for Gemma family models when using vLLM
 

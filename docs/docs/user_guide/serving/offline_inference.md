@@ -81,10 +81,12 @@ export QAIC_VISIBLE_DEVICES=0
 ## Sampling Constraints
 
 QAIC supports:
+
 - **Greedy sampling**: `temperature < 1e-5` (or `temperature=0.0`)
 - **Random sampling**: `temperature > 0` with `best_of=1`
 
 Not supported:
+
 - `best_of > 1`
 
 ## Memory Management

@@ -16,7 +16,7 @@ Guidelines for contributing to the vLLM QAIC plugin.
 
 **Copyright notice for new Qualcomm-authored files:**
 
-```
+```text
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 ```
@@ -134,6 +134,7 @@ pre-commit run markdownlint --hook-stage manual --all-files
 ## Bug Fix Requirements
 
 To qualify as a bug fix:
+
 - Must not change stated/understood functionality or purpose
 - The original implementation must have had error(s) addressed by the change
 - Non-algorithmic, approximately 10 conventional lines or less

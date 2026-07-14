@@ -6,7 +6,7 @@ The vLLM QAIC plugin has comprehensive CI test infrastructure covering accuracy,
 
 Tests are organized in `tests/test_qaic/`:
 
-```
+```text
 tests/test_qaic/
 ├── test_accuracy.py            # Model accuracy validation
 ├── test_benchmark.py           # Performance benchmarking
@@ -78,15 +78,19 @@ QAIC_VISIBLE_DEVICES=4,5,6,7 bash ci_scripts/run_spd_test_qaic.sh
 ## Test Categories
 
 ### Accuracy Tests
+
 Validate model output against reference implementations. Tests compare generated text or logits with expected results within tolerance.
 
 ### Benchmark Tests
+
 Measure throughput (tokens/s), TTFT, and TPOT under various configurations. Used to detect performance regressions.
 
 ### Consistency Tests
+
 Verify deterministic output across runs with the same seed and parameters.
 
 ### Feature Tests
+
 End-to-end validation of specific features (SpD, LoRA, disaggregated, multimodal) ensuring correct behavior.
 
 ## Adding New Tests
