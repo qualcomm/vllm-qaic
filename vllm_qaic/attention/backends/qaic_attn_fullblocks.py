@@ -92,7 +92,6 @@ class QAicTorchAttentionBackend(AttentionBackend):
 
 @dataclass
 class QAicAttentionMetadata:
-    isa: str
     num_actual_tokens: int  # Number of tokens excluding padding.
     max_query_len: int
     query_start_loc: torch.Tensor
@@ -145,7 +144,6 @@ class QAicAttentionMetadataBuilder(AttentionMetadataBuilder[QAicAttentionMetadat
         if self.window_size is None:
             self.window_size = -1
         self.block_size = vllm_config.cache_config.block_size
-        self.isa = _get_attn_isa(self.dtype, self.block_size, self.head_dim)
 
     def build(
         self,
@@ -186,7 +184,6 @@ class QAicAttentionMetadataBuilder(AttentionMetadataBuilder[QAicAttentionMetadat
         scheduler_metadata = None
 
         attn_metadata = QAicAttentionMetadata(
-            isa=self.isa,
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
             query_start_loc=query_start_loc,
@@ -329,7 +326,6 @@ class QAicAttentionBackendImpl(AttentionImpl):
                 key_cache,
                 value_cache,
                 attn_metadata.slot_mapping,
-                attn_metadata.isa,
             )
 
         if attn_metadata.use_sdpa_prefill:
@@ -365,7 +361,7 @@ class QAicAttentionBackendImpl(AttentionImpl):
         return output
 
     def write_to_paged_cache(
-        self, key, value, key_cache, value_cache, slot_mapping, isa
+        self, key, value, key_cache, value_cache, slot_mapping
     ):
         """
         write key and value into key_cache and value_cache based on the slot mapping
@@ -586,20 +582,3 @@ def _make_sliding_window_bias(
         attn_biases.append(mask)
 
     return attn_biases
-
-
-def _get_attn_isa(
-    dtype: torch.dtype, block_size: int, head_size: int | None = None
-) -> str:
-    if head_size is not None and head_size % 32 != 0 and head_size % 16 == 0:
-        return "vec16"
-    supports_amx = torch._C._cpu._is_amx_tile_supported()
-    if supports_amx and dtype in (torch.bfloat16,) and block_size % 32 == 0:
-        return "amx"
-    elif block_size % 32 == 0:
-        if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
-            return "neon"
-        else:
-            return "vec"
-    else:
-        return "vec16"
