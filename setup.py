@@ -58,9 +58,11 @@ def get_qaic_extensions() -> list[Extension]:
         print("Building vllm_qaic in release mode...")
         extra_compile_args += ["-O3"]
 
-    from torch_qaic.custom_ops.build_utils import _get_device_arch
+    device_arch = os.environ.get("QAIC_DEVICE_ARCH")
+    if not device_arch:
+        from torch_qaic.custom_ops.build_utils import _get_device_arch
 
-    device_arch = _get_device_arch()
+        device_arch = _get_device_arch()
 
     csrc_dir = osp.join(str(ROOT_DIR), "csrc")
     qaic_sources = list(glob.glob(osp.join(csrc_dir, "**", "*.cpp"), recursive=True))

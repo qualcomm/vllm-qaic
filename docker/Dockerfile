@@ -24,7 +24,7 @@
 #     -t vllm-qaic:latest docker/
 # ------------------------------------------------------------------
 
-ARG BASE_IMAGE="ghcr.io/quic/cloud_ai_inference_ubuntu24:1.21.6.0"
+ARG BASE_IMAGE="docker-registry.qualcomm.com/qraniumtest/qranium:1.22.1.19-ubuntu22-x86_64"
 # hadolint ignore=DL3006
 FROM ${BASE_IMAGE}
 
