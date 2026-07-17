@@ -14,8 +14,10 @@
 #
 # Usage:
 #   ./install_vllm_qaic_in_docker.sh --mode aot|pyt
+#                                     [ --python 3.10|3.11|3.12 ]
 #                                     [ --image <image_tag> ]
 #                                     [ --container-name <name> ]
+#                                     [ --device-arch v68|v81 ]
 #                                     [ --dry-run ]
 
 set -euo pipefail
@@ -23,15 +25,24 @@ set -euo pipefail
 usage() {
   cat << EOM
 Usage: install_vllm_qaic_in_docker.sh --mode aot|pyt
+                                       [ --python 3.10|3.11|3.12 ]
                                        [ --image <image_tag> ]
                                        [ --container-name <name> ]
+                                       [ --device-arch v68|v81 ]
                                        [ --dry-run ]
 
 --mode            Install mode: aot or pyt (required).
+--python          Python version to create the venv with: 3.10, 3.11, or
+                   3.12 (default: ${DEFAULT_PYTHON_VERSION}). Also used to
+                   derive the default container name.
 --image           Docker image to run if the container isn't already up
                    (default: ${DEFAULT_IMAGE_TAG}).
 --container-name  Name of the long-lived container to start/reuse
-                   (default: ${DEFAULT_CONTAINER_NAME}).
+                   (default: vllm-qaic-<mode>-py<XYZ>-dev).
+--device-arch     QAIC device arch for PYT builds: v68 (AI100) or v81
+                   (AI200). Bypasses setup.py's live-device probe, needed
+                   when devices aren't accessible at install time
+                   (default: ${DEFAULT_DEVICE_ARCH}). Ignored for --mode aot.
 --dry-run         Print the docker commands without running them.
 EOM
 }
@@ -39,23 +50,32 @@ EOM
 DOCKER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "${DOCKER_DIR}")"
 
+DEFAULT_PYTHON_VERSION="3.12"
 DEFAULT_IMAGE_TAG="vllm-qaic:latest"
-DEFAULT_CONTAINER_NAME="vllm-qaic-dev"
+DEFAULT_DEVICE_ARCH="v68"
 
 MODE=""
+PYTHON_VERSION="${DEFAULT_PYTHON_VERSION}"
 IMAGE_TAG="${DEFAULT_IMAGE_TAG}"
-CONTAINER_NAME="${DEFAULT_CONTAINER_NAME}"
+CONTAINER_NAME=""
+DEVICE_ARCH="${DEFAULT_DEVICE_ARCH}"
 DRY_RUN="OFF"
 
 while [ $# -gt 0 ]; do
     if [ "z$1" == "z--mode" ]; then
         MODE="$2"
         shift 2
+    elif [ "z$1" == "z--python" ]; then
+        PYTHON_VERSION="$2"
+        shift 2
     elif [ "z$1" == "z--image" ]; then
         IMAGE_TAG="$2"
         shift 2
     elif [ "z$1" == "z--container-name" ]; then
         CONTAINER_NAME="$2"
+        shift 2
+    elif [ "z$1" == "z--device-arch" ]; then
+        DEVICE_ARCH="$2"
         shift 2
     elif [ "z$1" == "z--dry-run" ]; then
         DRY_RUN="ON"
@@ -74,6 +94,24 @@ if [ "${MODE}" != "aot" ] && [ "${MODE}" != "pyt" ]; then
     echo "ERROR: --mode must be 'aot' or 'pyt'" >&2
     usage
     exit 1
+fi
+
+if [ "${PYTHON_VERSION}" != "3.10" ] && [ "${PYTHON_VERSION}" != "3.11" ] && [ "${PYTHON_VERSION}" != "3.12" ]; then
+    echo "ERROR: --python must be 3.10, 3.11, or 3.12" >&2
+    usage
+    exit 1
+fi
+
+if [ "${DEVICE_ARCH}" != "v68" ] && [ "${DEVICE_ARCH}" != "v81" ]; then
+    echo "ERROR: --device-arch must be 'v68' or 'v81'" >&2
+    usage
+    exit 1
+fi
+
+PYVER_TAG="py${PYTHON_VERSION//./}"
+
+if [ -z "${CONTAINER_NAME}" ]; then
+    CONTAINER_NAME="vllm-qaic-${MODE}-${PYVER_TAG}-dev"
 fi
 
 run_echo() {
@@ -103,9 +141,13 @@ else
 fi
 
 VENV_INSTALL_CMD="VENV=\"\${HOME}/vllm-env\"; \
-[ -d \"\${VENV}\" ] || python3.12 -m venv \"\${VENV}\"; \
-QAIC_VISIBLE_DEVICES=0 VIRTUAL_ENV=\"\${VENV}\" bash scripts/install.sh ${MODE}; \
-unset QAIC_VISIBLE_DEVICES"
+[ -d \"\${VENV}\" ] || python${PYTHON_VERSION} -m venv \"\${VENV}\"; \
+QAIC_VISIBLE_DEVICES=0"
+if [ "${MODE}" == "pyt" ]; then
+    VENV_INSTALL_CMD="${VENV_INSTALL_CMD} QAIC_DEVICE_ARCH=\"${DEVICE_ARCH}\""
+fi
+VENV_INSTALL_CMD="${VENV_INSTALL_CMD} VIRTUAL_ENV=\"\${VENV}\" bash scripts/install.sh ${MODE}; \
+unset QAIC_VISIBLE_DEVICES QAIC_DEVICE_ARCH"
 
 echo "Installing vllm-qaic (${MODE} mode) into '${CONTAINER_NAME}'..."
 run_echo docker exec --user "${USER_UID}" --workdir "${REPO_ROOT}" "${CONTAINER_NAME}" \

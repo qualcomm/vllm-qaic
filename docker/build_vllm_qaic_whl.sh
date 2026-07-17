@@ -18,6 +18,7 @@
 #                             --mode aot|pyt|both
 #                             [ --image <image_tag> ]
 #                             [ --outdir <dir> ]
+#                             [ --device-arch v68|v81 ]
 #                             [ --force ]
 #                             [ --dry-run ]
 
@@ -29,25 +30,33 @@ Usage: build_vllm_qaic_whl.sh --python 3.10|3.11|3.12
                                --mode aot|pyt|both
                                [ --image <image_tag> ]
                                [ --outdir <dir> ]
+                               [ --device-arch v68|v81 ]
                                [ --force ]
                                [ --dry-run ]
 
---python   Python version to build with: 3.10, 3.11, or 3.12 (required).
---mode     Wheel(s) to build: aot, pyt, or both (required).
---image    Docker image to build/reuse (default: vllm-qaic-py<XYZ>:latest).
---outdir   Wheel output directory (default: <repo_root>/dist).
---force    Force a rebuild of the docker image even if it already exists.
---dry-run  Print the docker commands without running them.
+--python       Python version to build with: 3.10, 3.11, or 3.12 (required).
+--mode         Wheel(s) to build: aot, pyt, or both (required).
+--image        Docker image to build/reuse (default: vllm-qaic-<mode>-py<XYZ>:latest).
+--outdir       Wheel output directory (default: <repo_root>/dist).
+--device-arch  QAIC device arch for PYT builds: v68 (AI100) or v81 (AI200).
+               Bypasses setup.py's live-device probe, needed when devices
+               aren't accessible at build time (default: ${DEFAULT_DEVICE_ARCH}).
+               Ignored for --mode aot.
+--force        Force a rebuild of the docker image even if it already exists.
+--dry-run      Print the docker commands without running them.
 EOM
 }
 
 DOCKER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "${DOCKER_DIR}")"
 
+DEFAULT_DEVICE_ARCH="v68"
+
 PYTHON_VERSION=""
 MODE=""
 IMAGE_TAG=""
 OUT_DIR=""
+DEVICE_ARCH="${DEFAULT_DEVICE_ARCH}"
 FORCE_REBUILD="OFF"
 DRY_RUN="OFF"
 
@@ -63,6 +72,9 @@ while [ $# -gt 0 ]; do
         shift 2
     elif [ "z$1" == "z--outdir" ]; then
         OUT_DIR="$2"
+        shift 2
+    elif [ "z$1" == "z--device-arch" ]; then
+        DEVICE_ARCH="$2"
         shift 2
     elif [ "z$1" == "z--force" ]; then
         FORCE_REBUILD="ON"
@@ -92,10 +104,16 @@ if [ "${MODE}" != "aot" ] && [ "${MODE}" != "pyt" ] && [ "${MODE}" != "both" ]; 
     exit 1
 fi
 
+if [ "${DEVICE_ARCH}" != "v68" ] && [ "${DEVICE_ARCH}" != "v81" ]; then
+    echo "ERROR: --device-arch must be 'v68' or 'v81'" >&2
+    usage
+    exit 1
+fi
+
 PYVER_TAG="py${PYTHON_VERSION//./}"
 
 if [ -z "${IMAGE_TAG}" ]; then
-    IMAGE_TAG="vllm-qaic-${PYVER_TAG}:latest"
+    IMAGE_TAG="vllm-qaic-${MODE}-${PYVER_TAG}:latest"
 fi
 
 if [ -z "${OUT_DIR}" ]; then
@@ -135,9 +153,13 @@ QAIC_GID="$(getent group qaic | cut -d: -f3 || true)"
 
 BUILD_CMD="VENV=\"\${HOME}/wheel-build-env\"; \
 python${PYTHON_VERSION} -m venv \"\${VENV}\"; \
-VIRTUAL_ENV=\"\${VENV}\" QAIC_VISIBLE_DEVICES=0 \
+VIRTUAL_ENV=\"\${VENV}\" QAIC_VISIBLE_DEVICES=0"
+if [ "${MODE}" == "pyt" ] || [ "${MODE}" == "both" ]; then
+    BUILD_CMD="${BUILD_CMD} QAIC_DEVICE_ARCH=\"${DEVICE_ARCH}\""
+fi
+BUILD_CMD="${BUILD_CMD} \
     bash scripts/build_wheels.sh ${MODE} --pyver ${PYTHON_VERSION} --outdir ${OUT_DIR}; \
-unset QAIC_VISIBLE_DEVICES"
+unset QAIC_VISIBLE_DEVICES QAIC_DEVICE_ARCH"
 
 echo "Building vllm_qaic wheel(s) [${MODE}] for python ${PYTHON_VERSION}..."
 RUN_STATUS=0
