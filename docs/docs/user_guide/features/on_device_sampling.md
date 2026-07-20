@@ -134,19 +134,3 @@ llm = LLM(
 
 !!! warning "Not suitable for production"
     `aic_return_pdfs` is a debug/evaluation-only sub-mode intended for offline accuracy comparison against the non-accelerated sampling path. It forfeits the entire point of on-device sampling: instead of reducing device-to-host data transfer and host-side compute, it transfers full probability distributions every step, incurring the same (or greater) transfer/compute cost that ODS is designed to eliminate. Never enable `aic_return_pdfs` in a production deployment.
-
-## Deployment/Engine Mismatch Detection
-
-If a loaded QPC's own binding metadata indicates it was compiled expecting on-device sampling but the running engine is not configured to use it (or vice versa), the mismatch is detected and reported as a clear error at deployment start-up — not discovered later as a generation-time failure.
-
-## Validation Scope
-
-Test coverage for ODS in this plugin validates logic and wiring correctness using a mocked-hardware harness (simulated QPC/session bindings, per-request sampling metadata, and dtype/shape checks). It does **not** measure real-hardware output quality or real-hardware performance. Validating that:
-
-- generated output quality matches the non-accelerated selection path within acceptable tolerance, and
-- data-transfer/compute reduction is measurable on real hardware,
-
-remains a separate validation step owned by the user/operator deploying on real accelerator hardware.
-
-!!! info "QEfficient Reference"
-    See the [engine arguments reference](../configuration/engine_args.md) for the full `override_qaic_config` option table, including `aic_include_sampler`, `max_top_k_ids`, and `aic_return_pdfs` defaults.

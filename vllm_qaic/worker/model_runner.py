@@ -1312,17 +1312,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 top_p_by_slot: dict[int, float] = {}
                 for slot_index, req_id in enumerate(req_ids):
                     req_state = self.requests.get(req_id)
-                    if req_state is None:
-                        raise ValueError(
-                            f"Missing request state for req_id={req_id} at slot "
-                            f"{slot_index} while building ODS sampling controls."
-                        )
                     req_sampling_params = req_state.sampling_params
-                    if req_sampling_params is None:
-                        raise ValueError(
-                            f"Missing sampling params for req_id={req_id} at slot "
-                            f"{slot_index} while building ODS sampling controls."
-                        )
                     min_p_by_slot[slot_index] = float(req_sampling_params.min_p)
                     temperature_by_slot[slot_index] = float(
                         req_sampling_params.temperature

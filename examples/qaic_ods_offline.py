@@ -6,13 +6,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Adapted from examples/qaic.py
 
-"""Offline QAIC on-device sampling (ODS) example.
-
-This script requires real QAIC hardware and a downloaded model to execute.
-The repository test suite uses mocked hardware only, and cannot substitute for
-running this script on an actual QAIC accelerator deployment. Running this
-script loads the configured model and requires the QAIC accelerator driver
-stack to be installed.
+"""
+Offline QAIC on-device sampling (ODS) example.
 """
 
 import gc
@@ -56,7 +51,6 @@ def run_baseline_config() -> None:
     greedy_params = SamplingParams(temperature=0.0, max_tokens=40)
     try:
         outputs = llm.generate(greedy_prompts, greedy_params)
-        print("[PASS] Baseline greedy request succeeded.")
         for output in outputs:
             prompt = output.prompt
             generated_text = output.outputs[0].text
@@ -80,7 +74,6 @@ def run_baseline_config() -> None:
     )
     try:
         outputs = llm.generate(non_greedy_prompts, non_greedy_params)
-        print("[PASS] Baseline non-greedy request succeeded.")
         for output in outputs:
             prompt = output.prompt
             generated_text = output.outputs[0].text
@@ -132,7 +125,6 @@ def run_max_top_k_limit_config() -> None:
             ["This request uses a top_k within the configured ODS limit."],
             in_limit_params,
         )
-        print("[PASS] In-limit top_k request succeeded.")
         for output in outputs:
             prompt = output.prompt
             generated_text = output.outputs[0].text
@@ -188,14 +180,14 @@ def run_debug_submode_config() -> None:
         print(f"[FAIL] Debug sub-mode setup failed: {err}")
         return
 
-    print(
-        "NOTE: aic_return_pdfs debug outputs (ods_debug_last_decode_probs/"
-        "ods_debug_last_prefill_probs) are internal worker-process attributes "
-        "and are not exposed through the public LLM()/RequestOutput API. This "
-        "example only validates that debug sub-mode loads and runs without "
-        "error. This is intentional and aligns with the feature guide warning "
-        "that this mode is not suitable for production."
-    )
+    '''
+    NOTE: aic_return_pdfs debug outputs (ods_debug_last_decode_probs/
+    ods_debug_last_prefill_probs) are internal worker-process attributes 
+    and are not exposed through the public LLM()/RequestOutput API. This 
+    example only validates that debug sub-mode loads and runs without 
+    error. This is intentional and aligns with the feature guide warning 
+    that this mode is not suitable for production.
+    '''
 
     debug_params = SamplingParams(temperature=0.0, max_tokens=40)
     try:
@@ -242,21 +234,6 @@ def run_async_scheduling_config() -> None:
     except Exception as err:
         print(f"[FAIL] async_scheduling setup failed: {err}")
         return
-
-    if llm.llm_engine.vllm_config.scheduler_config.async_scheduling:
-        print(
-            "[INFO] async_scheduling was honored: "
-            "scheduler_config.async_scheduling=True. This run genuinely "
-            "exercises the async decode-completion path."
-        )
-    else:
-        print(
-            "[INFO] async_scheduling was silently downgraded to sync by the "
-            "QAIC platform (vllm_qaic/platform_base.py forces "
-            "async_scheduling=False for all AOT deployments). This run does "
-            "NOT exercise the async decode-completion path -- any PASS/FAIL "
-            "result below reflects the already-validated SYNC path, not async."
-        )
 
     greedy_prompts = [
         "My name is",

@@ -50,76 +50,6 @@ logger = init_logger(__name__)
 
 lock = threading.Lock()
 
-
-# NOTE: This startup guard depends on QEfficient's binding naming convention
-# from QEfficient/utils/sampler_utils.py:get_sampling_inputs_and_outputs().
-# Re-validate these binding names when bumping QEfficient versions.
-_ODS_CORE_BINDING_NAMES = frozenset({"temperatures", "top_ks", "random_numbers"})
-_ODS_DEBUG_PROBS_BINDING_NAME = "probs"
-
-
-def _check_ods_binding_mismatch(
-    engine_expects_ods: bool,
-    binding_index_map: Mapping[str, int],
-    engine_expects_debug_probs: bool = False,
-) -> None:
-    qpc_ods_binding_names = _ODS_CORE_BINDING_NAMES.intersection(binding_index_map)
-    if 0 < len(qpc_ods_binding_names) < len(_ODS_CORE_BINDING_NAMES):
-        present_bindings = sorted(qpc_ods_binding_names)
-        missing_bindings = sorted(_ODS_CORE_BINDING_NAMES - qpc_ods_binding_names)
-        raise ValueError(
-            "On-device sampling binding integrity error at startup: loaded QPC "
-            "contains a partial on-device-sampling binding set "
-            f"(present={present_bindings}, missing={missing_bindings}). This "
-            "indicates a corrupted or incompletely-compiled QPC. Recompile a "
-            "valid QPC artifact before deployment."
-        )
-
-    qpc_has_ods_bindings = _ODS_CORE_BINDING_NAMES.issubset(binding_index_map)
-
-    if engine_expects_ods and not qpc_has_ods_bindings:
-        raise ValueError(
-            "On-device sampling mismatch at startup: deployment is configured "
-            "with on-device sampling enabled, but the loaded QPC was not compiled "
-            "with on-device sampling bindings. Recompile the QPC with on-device "
-            "sampling enabled, or disable on-device sampling in deployment "
-            "configuration."
-        )
-
-    if qpc_has_ods_bindings and not engine_expects_ods:
-        raise ValueError(
-            "On-device sampling mismatch at startup: loaded QPC was compiled with "
-            "on-device sampling bindings, but deployment is not configured to use "
-            "on-device sampling. Enable on-device sampling in deployment "
-            "configuration, or use a QPC compiled without on-device sampling."
-        )
-
-    if (
-        engine_expects_debug_probs
-        and _ODS_DEBUG_PROBS_BINDING_NAME not in binding_index_map
-    ):
-        raise ValueError(
-            "On-device sampling debug/evaluation mismatch at startup: deployment "
-            "is configured with aic_return_pdfs enabled, but the loaded QPC does "
-            "not "
-            "expose a `probs` output binding. Recompile the QPC with "
-            "aic_return_pdfs=True (alongside aic_include_sampler=1), or disable "
-            "aic_return_pdfs in deployment configuration."
-        )
-
-    if (
-        _ODS_DEBUG_PROBS_BINDING_NAME in binding_index_map
-        and not engine_expects_debug_probs
-    ):
-        raise ValueError(
-            "On-device sampling debug/evaluation mismatch at startup: loaded QPC "
-            "was compiled with return_pdfs=True (exposes a `probs` output "
-            "binding), but deployment is not configured to use aic_return_pdfs. "
-            "Enable aic_return_pdfs in override_qaic_config, or use a QPC compiled "
-            "without return_pdfs."
-        )
-
-
 class QaicCompilationComplete(Exception):
     def __init__(
         self,
@@ -593,11 +523,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self.logits_ndim = (
             3 if self.on_device_sampling_en else self.session.get_logits_ndim()
         )
-        _check_ods_binding_mismatch(
-            engine_expects_ods=self.on_device_sampling_en,
-            binding_index_map=self.session.binding_index_map,
-            engine_expects_debug_probs=self.debug_return_probs_en,
-        )
 
         e = time.perf_counter() - s
         logger.info("Successfully loaded QPC in %s secs", e)
@@ -613,22 +538,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             self.get_comp_ctx_lengths()
         )
         self.prefill_num_logits_buffer = None
-        if not self.on_device_sampling_en:
-            # ODS-compiled QPCs perform sampling on-device and can omit the
-            # `logits` binding entirely; registering this buffer at load time is
-            # unnecessary and causes spurious qaicrt binding-not-found warnings.
-            self.prefill_logits = dict(
-                logits=np.random.randn(self.prefill_bsz, 1, self.vocab_size).astype(
-                    np.float32
-                )
-            )
-            self.session.set_buffers(self.prefill_logits)
-            self.batch_prefill_logits = np.empty(
-                (self.decode_bsz, self.vocab_size), dtype=np.float32
-            )
-        else:
-            self.prefill_logits = None
-            self.batch_prefill_logits = None
         self.decode_num_logits_buffer = None
         if self.num_logits_to_keep is not None:
             self.is_spec_decode_target_model = True
@@ -713,310 +622,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             else:
                 self.decode_logits = None
 
-        if self.on_device_sampling_en:
-            probs_info = None
-            penalty_repetition_info = self.get_io_shape_and_dtype(
-                "past_repetition_penalty_buffer", is_input=True
-            )
-            if penalty_repetition_info is None:
-                raise ValueError(
-                    "On-device sampling requires `past_repetition_penalty_buffer` "
-                    "in QPC inputs, but this binding was not found at startup."
-                )
-            penalty_presence_info = self.get_io_shape_and_dtype(
-                "past_presence_penalty_buffer", is_input=True
-            )
-            if penalty_presence_info is None:
-                raise ValueError(
-                    "On-device sampling requires `past_presence_penalty_buffer` "
-                    "in QPC inputs, but this binding was not found at startup."
-                )
-            penalty_repetition_retained_info = self.get_io_shape_and_dtype(
-                "past_repetition_penalty_buffer_RetainedState", is_input=False
-            )
-            if penalty_repetition_retained_info is None:
-                raise ValueError(
-                    "On-device sampling requires "
-                    "`past_repetition_penalty_buffer_RetainedState` in QPC outputs, "
-                    "but this binding was not found at startup."
-                )
-            penalty_presence_retained_info = self.get_io_shape_and_dtype(
-                "past_presence_penalty_buffer_RetainedState", is_input=False
-            )
-            if penalty_presence_retained_info is None:
-                raise ValueError(
-                    "On-device sampling requires "
-                    "`past_presence_penalty_buffer_RetainedState` in QPC outputs, "
-                    "but this binding was not found at startup."
-                )
-
-            penalty_shape = tuple(penalty_repetition_info[0])
-            penalty_dtype = penalty_repetition_info[1]
-            if len(penalty_shape) != 2:
-                raise ValueError(
-                    "On-device sampling `past_repetition_penalty_buffer` shape "
-                    f"must be rank-2, got {penalty_shape}."
-                )
-            if penalty_shape[0] != self.full_batch_size:
-                raise ValueError(
-                    "On-device sampling penalty-history buffer batch dimension "
-                    "mismatch: expected full_batch_size="
-                    f"{self.full_batch_size}, got {penalty_shape[0]}."
-                )
-            if tuple(penalty_presence_info[0]) != penalty_shape:
-                raise ValueError(
-                    "On-device sampling penalty-history input shape mismatch: "
-                    "`past_repetition_penalty_buffer` and "
-                    "`past_presence_penalty_buffer` must match."
-                )
-            if penalty_presence_info[1] != penalty_dtype:
-                raise ValueError(
-                    "On-device sampling penalty-history input dtype mismatch: "
-                    "`past_repetition_penalty_buffer` and "
-                    "`past_presence_penalty_buffer` must match."
-                )
-            if tuple(penalty_repetition_retained_info[0]) != penalty_shape:
-                raise ValueError(
-                    "On-device sampling penalty-history retained-state shape "
-                    "mismatch: `past_repetition_penalty_buffer_RetainedState` does "
-                    "not match `past_repetition_penalty_buffer`."
-                )
-            if tuple(penalty_presence_retained_info[0]) != penalty_shape:
-                raise ValueError(
-                    "On-device sampling penalty-history retained-state shape "
-                    "mismatch: `past_presence_penalty_buffer_RetainedState` does "
-                    "not match `past_presence_penalty_buffer`."
-                )
-            if penalty_repetition_retained_info[1] != penalty_dtype:
-                raise ValueError(
-                    "On-device sampling penalty-history retained-state dtype mismatch: "
-                    "`past_repetition_penalty_buffer_RetainedState` does not match "
-                    "`past_repetition_penalty_buffer`."
-                )
-            if penalty_presence_retained_info[1] != penalty_dtype:
-                raise ValueError(
-                    "On-device sampling penalty-history retained-state dtype mismatch: "
-                    "`past_presence_penalty_buffer_RetainedState` does not match "
-                    "`past_presence_penalty_buffer`."
-                )
-
-            next_tokens_info = self.get_io_shape_and_dtype(
-                "next_tokens", is_input=False
-            )
-            if next_tokens_info is None:
-                raise ValueError(
-                    "On-device sampling requires `next_tokens` in QPC outputs, "
-                    "but this binding was not found at startup."
-                )
-            if self.debug_return_probs_en:
-                probs_info = self.get_io_shape_and_dtype("probs", is_input=False)
-                if probs_info is None:
-                    raise ValueError(
-                        "On-device sampling debug/evaluation sub-mode requires "
-                        "`probs` in QPC outputs, but this binding was not found at "
-                        "startup. The loaded QPC was likely not compiled with "
-                        "return_pdfs=True."
-                    )
-
-            random_numbers_info = self.get_io_shape_and_dtype(
-                "random_numbers", is_input=True
-            )
-            if random_numbers_info is not None:
-                random_numbers_shape = tuple(random_numbers_info[0])
-                if len(random_numbers_shape) != 2:
-                    raise ValueError(
-                        "On-device sampling `random_numbers` binding shape mismatch: "
-                        "expected rank-2 with shape `(bs, ods_max_top_k_ids)`, "
-                        f"but loaded QPC compiled shape={random_numbers_shape}."
-                    )
-                random_numbers_width = random_numbers_shape[-1]
-                if random_numbers_width != self.ods_max_top_k_ids:
-                    raise ValueError(
-                        "On-device sampling `random_numbers` binding width mismatch: "
-                        f"configured ods_max_top_k_ids={self.ods_max_top_k_ids}, "
-                        f"but loaded QPC compiled width={random_numbers_width}. "
-                        "Reconcile deployment `max_top_k_ids` with the loaded QPC "
-                        "compilation settings."
-                    )
-
-                random_numbers_actual_dtype = np.dtype(random_numbers_info[1])
-                random_numbers_expected_dtype = np.dtype(np.float32)
-                if random_numbers_actual_dtype != random_numbers_expected_dtype:
-                    raise ValueError(
-                        "On-device sampling `random_numbers` binding dtype mismatch: "
-                        "backend allocates "
-                        f"dtype={random_numbers_expected_dtype.name}, but loaded "
-                        "QPC compiled "
-                        f"dtype={random_numbers_actual_dtype.name}. Reconcile "
-                        "deployment sampling-input dtype assumptions with the loaded "
-                        "QPC compilation settings."
-                    )
-
-                random_numbers_idx = self.session.binding_index_map.get("random_numbers")
-                if random_numbers_idx is None:
-                    raise ValueError(
-                        "On-device sampling binding index lookup failed for "
-                        "`random_numbers` at startup."
-                    )
-
-                input_idx = self.session.binding_index_map["input_ids"]
-                for i in range(len(self.session.allowed_shapes)):
-                    seq_len = self.session.allowed_shapes[i][input_idx][1][1]
-                    actual_batch_size = self.session.allowed_shapes[i][random_numbers_idx][1][0]
-                    if seq_len == self.prefill_seq_len:
-                        if actual_batch_size != self.prefill_bsz:
-                            raise ValueError(
-                                "On-device sampling prefill binding batch-size mismatch: "
-                                "`random_numbers` specialization row="
-                                f"{i}, expected prefill_bsz={self.prefill_bsz}, "
-                                f"got {actual_batch_size}."
-                            )
-                    elif actual_batch_size != self.decode_bsz:
-                        raise ValueError(
-                            "On-device sampling decode binding batch-size mismatch: "
-                            "`random_numbers` specialization row="
-                            f"{i}, expected decode_bsz={self.decode_bsz}, "
-                            f"got {actual_batch_size}."
-                        )
-
-            ods_input_binding_expected_dtypes = {
-                "temperatures": np.float32,
-                "top_ks": np.int32,
-                "top_ps": np.float32,
-                "min_ps": np.float32,
-                "repetition_penalties": np.float32,
-                "presence_penalties": np.float32,
-            }
-            for binding_name, expected_dtype in (
-                ods_input_binding_expected_dtypes.items()
-            ):
-                binding_info = self.get_io_shape_and_dtype(binding_name, is_input=True)
-                if binding_info is None:
-                    raise ValueError(
-                        f"On-device sampling requires `{binding_name}` in QPC inputs, "
-                        "but this binding was not found at startup."
-                    )
-
-                binding_shape = tuple(binding_info[0])
-                if len(binding_shape) != 2 or binding_shape[-1] != 1:
-                    raise ValueError(
-                        f"On-device sampling `{binding_name}` binding shape mismatch: "
-                        "expected rank-2 with trailing shape `(bs, 1)`, "
-                        f"but loaded QPC compiled shape={binding_shape}."
-                    )
-
-                binding_idx = self.session.binding_index_map.get(binding_name)
-                if binding_idx is None:
-                    raise ValueError(
-                        "On-device sampling binding index lookup failed for "
-                        f"`{binding_name}` at startup."
-                    )
-
-                # Validate per-specialization batch-size dims from
-                # session.allowed_shapes using the same row-classification idiom
-                # as get_comp_ctx_lengths/_decode_ks_from_session.
-                input_idx = self.session.binding_index_map["input_ids"]
-                for i in range(len(self.session.allowed_shapes)):
-                    seq_len = self.session.allowed_shapes[i][input_idx][1][1]
-                    actual_batch_size = self.session.allowed_shapes[i][binding_idx][1][0]
-                    if seq_len == self.prefill_seq_len:
-                        if actual_batch_size != self.prefill_bsz:
-                            raise ValueError(
-                                "On-device sampling prefill binding batch-size mismatch: "
-                                f"`{binding_name}` specialization row={i}, "
-                                f"expected prefill_bsz={self.prefill_bsz}, "
-                                f"got {actual_batch_size}."
-                            )
-                    elif actual_batch_size != self.decode_bsz:
-                        raise ValueError(
-                            "On-device sampling decode binding batch-size mismatch: "
-                            f"`{binding_name}` specialization row={i}, "
-                            f"expected decode_bsz={self.decode_bsz}, "
-                            f"got {actual_batch_size}."
-                        )
-
-                actual_dtype = np.dtype(binding_info[1])
-                expected_np_dtype = np.dtype(expected_dtype)
-                if actual_dtype != expected_np_dtype:
-                    raise ValueError(
-                        f"On-device sampling `{binding_name}` binding dtype mismatch: "
-                        f"backend allocates dtype={expected_np_dtype.name}, but "
-                        f"loaded QPC compiled dtype={actual_dtype.name}. Reconcile "
-                        "deployment sampling-input dtype assumptions with the loaded "
-                        "QPC compilation settings."
-                    )
-
-            last_accepted_output_tokens_info = self.get_io_shape_and_dtype(
-                "last_accepted_output_tokens", is_input=True
-            )
-            if last_accepted_output_tokens_info is None:
-                raise ValueError(
-                    "On-device sampling requires `last_accepted_output_tokens` in "
-                    "QPC inputs, but this binding was not found at startup."
-                )
-
-            last_accepted_output_tokens_shape = tuple(last_accepted_output_tokens_info[0])
-            if (
-                len(last_accepted_output_tokens_shape) != 2
-                or last_accepted_output_tokens_shape[-1] <= 0
-            ):
-                raise ValueError(
-                    "On-device sampling `last_accepted_output_tokens` binding shape "
-                    "mismatch: expected rank-2 with a positive trailing "
-                    "dimension, "
-                    "but loaded QPC compiled "
-                    f"shape={last_accepted_output_tokens_shape}."
-                )
-
-            last_accepted_output_tokens_actual_dtype = np.dtype(
-                last_accepted_output_tokens_info[1]
-            )
-            last_accepted_output_tokens_expected_dtype = np.dtype(np.int64)
-            if (
-                last_accepted_output_tokens_actual_dtype
-                != last_accepted_output_tokens_expected_dtype
-            ):
-                raise ValueError(
-                    "On-device sampling `last_accepted_output_tokens` binding dtype "
-                    "mismatch: backend allocates "
-                    f"dtype={last_accepted_output_tokens_expected_dtype.name}, but "
-                    "loaded QPC compiled "
-                    f"dtype={last_accepted_output_tokens_actual_dtype.name}. "
-                    "Reconcile deployment sampling-input dtype assumptions with the "
-                    "loaded QPC compilation settings."
-                )
-
-            last_accepted_output_tokens_idx = self.session.binding_index_map.get(
-                "last_accepted_output_tokens"
-            )
-            if last_accepted_output_tokens_idx is None:
-                raise ValueError(
-                    "On-device sampling binding index lookup failed for "
-                    "`last_accepted_output_tokens` at startup."
-                )
-
-            input_idx = self.session.binding_index_map["input_ids"]
-            for i in range(len(self.session.allowed_shapes)):
-                seq_len = self.session.allowed_shapes[i][input_idx][1][1]
-                actual_batch_size = self.session.allowed_shapes[i][
-                    last_accepted_output_tokens_idx
-                ][1][0]
-                if seq_len == self.prefill_seq_len:
-                    if actual_batch_size != self.prefill_bsz:
-                        raise ValueError(
-                            "On-device sampling prefill binding batch-size mismatch: "
-                            "`last_accepted_output_tokens` specialization row="
-                            f"{i}, expected prefill_bsz={self.prefill_bsz}, "
-                            f"got {actual_batch_size}."
-                        )
-                elif actual_batch_size != self.decode_bsz:
-                    raise ValueError(
-                        "On-device sampling decode binding batch-size mismatch: "
-                        "`last_accepted_output_tokens` specialization row="
-                        f"{i}, expected decode_bsz={self.decode_bsz}, "
-                        f"got {actual_batch_size}."
-                    )
-
             penalty_history_buffers: dict[str, np.ndarray] = {}
             self.session.create_numpy_penalty_buffers(
                 penalty_history_buffers,
@@ -1061,11 +666,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     }
                 )
 
-            if self.prefill_ods_inputs is None:
-                raise ValueError(
-                    "On-device sampling is enabled but prefill sampling-control "
-                    "buffers are uninitialized."
-                )
             self.prefill_ods_inputs.update(
                 {
                     "past_repetition_penalty_buffer": self.past_repetition_penalty_buffer,
@@ -1093,19 +693,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     next_tokens_dtype,
                     buffer_name="next_tokens",
                 )
-                if "next_tokens" not in self.decode_batch_inputs_by_k[_k]:
-                    raise ValueError(
-                        "Failed to register `next_tokens` decode output buffer for "
-                        f"decode specialization K={_k}."
-                    )
                 registered_next_tokens = self.decode_batch_inputs_by_k[_k]["next_tokens"]
-                if tuple(registered_next_tokens.shape) != expected_next_tokens_shape:
-                    raise ValueError(
-                        "On-device sampling `next_tokens` decode output buffer shape "
-                        "mismatch for decode specialization "
-                        f"K={_k}: expected {expected_next_tokens_shape}, got "
-                        f"{tuple(registered_next_tokens.shape)}."
-                    )
                 self.decode_next_tokens_by_k[_k] = registered_next_tokens
 
             prefill_next_tokens_buffer: dict[str, np.ndarray] = {}
@@ -1115,16 +703,9 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 next_tokens_dtype,
                 buffer_name="next_tokens",
             )
-            if "next_tokens" not in prefill_next_tokens_buffer:
-                raise ValueError("Failed to register `next_tokens` prefill output buffer.")
             self.prefill_next_tokens = prefill_next_tokens_buffer["next_tokens"]
 
             if self.debug_return_probs_en:
-                if probs_info is None:
-                    raise ValueError(
-                        "On-device sampling debug/evaluation sub-mode expected "
-                        "`probs` output metadata at startup, but none was available."
-                    )
                 probs_dtype = probs_info[1]
                 self.decode_probs_by_k = {}
                 for _k in self.decode_ks:
@@ -1136,19 +717,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                         probs_dtype,
                         buffer_name="probs",
                     )
-                    if "probs" not in self.decode_batch_inputs_by_k[_k]:
-                        raise ValueError(
-                            "Failed to register `probs` decode output buffer for "
-                            f"decode specialization K={_k}."
-                        )
                     registered_probs = self.decode_batch_inputs_by_k[_k]["probs"]
-                    if tuple(registered_probs.shape) != expected_probs_shape:
-                        raise ValueError(
-                            "On-device sampling `probs` decode output buffer shape "
-                            "mismatch for decode specialization "
-                            f"K={_k}: expected {expected_probs_shape}, got "
-                            f"{tuple(registered_probs.shape)}."
-                        )
                     self.decode_probs_by_k[_k] = registered_probs
 
                 prefill_probs_buffer: dict[str, np.ndarray] = {}
@@ -1158,8 +727,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     probs_dtype,
                     buffer_name="probs",
                 )
-                if "probs" not in prefill_probs_buffer:
-                    raise ValueError("Failed to register `probs` prefill output buffer.")
                 self.prefill_probs = prefill_probs_buffer["probs"]
         # CCL state for prefill: dict keyed by prefill exec-object slot id, value
         # is the bucket currently in flight on that slot (0 = idle). Used by
@@ -1413,11 +980,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         ods_prefill_presence_penalties = None
         ods_prefill_random_numbers = None
         if self.on_device_sampling_en:
-            if self.prefill_next_tokens is None:
-                raise ValueError(
-                    "On-device sampling is enabled but prefill `next_tokens` "
-                    "output buffer is uninitialized."
-                )
             self.ods_step_prefill_next_tokens = np.empty(
                 (num_prefill_reqs, 1),
                 dtype=self.prefill_next_tokens.dtype,
@@ -1438,25 +1000,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 ods_prefill_random_numbers = np.asarray(
                     sampling_params["random_numbers"], dtype=np.float32
                 )
-                if (
-                    ods_prefill_temperatures.shape[0] != num_prefill_reqs
-                    or ods_prefill_top_ks.shape[0] != num_prefill_reqs
-                    or ods_prefill_top_ps.shape[0] != num_prefill_reqs
-                    or ods_prefill_min_ps.shape[0] != num_prefill_reqs
-                    or ods_prefill_repetition_penalties.shape[0] != num_prefill_reqs
-                    or ods_prefill_presence_penalties.shape[0] != num_prefill_reqs
-                    or ods_prefill_random_numbers.shape[0] != num_prefill_reqs
-                ):
-                    raise ValueError(
-                        "Prefill ODS sampling parameter length mismatch: expected "
-                        f"{num_prefill_reqs} rows for each control array."
-                    )
-                if ods_prefill_random_numbers.shape[1] != self.ods_max_top_k_ids:
-                    raise ValueError(
-                        "Prefill ODS random_numbers width mismatch: expected "
-                        f"{self.ods_max_top_k_ids}, got "
-                        f"{ods_prefill_random_numbers.shape[1]}."
-                    )
         idx_start = 0
         for i, idx_end in enumerate(prefill_cum_sum):
             # extract indices of specific request
@@ -1498,30 +1041,9 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             if mm_kwargs_list and (mm_kwargs := mm_kwargs_list[i]):
                 chunk_inputs.update(mm_kwargs)
             if self.on_device_sampling_en:
-                if self.prefill_ods_inputs is None:
-                    raise ValueError(
-                        "On-device sampling is enabled but prefill sampling-control "
-                        "buffers are uninitialized."
-                    )
-                if self.prefill_next_tokens is None:
-                    raise ValueError(
-                        "On-device sampling is enabled but prefill `next_tokens` "
-                        "output buffer is uninitialized."
-                    )
-                if self.prefill_last_accepted_output_tokens is None:
-                    raise ValueError(
-                        "On-device sampling is enabled but prefill "
-                        "`last_accepted_output_tokens` input buffer is "
-                        "uninitialized."
-                    )
                 chunk_inputs.update(self.prefill_ods_inputs)
                 chunk_inputs["next_tokens"] = self.prefill_next_tokens
                 if self.debug_return_probs_en:
-                    if self.prefill_probs is None:
-                        raise ValueError(
-                            "On-device sampling debug/evaluation sub-mode is enabled "
-                            "but prefill `probs` output buffer is uninitialized."
-                        )
                     chunk_inputs["probs"] = self.prefill_probs
                 # During prefill the sampler selects prefill_path via is_prefill,
                 # so decode_path's last_accepted_output_tokens input is ignored.
@@ -1693,18 +1215,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             self.ods_step_num_decodes = num_decodes
             self.ods_step_decode_mdt = mdt
         batch_inputs = self.decode_batch_inputs_by_k[current_k]
-        if self.on_device_sampling_en and "next_tokens" not in batch_inputs:
-            raise ValueError(
-                "On-device sampling is enabled but decode `next_tokens` output "
-                f"buffer is missing for decode specialization K={current_k}."
-            )
-        if self.debug_return_probs_en and "probs" not in batch_inputs:
-            raise ValueError(
-                "On-device sampling debug/evaluation sub-mode is enabled but "
-                "decode `probs` output buffer is missing for decode "
-                f"specialization K={current_k}."
-            )
-
         ods_decode_temperatures = None
         ods_decode_top_ks = None
         ods_decode_top_ps = None
@@ -1728,19 +1238,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             ods_decode_random_numbers = np.asarray(
                 sampling_params["random_numbers"], dtype=np.float32
             )
-            if (
-                ods_decode_temperatures.shape[0] != num_decodes
-                or ods_decode_top_ks.shape[0] != num_decodes
-                or ods_decode_top_ps.shape[0] != num_decodes
-                or ods_decode_min_ps.shape[0] != num_decodes
-                or ods_decode_repetition_penalties.shape[0] != num_decodes
-                or ods_decode_presence_penalties.shape[0] != num_decodes
-                or ods_decode_random_numbers.shape[0] != num_decodes
-            ):
-                raise ValueError(
-                    "Decode ODS sampling parameter length mismatch: expected "
-                    f"{num_decodes} rows for each control array."
-                )
+
             # Scalar ODS decode controls may arrive as either 1D
             # (num_decodes,) or one-column 2D (num_decodes, 1). Assigning the
             # un-squeezed one-column form into per-slot [:, 0] slices (shape

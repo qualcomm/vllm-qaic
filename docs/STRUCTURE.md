@@ -151,7 +151,7 @@ Decisions applied during documentation review for this release:
 
 | Decision | Rationale |
 |----------|-----------|
-| **On-device sampling removed** | Not supported as of v0.15.0; feature page deleted, all references removed. **Status update (post-v0.15.0):** on-device sampling (ODS) is now functional for AOT mode with a restored feature page (`user_guide/features/on_device_sampling.md`) and engine-argument coverage. Config-time and per-request validation guardrails are enforced (JIT/eager, disaggregated serving, speculative decoding, and guided-decoding rejections; QPC binding-mismatch detection at load time). |
+| **On-device sampling removed** | Not supported as of v0.15.0; feature page deleted, all references removed. Supported in v0.23.0. |
 | **SpD + LoRA removed from limitations** | Upstream vLLM also does not support this (GitHub issue #6137). Not QAIC-specific. |
 | **SpD + Multimodal removed from limitations** | Upstream vLLM raises `NotImplementedError` for multimodal + spec decode (`v1/spec_decode/draft_model.py`). Not QAIC-specific. |
 | **Beam search removed from limitations** | Not planning to support; no need to list. |

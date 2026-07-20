@@ -464,50 +464,6 @@ class QaicPlatform(Platform):
             scheduler_config.async_scheduling = False
 
     @classmethod
-    def validate_request(
-        cls,
-        processed_inputs,
-        params: "SamplingParams | PoolingParams",
-    ) -> None:
-        from vllm.pooling_params import PoolingParams
-        from vllm.sampling_params import SamplingParams
-
-        del processed_inputs
-
-        if not cls.on_device_sampling_en:
-            return
-
-        if isinstance(params, PoolingParams):
-            return
-
-        if not isinstance(params, SamplingParams):
-            return
-
-        if params.structured_outputs is not None:
-            raise ValueError(
-                "On-device sampling on QAIC does not support structured/guided "
-                "decoding requests."
-            )
-
-        if params.logprobs is not None:
-            raise ValueError(
-                "On-device sampling on QAIC does not support generated-token "
-                "confidence scores (logprobs)."
-            )
-
-        if params.prompt_logprobs is not None:
-            raise ValueError(
-                "On-device sampling on QAIC does not support prompt-token "
-                "confidence scores (prompt_logprobs)."
-            )
-
-        if params.top_k > cls.ods_max_top_k_ids:
-            raise ValueError(
-                f"Requested top_k={params.top_k} exceeds configured "
-                f"max_top_k_ids={cls.ods_max_top_k_ids} for on-device sampling."
-            )
-
-    @classmethod
     def is_pin_memory_available(cls) -> bool:
         logger.warning("Pin memory is not supported on Qaic.")
         return False

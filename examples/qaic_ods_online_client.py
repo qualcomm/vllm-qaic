@@ -47,13 +47,6 @@ vllm serve TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
     --additional-config '{"override_qaic_config":{"aic_include_sampler":1}}' \
     --async-scheduling
 
-NOTE: If the server startup log shows "QAIC currently does not support async
-scheduling; Falling back to non-async scheduling.", the server silently
-downgraded to sync and the async path was NOT actually exercised. Check
-server startup logs for this exact message before treating any client-side
-PASS/FAIL result below as an async-scheduling validation -- a PASS in that
-case only re-confirms the already-validated SYNC path, not async.
-
 Equivalent OpenAI-compatible curl requests:
 
 BASELINE:
