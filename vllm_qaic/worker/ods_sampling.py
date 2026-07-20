@@ -1,3 +1,7 @@
+# ------------------------------------------------------------------
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause-Clear
+# ------------------------------------------------------------------
 """On-device sampling array construction helpers.
 
 This module converts vLLM per-request sampling metadata into per-slot NumPy
