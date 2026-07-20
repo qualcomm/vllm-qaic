@@ -127,6 +127,7 @@ nav:
           - Offline Inference: user_guide/serving/offline_inference.md
       - Features:
           - Speculative Decoding: user_guide/features/speculative_decoding.md
+          - On-Device Sampling: user_guide/features/on_device_sampling.md
           - Quantization: user_guide/features/quantization.md
           - Multimodal: user_guide/features/multimodal.md
           - Disaggregated Serving: user_guide/features/disaggregated_serving.md

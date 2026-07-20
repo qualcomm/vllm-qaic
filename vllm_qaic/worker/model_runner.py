@@ -55,6 +55,10 @@ from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import record_function_or_nullcontext
 from vllm.v1.worker.gpu_input_batch import InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner, AsyncGPUPoolingModelRunnerOutput
+from vllm_qaic.worker.ods_sampling import (
+    build_ods_sampling_arrays,
+    detect_nondefault_frequency_penalty,
+)
 
 try:
     import torch_qaic.profile as qaic_profile
@@ -211,6 +215,13 @@ class QaicAsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
                     kv_cache_info=mr.kv_cache_info,  # type: ignore[has-type]
                     connector_metadata=self._kv_connector_metadata,
                 )
+            if (
+                mr.model.on_device_sampling_en
+                and state.scheduler_output.finished_req_ids
+            ):
+                mr._ods_frequency_penalty_warned_req_ids.difference_update(
+                    state.scheduler_output.finished_req_ids
+                )
             return ModelRunnerOutput(
                 req_ids=self._input_batch_req_ids,
                 req_id_to_index=self._input_batch_req_id_to_index,
@@ -227,19 +238,50 @@ class QaicAsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
             state.pending_prefill_exec_queue, state.num_decodes_executed
         )
         # 2. Compute hidden states + logits
-        hidden_states, logits = mr._compute_hidden_states_and_logits(
-            state.hidden_states_decode,
-            state.hidden_states_prefill,
-            state.num_decodes_executed,
-            spec_decode_metadata=state.spec_decode_metadata,
-        )
+        if mr.model.on_device_sampling_en:
+            hidden_states = torch.empty((0, 0), dtype=torch.float32)
+            logits = torch.zeros((mr.input_batch.num_reqs, 1), dtype=torch.float32)
+        else:
+            hidden_states, logits = mr._compute_hidden_states_and_logits(
+                state.hidden_states_decode,
+                state.hidden_states_prefill,
+                state.num_decodes_executed,
+                spec_decode_metadata=state.spec_decode_metadata,
+            )
         # Apply structured output bitmasks if present.
-        if self._grammar_output is not None:
+        if self._grammar_output is not None and not mr.model.on_device_sampling_en:
             apply_grammar_bitmask(
                 state.scheduler_output, self._grammar_output, mr.input_batch, logits
             )
 
-        sampler_output = mr._sample(logits, state.spec_decode_metadata)
+        sampling_metadata = None
+        if mr.model.on_device_sampling_en:
+            sampling_metadata = mr.input_batch.sampling_metadata
+            if sampling_metadata is not None:
+                nondefault_slots = detect_nondefault_frequency_penalty(sampling_metadata)
+                req_ids = mr.input_batch.req_ids
+                for slot_index in nondefault_slots:
+                    req_id = req_ids[slot_index]
+                    if req_id in mr._ods_frequency_penalty_warned_req_ids:
+                        continue
+                    logger.warning(
+                        "Request %s specified non-default frequency_penalty, "
+                        "but frequency_penalty is ignored when on-device "
+                        "sampling is enabled.",
+                        req_id,
+                    )
+                    mr._ods_frequency_penalty_warned_req_ids.add(req_id)
+
+        if mr.model.on_device_sampling_en:
+            if state.spec_decode_metadata is not None:
+                raise ValueError(
+                    "On-device sampling requires speculative decoding to be "
+                    "disabled; spec_decode_metadata must be None."
+                )
+            mr.input_batch.update_async_output_token_ids()
+            sampler_output = mr.model.sample(logits, sampling_metadata)
+        else:
+            sampler_output = mr._sample(logits, state.spec_decode_metadata)
         mr.input_batch.prev_sampled_token_ids = None
 
         # 3. Book keep to update input batch
@@ -258,6 +300,15 @@ class QaicAsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
             hidden_states,
             state.scheduler_output.total_num_scheduled_tokens,
         )
+        if mr.model.on_device_sampling_en:
+            num_nans_in_logits = None
+        if (
+            mr.model.on_device_sampling_en
+            and state.scheduler_output.finished_req_ids
+        ):
+            mr._ods_frequency_penalty_warned_req_ids.difference_update(
+                state.scheduler_output.finished_req_ids
+            )
 
         # 4. Set event to unblock future batches
         mr.execute_model_state = None
@@ -503,6 +554,12 @@ class QaicModelRunnerAoT(GPUModelRunner):
         # first _prepare_qaic_inputs call return 0.
         self.spec_decode_max_seq_len = 0
         self.model_runner_output_event: Event = Event()
+        # Correctness invariant: in the targeted vLLM engine version,
+        # scheduler_output.finished_req_ids must be exhaustive for request
+        # teardown (normal completion, abort, and error). If a future version
+        # misses a teardown path, warned request IDs can become stale in this
+        # set and accumulate without bound.
+        self._ods_frequency_penalty_warned_req_ids: set[str] = set()
         # Post-process tensors
         self._postprocess_tensors()
 
@@ -937,6 +994,26 @@ class QaicModelRunnerAoT(GPUModelRunner):
         # kv_consumer runs decode on last prompt token as well
         if (num_decodes is not None and num_decodes > 0) or self.is_kv_consumer:
             self.model.complete_inf(self.model.decode_execObj_idx, False)  # type: ignore
+            if self.model.on_device_sampling_en:
+                fresh_retained_states = self.model.session.refresh_retained_state_buffers(
+                    [
+                        "past_repetition_penalty_buffer_RetainedState",
+                        "past_presence_penalty_buffer_RetainedState",
+                    ],
+                    self.model.decode_execObj_idx,
+                )
+                np.copyto(
+                    self.model.past_repetition_penalty_buffer_retained_state,
+                    fresh_retained_states[
+                        "past_repetition_penalty_buffer_RetainedState"
+                    ],
+                )
+                np.copyto(
+                    self.model.past_presence_penalty_buffer_retained_state,
+                    fresh_retained_states[
+                        "past_presence_penalty_buffer_RetainedState"
+                    ],
+                )
 
     def _compute_hidden_states_and_logits(
         self,
@@ -1214,10 +1291,101 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 decode_lora_ids = req_lora_mapping[: self.num_decodes].astype(np.int64)
                 prefill_lora_ids = req_lora_mapping[self.num_decodes :].astype(np.int64)
 
+            ods_sampling_params_prefill: dict[str, np.ndarray] | None = None
+            ods_sampling_params_decode: dict[str, np.ndarray] | None = None
+            if self.model.on_device_sampling_en:
+                self.model.ods_step_prefill_next_tokens = None
+                self.model.ods_step_num_decodes = 0
+                self.model.ods_step_decode_mdt = 1
+
+                sampling_metadata = self.input_batch.sampling_metadata
+                if sampling_metadata is None:
+                    raise ValueError(
+                        "On-device sampling is enabled but sampling_metadata is missing "
+                        "for the current batch."
+                    )
+
+                req_ids = self.input_batch.req_ids
+                min_p_by_slot: dict[int, float] = {}
+                temperature_by_slot: dict[int, float] = {}
+                top_k_by_slot: dict[int, int] = {}
+                top_p_by_slot: dict[int, float] = {}
+                for slot_index, req_id in enumerate(req_ids):
+                    req_state = self.requests.get(req_id)
+                    if req_state is None:
+                        raise ValueError(
+                            f"Missing request state for req_id={req_id} at slot "
+                            f"{slot_index} while building ODS sampling controls."
+                        )
+                    req_sampling_params = req_state.sampling_params
+                    if req_sampling_params is None:
+                        raise ValueError(
+                            f"Missing sampling params for req_id={req_id} at slot "
+                            f"{slot_index} while building ODS sampling controls."
+                        )
+                    min_p_by_slot[slot_index] = float(req_sampling_params.min_p)
+                    temperature_by_slot[slot_index] = float(
+                        req_sampling_params.temperature
+                    )
+                    top_k_by_slot[slot_index] = int(req_sampling_params.top_k)
+                    top_p_by_slot[slot_index] = float(req_sampling_params.top_p)
+
+                # vLLM can elide batch-level temperature/top_k/top_p tensors on
+                # all_greedy/no_top_k/no_top_p fast paths; per-request
+                # SamplingParams values keep ODS from failing when those are None.
+                temperature_fallback = np.asarray(
+                    [temperature_by_slot[i] for i in range(len(req_ids))],
+                    dtype=np.float32,
+                )
+                top_k_fallback = np.asarray(
+                    [top_k_by_slot[i] for i in range(len(req_ids))],
+                    dtype=np.int32,
+                )
+                top_p_fallback = np.asarray(
+                    [top_p_by_slot[i] for i in range(len(req_ids))],
+                    dtype=np.float32,
+                )
+
+                ods_arrays = build_ods_sampling_arrays(
+                    sampling_metadata,
+                    min_p_by_slot,
+                    self.model.ods_max_top_k_ids,
+                    self.model.ods_max_top_k_ids,
+                    temperature_fallback=temperature_fallback,
+                    top_k_fallback=top_k_fallback,
+                    top_p_fallback=top_p_fallback,
+                )
+
+                num_reqs = self.input_batch.num_reqs
+                if ods_arrays.temperatures.shape[0] != num_reqs:
+                    raise ValueError(
+                        "ODS sampling metadata size mismatch: "
+                        f"expected {num_reqs} slots, got "
+                        f"{ods_arrays.temperatures.shape[0]}."
+                    )
+
+                all_sampling_params: dict[str, np.ndarray] = {
+                    "temperatures": ods_arrays.temperatures,
+                    "top_ks": ods_arrays.top_ks,
+                    "top_ps": ods_arrays.top_ps,
+                    "min_ps": ods_arrays.min_ps,
+                    "repetition_penalties": ods_arrays.repetition_penalties,
+                    "presence_penalties": ods_arrays.presence_penalties,
+                    "random_numbers": ods_arrays.random_numbers,
+                }
+                ods_sampling_params_decode = {
+                    key: values[: self.num_decodes]
+                    for key, values in all_sampling_params.items()
+                }
+                ods_sampling_params_prefill = {
+                    key: values[self.num_decodes : num_reqs]
+                    for key, values in all_sampling_params.items()
+                }
+
             if prefill_input_ids.size > 0:
                 hidden_states_prefill = (
                     self.create_logits_np(len(prefill_cum_sum), self.model.vocab_size)
-                    if not self.is_kv_consumer
+                    if not self.is_kv_consumer and not self.model.on_device_sampling_en
                     else None
                 )
                 # Per-prefill-request total prompt length, for CCL bucket selection.
@@ -1237,11 +1405,16 @@ class QaicModelRunnerAoT(GPUModelRunner):
                     callback=callback,
                     lora_ids=prefill_lora_ids,
                     num_prompt_tokens_prefill=num_prompt_tokens_prefill,
+                    sampling_params=ods_sampling_params_prefill,
                 )
 
             if decode_input_ids.size > 0:
-                hidden_states_decode = self.create_logits_np(
-                    self.model.decode_bsz, self.model.vocab_size, self.active_k + 1
+                hidden_states_decode = (
+                    None
+                    if self.model.on_device_sampling_en
+                    else self.create_logits_np(
+                        self.model.decode_bsz, self.model.vocab_size, self.active_k + 1
+                    )
                 )
                 self.model(
                     input_ids=decode_input_ids,
@@ -1251,6 +1424,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
                     logits=hidden_states_decode,
                     callback=callback,
                     lora_ids=decode_lora_ids,
+                    sampling_params=ods_sampling_params_decode,
                 )
 
         hidden_states, logits = None, None
@@ -1258,12 +1432,16 @@ class QaicModelRunnerAoT(GPUModelRunner):
             self.num_decodes if not self.is_kv_consumer else len(self.cu_num_tokens)
         )
         if not self.use_async_scheduling:
-            hidden_states, logits = self._compute_hidden_states_and_logits(
-                hidden_states_decode,
-                hidden_states_prefill,
-                num_decodes_executed,
-                spec_decode_metadata=spec_decode_metadata,
-            )
+            if self.model.on_device_sampling_en:
+                hidden_states = torch.empty((0, 0), dtype=torch.float32)
+                logits = torch.zeros((self.input_batch.num_reqs, 1), dtype=torch.float32)
+            else:
+                hidden_states, logits = self._compute_hidden_states_and_logits(
+                    hidden_states_decode,
+                    hidden_states_prefill,
+                    num_decodes_executed,
+                    spec_decode_metadata=spec_decode_metadata,
+                )
 
         spec_decode_common_attn_metadata = None
         if self.speculative_config is not None:
@@ -1379,7 +1557,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
         self.execute_model_state = None
 
         # Apply structured output bitmasks if present.
-        if grammar_output is not None:
+        if grammar_output is not None and not self.model.on_device_sampling_en:
             apply_grammar_bitmask(
                 scheduler_output, grammar_output, self.input_batch, logits
             )
@@ -1389,7 +1567,35 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 torch.zeros((len(self.batch_indices), 1), dtype=torch.int64)
             )
         else:
-            sampler_output = self._sample(logits, spec_decode_metadata)
+            sampling_metadata = None
+            if self.model.on_device_sampling_en:
+                sampling_metadata = self.input_batch.sampling_metadata
+                if sampling_metadata is not None:
+                    nondefault_slots = detect_nondefault_frequency_penalty(
+                        sampling_metadata
+                    )
+                    req_ids = self.input_batch.req_ids
+                    for slot_index in nondefault_slots:
+                        req_id = req_ids[slot_index]
+                        if req_id in self._ods_frequency_penalty_warned_req_ids:
+                            continue
+                        logger.warning(
+                            "Request %s specified non-default frequency_penalty, "
+                            "but frequency_penalty is ignored when on-device "
+                            "sampling is enabled.",
+                            req_id,
+                        )
+                        self._ods_frequency_penalty_warned_req_ids.add(req_id)
+            if self.model.on_device_sampling_en:
+                if spec_decode_metadata is not None:
+                    raise ValueError(
+                        "On-device sampling requires speculative decoding to be "
+                        "disabled; spec_decode_metadata must be None."
+                    )
+                self.input_batch.update_async_output_token_ids()
+                sampler_output = self.model.sample(logits, sampling_metadata)
+            else:
+                sampler_output = self._sample(logits, spec_decode_metadata)
 
         # AOT-only path: eager mode returns early via super().execute_model() above.
         self._draft_token_ids = None
@@ -1441,6 +1647,12 @@ class QaicModelRunnerAoT(GPUModelRunner):
             hidden_states,
             scheduler_output.total_num_scheduled_tokens,
         )
+        if self.model.on_device_sampling_en:
+            num_nans_in_logits = None
+        if self.model.on_device_sampling_en and scheduler_output.finished_req_ids:
+            self._ods_frequency_penalty_warned_req_ids.difference_update(
+                scheduler_output.finished_req_ids
+            )
 
         if propose_drafts_after_bookkeeping:
             # ngram and other speculative decoding methods use the sampled
@@ -1584,18 +1796,95 @@ class QaicModelRunnerAoT(GPUModelRunner):
         if self.model.is_multimodal_model and self.model.default_mm_kwargs:
             decode_mm_kwargs_list = [self.model.default_mm_kwargs] * decode_bsz
 
-        decode_logits = self.create_logits_np(
-            self.model.decode_bsz, self.model.vocab_size, self.max_decode_tokens
-        )
-        self.model(
-            input_ids=decode_input_ids,
-            positions=decode_positions,
-            batch_indices=decode_block_ids,
-            lora_ids=decode_lora_ids,
-            is_prompt=False,
-            logits=decode_logits,
-            mm_kwargs_list=decode_mm_kwargs_list,
-        )
+        if self.model.on_device_sampling_en:
+            from QEfficient.utils import constants as qefficient_constants
+            from QEfficient.utils.constants import Constants
+
+            example_temperature = getattr(
+                Constants,
+                "ONNX_EXPORT_EXAMPLE_TEMPERATURES",
+                qefficient_constants.ONNX_EXPORT_EXAMPLE_TEMPERATURES,
+            )
+            example_top_p = getattr(
+                Constants,
+                "ONNX_EXPORT_EXAMPLE_TOP_PS",
+                qefficient_constants.ONNX_EXPORT_EXAMPLE_TOP_PS,
+            )
+            example_min_p = getattr(
+                Constants,
+                "ONNX_EXPORT_EXAMPLE_MIN_PS",
+                qefficient_constants.ONNX_EXPORT_EXAMPLE_MIN_PS,
+            )
+            example_repetition_penalty = getattr(
+                Constants,
+                "ONNX_EXPORT_EXAMPLE_REPETITION_PENALTIES",
+                qefficient_constants.ONNX_EXPORT_EXAMPLE_REPETITION_PENALTIES,
+            )
+            example_presence_penalty = getattr(
+                Constants,
+                "ONNX_EXPORT_EXAMPLE_PRESENCE_PENALTIES",
+                qefficient_constants.ONNX_EXPORT_EXAMPLE_PRESENCE_PENALTIES,
+            )
+
+            decode_sampling_params: dict[str, np.ndarray] = {
+                "temperatures": np.full(
+                    (decode_bsz, 1),
+                    example_temperature,
+                    dtype=np.float32,
+                ),
+                "top_ks": np.full(
+                    (decode_bsz, 1),
+                    self.model.ods_max_top_k_ids,
+                    dtype=np.int32,
+                ),
+                "top_ps": np.full(
+                    (decode_bsz, 1),
+                    example_top_p,
+                    dtype=np.float32,
+                ),
+                "min_ps": np.full(
+                    (decode_bsz, 1),
+                    example_min_p,
+                    dtype=np.float32,
+                ),
+                "repetition_penalties": np.full(
+                    (decode_bsz, 1),
+                    example_repetition_penalty,
+                    dtype=np.float32,
+                ),
+                "presence_penalties": np.full(
+                    (decode_bsz, 1),
+                    example_presence_penalty,
+                    dtype=np.float32,
+                ),
+                "random_numbers": np.random.default_rng(0)
+                .random((decode_bsz, self.model.ods_max_top_k_ids))
+                .astype(np.float32),
+            }
+            # ODS QPCs consume next_tokens/sampling controls, not logits.
+            # Skip unused logits allocation on warm-up to avoid wasted memory.
+            self.model(
+                input_ids=decode_input_ids,
+                positions=decode_positions,
+                batch_indices=decode_block_ids,
+                lora_ids=decode_lora_ids,
+                is_prompt=False,
+                mm_kwargs_list=decode_mm_kwargs_list,
+                sampling_params=decode_sampling_params,
+            )
+        else:
+            decode_logits = self.create_logits_np(
+                self.model.decode_bsz, self.model.vocab_size, self.max_decode_tokens
+            )
+            self.model(
+                input_ids=decode_input_ids,
+                positions=decode_positions,
+                batch_indices=decode_block_ids,
+                lora_ids=decode_lora_ids,
+                is_prompt=False,
+                logits=decode_logits,
+                mm_kwargs_list=decode_mm_kwargs_list,
+            )
 
         # Prefill
         prefill_bsz = self.model.prefill_bsz
@@ -1620,17 +1909,66 @@ class QaicModelRunnerAoT(GPUModelRunner):
         if self.model.is_multimodal_model and self.model.default_mm_kwargs:
             mm_kwargs_list = [self.model.default_mm_kwargs] * prefill_bsz
 
-        prefill_logits = self.create_logits_np(prefill_bsz, self.model.vocab_size)
-        pending_prefill_exec_queue = self.model(
-            input_ids=prefill_input_ids,
-            positions=prefill_positions,
-            batch_indices=prefill_block_ids,
-            lora_ids=prefill_lora_ids,
-            is_prompt=True,
-            prefill_cum_sum=prefill_cum_sum,
-            mm_kwargs_list=mm_kwargs_list,
-            logits=prefill_logits,
-        )
+        if self.model.on_device_sampling_en:
+            prefill_sampling_params: dict[str, np.ndarray] = {
+                "temperatures": np.full(
+                    (prefill_bsz, 1),
+                    example_temperature,
+                    dtype=np.float32,
+                ),
+                "top_ks": np.full(
+                    (prefill_bsz, 1),
+                    self.model.ods_max_top_k_ids,
+                    dtype=np.int32,
+                ),
+                "top_ps": np.full(
+                    (prefill_bsz, 1),
+                    example_top_p,
+                    dtype=np.float32,
+                ),
+                "min_ps": np.full(
+                    (prefill_bsz, 1),
+                    example_min_p,
+                    dtype=np.float32,
+                ),
+                "repetition_penalties": np.full(
+                    (prefill_bsz, 1),
+                    example_repetition_penalty,
+                    dtype=np.float32,
+                ),
+                "presence_penalties": np.full(
+                    (prefill_bsz, 1),
+                    example_presence_penalty,
+                    dtype=np.float32,
+                ),
+                "random_numbers": np.random.default_rng(0)
+                .random((prefill_bsz, self.model.ods_max_top_k_ids))
+                .astype(np.float32),
+            }
+            # ODS QPCs consume next_tokens/sampling controls, not logits.
+            # Skip unused logits allocation on warm-up to avoid wasted memory.
+            pending_prefill_exec_queue = self.model(
+                input_ids=prefill_input_ids,
+                positions=prefill_positions,
+                batch_indices=prefill_block_ids,
+                lora_ids=prefill_lora_ids,
+                is_prompt=True,
+                prefill_cum_sum=prefill_cum_sum,
+                mm_kwargs_list=mm_kwargs_list,
+                sampling_params=prefill_sampling_params,
+            )
+        else:
+            prefill_logits = self.create_logits_np(prefill_bsz, self.model.vocab_size)
+            pending_prefill_exec_queue = self.model(
+                input_ids=prefill_input_ids,
+                positions=prefill_positions,
+                batch_indices=prefill_block_ids,
+                lora_ids=prefill_lora_ids,
+                is_prompt=True,
+                prefill_cum_sum=prefill_cum_sum,
+                mm_kwargs_list=mm_kwargs_list,
+                logits=prefill_logits,
+            )
 
         if self.use_async_scheduling:
             self.complete_all_inf(pending_prefill_exec_queue, decode_bsz)

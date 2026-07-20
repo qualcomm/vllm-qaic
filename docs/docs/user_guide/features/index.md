@@ -25,6 +25,8 @@ Status of vLLM features on Qualcomm Cloud AI hardware. Features marked :white_ch
 | N-gram | :white_check_mark: | :no_entry: | |
 | Suffix | :white_check_mark: | :no_entry: | |
 | Draft model | :white_check_mark: | :no_entry: | Separate DLM on same device |
+| **Sampling** | | | |
+| On-device sampling | :white_check_mark: | :no_entry: | Debug sub-mode (`aic_return_pdfs`) not for production |
 | **Advanced Features** | | | |
 | LoRA adapters | :white_check_mark: | :no_entry: | Hot-swap adapters |
 | Disaggregated serving | :white_check_mark: | :no_entry: | xEyPzD prefill/decode split |
