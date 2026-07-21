@@ -110,15 +110,23 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
                 "image_idx_output": np.array([[0]], dtype=np.int64),
             }
             if "mm_token_type_ids" in self.session.input_names:
+                mm_token_type_shape = (
+                    (1, 1)
+                    if self.session.cluster_id == "prefill"
+                    else (self.decode_bsz, 1)
+                )
                 self.default_mm_kwargs["mm_token_type_ids"] = np.zeros(
-                    (1, 1), dtype=np.int64
+                    mm_token_type_shape, dtype=np.int64
                 )
             self.decode_batch_inputs.update(self.default_mm_kwargs)
 
         if self.config.model_type == "whisper":
-            self.default_mm_kwargs = {
-                k: np.empty(v[0], dtype=v[1]) for k, v in self.mm_input_info.items()
-            }
+            self.default_mm_kwargs = {}
+            for k, v in self.mm_input_info.items():
+                if k == "input_features":
+                    _shape = v[0].copy()
+                    _shape[-1] = 1 # Feature vector during decode is 1
+                    self.default_mm_kwargs["input_features"] = np.empty(_shape, dtype=v[1])
             self.decode_batch_inputs.update(self.default_mm_kwargs)
 
     def _to_np(self, t, dtype: np.dtype | None = None) -> np.ndarray | list[np.ndarray]:

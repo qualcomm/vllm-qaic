@@ -157,11 +157,12 @@ extern "C" void _single_nsp_rms_norm_bf16(
   sync_hvx_threads(threadID, threadsPerCore);
 }
 
-// NSP entry point: drives rms_norm_bf16 row-by-row over an (M, N) matrix.
-// Pointers layout: [0]=attn_out, [1]=x, [2]=weight, [3]=residual_out, [4]=dst,
-// [5]=params{eps,M,N} Each core owns a stripe of rows (coreID, coreID+numCores,
-// ...). Double-buffered DMA (slots 0/1) overlaps prefetch of row m+1 with
-// compute on row m.
+// NSP entry point: drives rms_norm_bf16 row-by-row over a (B, M, N) tensor.
+// Pointers layout: [0]=attn_out, [1]=x, [2]=weight, [3]=residual_out, [4]=dst
+//   [5]=epsilon (float scalar), [6]=B (int scalar), [7]=M (int scalar), [8]=N (int scalar)
+// Each core owns a stripe of rows across all B*M rows.
+// Double-buffered DMA (slots 0/1) overlaps prefetch of row r+1 with
+// compute on row r.
 QAIC_KERNEL_API uint32_t rms_norm_multi_nsp_bf16(
     const AicJitEntryPointConfig *cfg, const AicJitPointerArray *ptrs) {
   const uint16_t *attn_out_ddr = (const uint16_t *)ptrs->pointers[0];
@@ -169,11 +170,10 @@ QAIC_KERNEL_API uint32_t rms_norm_multi_nsp_bf16(
   const uint16_t *weight_ddr = (const uint16_t *)ptrs->pointers[2];
   uint16_t *out_ddr = (uint16_t *)ptrs->pointers[3];
   uint16_t *dst_ddr = (uint16_t *)ptrs->pointers[4];
-  const float *params = (const float *)ptrs->pointers[5];
-
-  float epsilon = params[0];
-  int M = (int)params[1];
-  int N = (int)params[2];
+  float epsilon = *(const float *)ptrs->pointers[5];
+  const int N = *(const int32_t *)ptrs->pointers[6];
+  const int total_elems = *(const int32_t *)ptrs->pointers[7];
+  const int total_rows = total_elems / N;
 
   uint32_t threadID = cfg->threadID;
   uint32_t numThreads = cfg->numThreads;
@@ -261,21 +261,21 @@ QAIC_KERNEL_API uint32_t rms_norm_multi_nsp_bf16(
     return *status_vtcm;
   }
 
-  // Each core processes ceil(M / numCores) rows
-  const int rowIters = (M + (int)numCores - 1) / (int)numCores;
+  // Each core processes ceil(total_rows / numCores) rows
+  const int rowIters = (total_rows + (int)numCores - 1) / (int)numCores;
 
   // Prime slot 0 with the first row assigned to this core before entering the
   // loop
   {
-    const int m0 = (int)coreID;
-    const bool valid0 = (m0 < M);
+    const int r0 = (int)coreID;
+    const bool valid0 = (r0 < total_rows);
     if (localThreadID == 0) {
       if (valid0) {
         *status_vtcm = dma_copy_wait(threadID, attn_vtcm[0],
-                                     attn_out_ddr + m0 * N, rowBytes);
+                                     attn_out_ddr + r0 * N, rowBytes);
         if (*status_vtcm == JIT_DEV_STATUS_SUCCESS) {
           *status_vtcm =
-              dma_copy_wait(threadID, x_vtcm[0], x_ddr + m0 * N, rowBytes);
+              dma_copy_wait(threadID, x_vtcm[0], x_ddr + r0 * N, rowBytes);
         }
       } else {
         *status_vtcm = JIT_DEV_STATUS_SUCCESS;
@@ -289,15 +289,16 @@ QAIC_KERNEL_API uint32_t rms_norm_multi_nsp_bf16(
   }
 
   for (int iter = 0; iter < rowIters; ++iter) {
-    const int m = iter * (int)numCores + (int)coreID;
-    const int m_next = (iter + 1) * (int)numCores + (int)coreID;
-    const bool validRow = (m < M);
-    const bool validNextRow = (m_next < M);
+    const int r      = iter * (int)numCores + (int)coreID;
+    const int r_next = (iter + 1) * (int)numCores + (int)coreID;
+    const bool validRow     = (r      < total_rows);
+    const bool validNextRow = (r_next < total_rows);
     // Ping-pong between slot 0 and 1 each iteration
     const int cur_slot = iter & 1;
     const int next_slot = cur_slot ^ 1;
 
-    uint16_t *row_dst_ddr = validRow ? (dst_ddr + m * N) : dst_ddr;
+    uint16_t *row_dst_ddr = validRow ? (dst_ddr + r * N) : dst_ddr;
+    uint16_t *row_out_ddr = validRow ? (out_ddr + r * N) : out_ddr;
 
     // Thread 0 submits async DMA for the next row while all threads compute the
     // current row. attn prefetch is waited immediately (sequential); x prefetch
@@ -308,7 +309,7 @@ QAIC_KERNEL_API uint32_t rms_norm_multi_nsp_bf16(
         uint32_t dma_status = JIT_DEV_STATUS_SUCCESS;
         QShimUDmaHandle h_attn =
             dma_copy_submit(threadID, attn_vtcm[next_slot],
-                            attn_out_ddr + m_next * N, rowBytes, &dma_status);
+                            attn_out_ddr + r_next * N, rowBytes, &dma_status);
         if (dma_status != JIT_DEV_STATUS_SUCCESS ||
             h_attn == INVALID_UDMA_HANDLE) {
           *status_vtcm = (dma_status != JIT_DEV_STATUS_SUCCESS)
@@ -324,7 +325,7 @@ QAIC_KERNEL_API uint32_t rms_norm_multi_nsp_bf16(
             // Kick off x DMA and leave it in-flight; save handle for
             // post-compute wait
             QShimUDmaHandle h_x =
-                dma_copy_submit(threadID, x_vtcm[next_slot], x_ddr + m_next * N,
+                dma_copy_submit(threadID, x_vtcm[next_slot], x_ddr + r_next * N,
                                 rowBytes, &dma_status);
             *prefetch_handle_vtcm = (dma_status == JIT_DEV_STATUS_SUCCESS)
                                         ? h_x
@@ -340,11 +341,11 @@ QAIC_KERNEL_API uint32_t rms_norm_multi_nsp_bf16(
     }
 
     if (validRow) {
-      rms_norm_bf16(attn_vtcm[cur_slot], x_vtcm[cur_slot], weight_vtcm,
+      _single_nsp_rms_norm_bf16(attn_vtcm[cur_slot], x_vtcm[cur_slot], weight_vtcm,
                     out_vtcm, dst_vtcm, epsilon, N, threadID, localThreadID,
                     numThreads, partial_sums);
     } else {
-      // Idle row: rms_norm_bf16 contains 3 sync barriers; mirror them to keep
+      // Idle row: _single_nsp_rms_norm_bf16 contains 3 sync barriers; mirror them to keep
       // all threads in lockstep
       sync_hvx_threads(threadID, numThreads);
       sync_hvx_threads(threadID, numThreads);
@@ -363,6 +364,9 @@ QAIC_KERNEL_API uint32_t rms_norm_multi_nsp_bf16(
       }
       if (validRow && *status_vtcm == JIT_DEV_STATUS_SUCCESS) {
         *status_vtcm = dma_copy_wait(threadID, row_dst_ddr, dst_vtcm, rowBytes);
+      }
+      if (validRow && *status_vtcm == JIT_DEV_STATUS_SUCCESS) {
+        *status_vtcm = dma_copy_wait(threadID, row_out_ddr, out_vtcm, rowBytes);
       }
     }
 

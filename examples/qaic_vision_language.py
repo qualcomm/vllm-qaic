@@ -59,6 +59,11 @@ def run_gemma3(questions: list[str], modality: str) -> ModelRequestData:
         long_prefill_token_threshold=seq_len,
         enable_prefix_caching=False,
         limit_mm_per_prompt={"image": 1},
+        additional_config={
+            "override_qaic_config": {
+                "split_model_io": True,
+            },
+        },
     )
 
     placeholder = "<start_of_image>" if modality == "image" else ""
@@ -68,6 +73,36 @@ def run_gemma3(questions: list[str], modality: str) -> ModelRequestData:
             f"{placeholder}{question}<end_of_turn>\n"
             "<start_of_turn>model\n"
         )
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
+# Gemma 4
+def run_gemma4(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality in ("image", "text")
+
+    engine_args = EngineArgs(
+        model="google/gemma-4-E2B-it",
+        max_model_len=ctx_len,
+        long_prefill_token_threshold=seq_len,
+        enable_prefix_caching=False,
+        limit_mm_per_prompt={"image": 1},
+        additional_config={
+            "override_qaic_config": {
+                "use_onnx_subfunctions": False,
+                "split_model_io": True,
+            },
+        },
+    )
+
+    placeholder = "<|image|>" if modality == "image" else ""
+    prompts = [
+        (f"<bos><|turn>user\n{placeholder}{question}<turn|>\n<|turn>model\n")
         for question in questions
     ]
 
@@ -91,6 +126,11 @@ def run_internvl(questions: list[str], modality: str) -> ModelRequestData:
         enable_prefix_caching=False,
         limit_mm_per_prompt={"image": 1},
         mm_processor_kwargs={"max_dynamic_patch": 12},
+        additional_config={
+            "override_qaic_config": {
+                "split_model_io": True,
+            },
+        },
         # Default is 12; with the thumbnail, it becomes 13 patches.
     )
 
@@ -129,6 +169,11 @@ def run_llava(questions: list[str], modality: str) -> ModelRequestData:
         long_prefill_token_threshold=seq_len,
         enable_prefix_caching=False,
         limit_mm_per_prompt={"image": 1},
+        additional_config={
+            "override_qaic_config": {
+                "split_model_io": True,
+            },
+        },
     )
 
     placeholder = "<image>\n" if modality == "image" else ""
@@ -167,6 +212,7 @@ def run_qwen2_5_vl(questions: list[str], modality: str) -> ModelRequestData:
             "override_qaic_config": {
                 "height": height,
                 "width": width,
+                "split_model_io": True,
             },
         },
     )
@@ -227,6 +273,7 @@ def run_qwen3_vl(questions: list[str], modality: str) -> ModelRequestData:
             "override_qaic_config": {
                 "height": height,
                 "width": width,
+                "split_model_io": True,
             },
         },
     )
@@ -260,12 +307,67 @@ def run_qwen3_vl(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Qwen3.6-VL
+def run_qwen3_6_vl(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality in ("image", "text")
+
+    model_name = "Qwen/Qwen3.6-27B"
+
+    height = [354, 512]
+    width = [536, 910]
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=ctx_len,
+        long_prefill_token_threshold=seq_len,
+        enable_prefix_caching=False,
+        mm_processor_kwargs={
+            "min_pixels": 28 * 28,
+            "max_pixels": 1280 * 28 * 28,
+            "fps": 1,
+        },
+        limit_mm_per_prompt={"image": 1},
+        additional_config={
+            "override_qaic_config": {
+                "height": height,
+                "width": width,
+                "use_onnx_subfunctions": True,
+                "split_model_io": True,
+            },
+        },
+    )
+
+    if modality == "image":
+        placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
+        image_grid_thw = torch.tensor([[-1, -1, -1]])
+    else:
+        placeholder = ""
+        image_grid_thw = None
+
+    prompts = [
+        (
+            "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+            f"<|im_start|>user\n{placeholder}{question}<|im_end|>\n"
+            "<|im_start|>assistant\n"
+        )
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+        image_grid_thw=image_grid_thw,
+    )
+
+
 model_example_map = {
     "gemma3": run_gemma3,
+    "gemma4": run_gemma4,
     "internvl_chat": run_internvl,
     "llava": run_llava,
     "qwen2_5_vl": run_qwen2_5_vl,
     "qwen3_vl": run_qwen3_vl,
+    "qwen3_6_vl": run_qwen3_6_vl,
 }
 
 

@@ -37,16 +37,18 @@ extern "C" uint32_t rms_norm_multi_nsp_bf16(const AicJitEntryPointConfig *cfg,
 
 // rms_norm_dispatch — single entry point called by the wrapper.
 // Pointer layout (same as the individual kernels):
-//   ptrs->pointers[0] : attn_out  [M, N]
-//   ptrs->pointers[1] : x         [M, N]
-//   ptrs->pointers[2] : weight    [N]
-//   ptrs->pointers[3] : dst       [M, N]  (normed output)
-//   ptrs->pointers[4] : residual  [M, N]  (attn_out + x)
-//   ptrs->pointers[5] : params    float[4] = {epsilon, M, N, dtype}
+//   ptrs->pointers[0] : attn_out    (input)
+//   ptrs->pointers[1] : x           (input)
+//   ptrs->pointers[2] : weight      [N]
+//   ptrs->pointers[3] : dst         (normed output)
+//   ptrs->pointers[4] : residual    (attn_out + x)
+//   ptrs->pointers[5] : epsilon     float scalar
+//   ptrs->pointers[6] : N           int scalar (weight.numel())
+//   ptrs->pointers[7] : total_elems int scalar (attn_out.numel())
+//   ptrs->pointers[8] : dtype       int scalar (0=FP16, 1=BF16)
 QAIC_KERNEL_API uint32_t rms_norm_dispatch(const AicJitEntryPointConfig *cfg,
                                            const AicJitPointerArray *ptrs) {
-  const float *params = (const float *)ptrs->pointers[5];
-  const int dtype = (int)params[3];
+  const int dtype = *(const int32_t *)ptrs->pointers[8];
 
 #if __HEXAGON_ARCH__ >= 81
   if (dtype == QAIC_RMS_NORM_DTYPE_BF16) {
