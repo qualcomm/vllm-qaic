@@ -622,6 +622,12 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             else:
                 self.decode_logits = None
 
+            penalty_info = self.get_io_shape_and_dtype(
+                "past_repetition_penalty_buffer", is_input=True
+            )
+            penalty_shape = tuple(penalty_info[0])
+            penalty_dtype = penalty_info[1]
+
             penalty_history_buffers: dict[str, np.ndarray] = {}
             self.session.create_numpy_penalty_buffers(
                 penalty_history_buffers,
@@ -675,6 +681,9 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 }
             )
 
+            last_accepted_output_tokens_info = self.get_io_shape_and_dtype(
+                "last_accepted_output_tokens", is_input=True
+            )
             last_accepted_output_tokens_width = last_accepted_output_tokens_info[0][-1]
             last_accepted_output_tokens_dtype = last_accepted_output_tokens_info[1]
             self.prefill_last_accepted_output_tokens = np.zeros(
@@ -682,6 +691,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 dtype=last_accepted_output_tokens_dtype,
             )
 
+            next_tokens_info = self.get_io_shape_and_dtype("next_tokens", is_input=False)
             next_tokens_dtype = next_tokens_info[1]
             self.decode_next_tokens_by_k = {}
             for _k in self.decode_ks:
@@ -706,6 +716,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             self.prefill_next_tokens = prefill_next_tokens_buffer["next_tokens"]
 
             if self.debug_return_probs_en:
+                probs_info = self.get_io_shape_and_dtype("probs", is_input=False)
                 probs_dtype = probs_info[1]
                 self.decode_probs_by_k = {}
                 for _k in self.decode_ks:
