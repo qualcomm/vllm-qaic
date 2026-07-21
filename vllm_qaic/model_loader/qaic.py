@@ -161,13 +161,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             override_qaic_config,
             self.vocab_size,
         )
-        if self.debug_return_probs_en and not self.on_device_sampling_en:
-            raise ValueError(
-                "The on-device sampling debug/evaluation sub-mode (return_pdfs) "
-                "requires on-device sampling itself to be enabled; set "
-                "aic_include_sampler=1 in override_qaic_config, or disable "
-                "aic_return_pdfs."
-            )
         self.max_decode_tokens = 1
         if vllm_config.speculative_config:
             self.num_spec_tokens = vllm_config.speculative_config.num_speculative_tokens
@@ -359,28 +352,11 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         sampling_metadata: SamplingMetadata,
     ) -> SamplerOutput | None:
         if self.on_device_sampling_en:
-            if self.decode_next_tokens_by_k is None:
-                raise ValueError(
-                    "On-device sampling is enabled but decode `next_tokens` buffers "
-                    "are uninitialized."
-                )
-
             current_k = self.active_k
             decode_next_tokens = self.decode_next_tokens_by_k.get(current_k)
-            if decode_next_tokens is None:
-                raise ValueError(
-                    "On-device sampling decode output buffer missing for decode "
-                    f"specialization K={current_k}."
-                )
-
             num_decode_reqs = self.ods_step_num_decodes
             decode_mdt = self.ods_step_decode_mdt if num_decode_reqs > 0 else 1
             if num_decode_reqs > 0:
-                if decode_mdt <= 0:
-                    raise ValueError(
-                        "Invalid decode token count per request for ODS step: "
-                        f"{decode_mdt}."
-                    )
                 decode_token_ids = decode_next_tokens[:num_decode_reqs, :decode_mdt, 0]
             else:
                 decode_token_ids = np.empty((0, 1), dtype=np.int64)
@@ -391,31 +367,12 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     (0, decode_token_ids.shape[1]), dtype=decode_token_ids.dtype
                 )
 
-            if (
-                decode_token_ids.size > 0
-                and prefill_token_ids.size > 0
-                and decode_token_ids.shape[1] != prefill_token_ids.shape[1]
-            ):
-                raise ValueError(
-                    "Cannot combine ODS decode/prefill sampled tokens with different "
-                    "token counts per request: "
-                    f"decode={decode_token_ids.shape[1]}, "
-                    f"prefill={prefill_token_ids.shape[1]}."
-                )
-
             sampled_token_ids_np = np.concatenate(
                 (decode_token_ids, prefill_token_ids), axis=0
             )
             # temperature can be None on vLLM's all_greedy/no_top_k/no_top_p
             # batch-level fast path, while repetition_penalties is always set.
             expected_num_reqs = int(sampling_metadata.repetition_penalties.shape[0])
-            if sampled_token_ids_np.shape[0] != expected_num_reqs:
-                raise ValueError(
-                    "ODS sampled token count mismatch: expected "
-                    f"{expected_num_reqs} requests from sampling metadata, got "
-                    f"{sampled_token_ids_np.shape[0]} from accelerator outputs."
-                )
-
             sampled_token_ids = torch.from_numpy(
                 sampled_token_ids_np.astype(np.int64, copy=False)
             )
@@ -1173,18 +1130,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                         ],
                     )
                     if self.debug_return_probs_en:
-                        if self.prefill_probs is None:
-                            raise ValueError(
-                                "On-device sampling debug/evaluation sub-mode is "
-                                "enabled but prefill `probs` output buffer is "
-                                "uninitialized at step completion."
-                            )
                         self.ods_debug_last_prefill_probs = self.prefill_probs.copy()
-                    if self.ods_step_prefill_next_tokens is None:
-                        raise ValueError(
-                            "On-device sampling prefill step output buffer was not "
-                            "allocated."
-                        )
                     if chunk + 1 == n_chunks:
                         self.ods_step_prefill_next_tokens[i, 0] = (
                             self.prefill_next_tokens[0, 0, 0]
@@ -1280,17 +1226,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 and ods_decode_presence_penalties.shape[1] == 1
             ):
                 ods_decode_presence_penalties = ods_decode_presence_penalties[:, 0]
-            if ods_decode_random_numbers.ndim != 2:
-                raise ValueError(
-                    "Decode ODS random_numbers must be a 2D array with shape "
-                    f"({num_decodes}, {self.ods_max_top_k_ids})."
-                )
-            if ods_decode_random_numbers.shape[1] != self.ods_max_top_k_ids:
-                raise ValueError(
-                    "Decode ODS random_numbers width mismatch: expected "
-                    f"{self.ods_max_top_k_ids}, got "
-                    f"{ods_decode_random_numbers.shape[1]}."
-                )
 
         batch_inputs["input_ids"][:num_decodes] = input_ids.reshape(num_decodes, mdt)
         if self.uses_mrope:
@@ -1414,17 +1349,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     ],
                 )
             if self.debug_return_probs_en:
-                if self.decode_probs_by_k is None:
-                    raise ValueError(
-                        "On-device sampling debug/evaluation sub-mode is enabled but "
-                        "decode `probs` output buffers are uninitialized."
-                    )
                 decode_probs = self.decode_probs_by_k.get(current_k)
-                if decode_probs is None:
-                    raise ValueError(
-                        "On-device sampling debug/evaluation decode output buffer "
-                        f"missing for decode specialization K={current_k}."
-                    )
                 self.ods_debug_last_decode_probs = decode_probs.copy()
 
         return
