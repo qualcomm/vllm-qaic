@@ -55,10 +55,6 @@ from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import record_function_or_nullcontext
 from vllm.v1.worker.gpu_input_batch import InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner, AsyncGPUPoolingModelRunnerOutput
-from vllm_qaic.worker.ods_sampling import (
-    build_ods_sampling_arrays,
-    detect_nondefault_frequency_penalty,
-)
 
 try:
     import torch_qaic.profile as qaic_profile
@@ -258,9 +254,12 @@ class QaicAsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         if mr.model.on_device_sampling_en:
             sampling_metadata = mr.input_batch.sampling_metadata
             if sampling_metadata is not None:
-                nondefault_slots = detect_nondefault_frequency_penalty(sampling_metadata)
+                nondefault_slots = torch.nonzero(
+                    sampling_metadata.frequency_penalties != 0.0,
+                    as_tuple=False,
+                ).flatten()
                 req_ids = mr.input_batch.req_ids
-                for slot_index in nondefault_slots:
+                for slot_index in nondefault_slots.tolist():
                     req_id = req_ids[slot_index]
                     if req_id in mr._ods_frequency_penalty_warned_req_ids:
                         continue
@@ -1306,62 +1305,68 @@ class QaicModelRunnerAoT(GPUModelRunner):
                     )
 
                 req_ids = self.input_batch.req_ids
-                min_p_by_slot: dict[int, float] = {}
-                temperature_by_slot: dict[int, float] = {}
-                top_k_by_slot: dict[int, int] = {}
-                top_p_by_slot: dict[int, float] = {}
-                for slot_index, req_id in enumerate(req_ids):
-                    req_state = self.requests.get(req_id)
-                    req_sampling_params = req_state.sampling_params
-                    min_p_by_slot[slot_index] = float(req_sampling_params.min_p)
-                    temperature_by_slot[slot_index] = float(
-                        req_sampling_params.temperature
-                    )
-                    top_k_by_slot[slot_index] = int(req_sampling_params.top_k)
-                    top_p_by_slot[slot_index] = float(req_sampling_params.top_p)
-
-                # vLLM can elide batch-level temperature/top_k/top_p tensors on
-                # all_greedy/no_top_k/no_top_p fast paths; per-request
-                # SamplingParams values keep ODS from failing when those are None.
-                temperature_fallback = np.asarray(
-                    [temperature_by_slot[i] for i in range(len(req_ids))],
-                    dtype=np.float32,
-                )
-                top_k_fallback = np.asarray(
-                    [top_k_by_slot[i] for i in range(len(req_ids))],
-                    dtype=np.int32,
-                )
-                top_p_fallback = np.asarray(
-                    [top_p_by_slot[i] for i in range(len(req_ids))],
-                    dtype=np.float32,
-                )
-
-                ods_arrays = build_ods_sampling_arrays(
-                    sampling_metadata,
-                    min_p_by_slot,
-                    self.model.ods_max_top_k_ids,
-                    self.model.ods_max_top_k_ids,
-                    temperature_fallback=temperature_fallback,
-                    top_k_fallback=top_k_fallback,
-                    top_p_fallback=top_p_fallback,
-                )
-
                 num_reqs = self.input_batch.num_reqs
-                if ods_arrays.temperatures.shape[0] != num_reqs:
-                    raise ValueError(
-                        "ODS sampling metadata size mismatch: "
-                        f"expected {num_reqs} slots, got "
-                        f"{ods_arrays.temperatures.shape[0]}."
+                temperatures = np.empty((num_reqs,), dtype=np.float32)
+                top_ks = np.empty((num_reqs,), dtype=np.int32)
+                top_ps = np.empty((num_reqs,), dtype=np.float32)
+                min_ps = np.empty((num_reqs,), dtype=np.float32)
+                for slot_index, req_id in enumerate(req_ids):
+                    sampling_params = self.requests[req_id].sampling_params
+                    temperatures[slot_index] = np.float32(sampling_params.temperature)
+                    top_ks[slot_index] = np.int32(sampling_params.top_k)
+                    top_ps[slot_index] = np.float32(sampling_params.top_p)
+                    min_ps[slot_index] = np.float32(sampling_params.min_p)
+
+                top_ks = np.where(top_ks <= 0, self.model.ods_max_top_k_ids, top_ks)
+                top_ks = np.minimum(top_ks, self.model.ods_max_top_k_ids).astype(
+                    np.int32,
+                    copy=False,
+                )
+                if sampling_metadata.no_penalties:
+                    repetition_penalties = np.full((num_reqs,), 1.0, dtype=np.float32)
+                    presence_penalties = np.full((num_reqs,), 0.0, dtype=np.float32)
+                else:
+                    repetition_penalties = (
+                        sampling_metadata.repetition_penalties.detach()
+                        .cpu()
+                        .numpy()
+                        .astype(np.float32, copy=True)
+                    )
+                    presence_penalties = (
+                        sampling_metadata.presence_penalties.detach()
+                        .cpu()
+                        .numpy()
+                        .astype(np.float32, copy=True)
+                    )
+                random_numbers = np.empty(
+                    (num_reqs, self.model.ods_max_top_k_ids),
+                    dtype=np.float32,
+                )
+                for slot_index in range(num_reqs):
+                    generator = sampling_metadata.generators.get(slot_index)
+                    if generator is None:
+                        random_values = torch.rand(
+                            self.model.ods_max_top_k_ids,
+                            dtype=torch.float32,
+                        )
+                    else:
+                        random_values = torch.rand(
+                            self.model.ods_max_top_k_ids,
+                            generator=generator,
+                            dtype=torch.float32,
+                        )
+                    random_numbers[slot_index] = (
+                        random_values.detach().cpu().numpy().astype(np.float32, copy=False)
                     )
 
                 all_sampling_params: dict[str, np.ndarray] = {
-                    "temperatures": ods_arrays.temperatures,
-                    "top_ks": ods_arrays.top_ks,
-                    "top_ps": ods_arrays.top_ps,
-                    "min_ps": ods_arrays.min_ps,
-                    "repetition_penalties": ods_arrays.repetition_penalties,
-                    "presence_penalties": ods_arrays.presence_penalties,
-                    "random_numbers": ods_arrays.random_numbers,
+                    "temperatures": temperatures,
+                    "top_ks": top_ks,
+                    "top_ps": top_ps,
+                    "min_ps": min_ps,
+                    "repetition_penalties": repetition_penalties,
+                    "presence_penalties": presence_penalties,
+                    "random_numbers": random_numbers,
                 }
                 ods_sampling_params_decode = {
                     key: values[: self.num_decodes]
@@ -1561,11 +1566,12 @@ class QaicModelRunnerAoT(GPUModelRunner):
             if self.model.on_device_sampling_en:
                 sampling_metadata = self.input_batch.sampling_metadata
                 if sampling_metadata is not None:
-                    nondefault_slots = detect_nondefault_frequency_penalty(
-                        sampling_metadata
-                    )
+                    nondefault_slots = torch.nonzero(
+                        sampling_metadata.frequency_penalties != 0.0,
+                        as_tuple=False,
+                    ).flatten()
                     req_ids = self.input_batch.req_ids
-                    for slot_index in nondefault_slots:
+                    for slot_index in nondefault_slots.tolist():
                         req_id = req_ids[slot_index]
                         if req_id in self._ods_frequency_penalty_warned_req_ids:
                             continue
