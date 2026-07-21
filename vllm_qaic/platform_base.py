@@ -223,9 +223,7 @@ class QaicPlatform(Platform):
                 ]
 
         # Shorthand used throughout this method
-        override_qaic_config = (additional_config or {}).get(
-            "override_qaic_config"
-        ) or {}
+        override_qaic_config = additional_config.get("override_qaic_config", {})
         # Normalise types in override_qaic_config (e.g. strings from CLI parser)
         # before any downstream code reads from it, mirroring what
         # _get_qaic_compile_config previously did via its local _clean_config.
@@ -236,6 +234,9 @@ class QaicPlatform(Platform):
             override_qaic_config.update(cleaned)
             if additional_config and "override_qaic_config" in additional_config:
                 additional_config["override_qaic_config"].update(cleaned)
+        else:
+            override_qaic_config = {}
+            additional_config["override_qaic_config"] = override_qaic_config
         # a hack for online serving's Async EngineArgs
         if vllm_config.device_config.device_type != cls.device_type:
             vllm_config.device_config.device_type = cls.device_type
@@ -308,12 +309,6 @@ class QaicPlatform(Platform):
                 cache_config.block_size = model_config.max_model_len  # ctx_len
 
         if cls.is_aot:
-            # max_num_batched_tokens.  QAIC's _prepare_qaic_inputs expands each
-            # decode request's token count from 1 → (1 + num_spec_tokens), but the
-            # scheduler counts decode requests as 1 token each when enforcing the
-            # budget.  Setting max_num_batched_tokens to this value simultaneously
-            # gives the scheduler the correct per-step budget AND sizes the buffers
-            # large enough to never overflow after decode expansion.
             if model_config.hf_config.model_type == "whisper":
                 # Whisper is an encoder-decoder model: vLLM disables chunked prefill
                 # and sets long_prefill_token_threshold to 0, so the formula above
@@ -323,9 +318,37 @@ class QaicPlatform(Platform):
                     model_config.hf_config, "max_source_positions", 1500
                 )
             else:
-                scheduler_config.max_num_batched_tokens = (
-                    scheduler_config.max_num_seqs
-                    * scheduler_config.long_prefill_token_threshold
+                __prefill_seq_len = override_qaic_config.get("prefill_seq_len", 0)
+                if not __prefill_seq_len:
+                    if scheduler_config.long_prefill_token_threshold == 0:
+                        __prefill_seq_len = min(128, model_config.max_model_len)
+                    else:
+                        __prefill_seq_len = min(
+                            scheduler_config.long_prefill_token_threshold,
+                            model_config.max_model_len,
+                        )
+                if not scheduler_config.enable_chunked_prefill:
+                    # TODO: long_prefill_token_threshold should not be set when
+                    # chunked prefill is disabled
+                    logger.warning_once(
+                        "Chunked prefill is disabled; chunk size=%d will be used"
+                        " as prefill_seq_len.",
+                        __prefill_seq_len,
+                    )
+                if "override_qaic_config" not in additional_config:
+                    additional_config["override_qaic_config"] = {}
+                additional_config["override_qaic_config"].update(
+                    {"prefill_seq_len": __prefill_seq_len}
+                )
+                # max_num_batched_tokens.  QAIC's _prepare_qaic_inputs expands each
+                # decode request's token count from 1 → (1 + num_spec_tokens), but the
+                # scheduler counts decode requests as 1 token each when enforcing the
+                # budget.  Setting max_num_batched_tokens to this value simultaneously
+                # gives the scheduler the correct per-step budget AND sizes the buffers
+                # large enough to never overflow after decode expansion.
+                scheduler_config.max_num_batched_tokens = min(
+                    scheduler_config.max_num_seqs * __prefill_seq_len,
+                    scheduler_config.max_num_batched_tokens,
                 )
 
         if cls.is_aot:
@@ -403,26 +426,30 @@ class QaicPlatform(Platform):
                     "repetition penalty"
                 )
 
+            if vllm_config.kv_transfer_config.kv_role == "kv_producer":
+                # Monkey patch uniproc_executor to QaicUniProcExecutor
+                import vllm.v1.executor.uniproc_executor as uniproc_executor
+
+                from vllm_qaic.qaic_uniproc_executor import QaicUniProcExecutor
+
+                uniproc_executor.UniProcExecutor = QaicUniProcExecutor
+                stages = int(override_qaic_config.get("stages"))
+                assert (
+                    stages is None
+                    or int(stages) <= 1
+                    or vllm_config.scheduler_config.max_num_seqs <= int(stages)
+                ), (
+                    f"max_num_seqs ({vllm_config.scheduler_config.max_num_seqs})"
+                    f" must be less than or equal to prefill_pipeline_parallel_size"
+                    f" ({stages}) when prefill streaming is enabled"
+                )
+
         if cls.is_aot:
             model_type = model_config.hf_config.model_type
             if model_config.is_multimodal_model and model_type != "whisper":
                 cls._configure_multimodal_model(
                     vllm_config, model_config, scheduler_config, model_type
                 )
-
-        # for vllm-qaic, long_prefill_token_threshold cannot be 0
-        # as the value is needed for prefill_seq_len
-        if not scheduler_config.enable_chunked_prefill:
-            scheduler_config.long_prefill_token_threshold = model_config.max_model_len
-        elif scheduler_config.long_prefill_token_threshold == 0:
-            vllm_config.scheduler_config.long_prefill_token_threshold = min(
-                128, vllm_config.model_config.max_model_len
-            )
-            logger.warning_once(
-                "long_prefill_token_threshold cannot be 0 for vllm-qaic as it is "
-                "required for prefill_seq_len. Setting it to %d.",
-                scheduler_config.long_prefill_token_threshold,
-            )
 
     @classmethod
     def is_pin_memory_available(cls) -> bool:
@@ -470,6 +497,12 @@ class QaicPlatform(Platform):
             "override_qaic_config"
         ) or {}
 
+        # The QAIC backend does not support the multimodal processor cache.
+        # Disable it unconditionally so input processing uses the
+        # request-id/modality/index UUID path (see V1 input_processor).
+        if model_config.multimodal_config is not None:
+            model_config.multimodal_config.mm_processor_cache_gb = 0
+
         is_vision_encoder = (
             model_config.runner_type == "pooling"
             and "skip_vision" not in override_qaic_config
@@ -491,6 +524,11 @@ class QaicPlatform(Platform):
             scheduler_config.max_num_batched_tokens = (
                 scheduler_config.max_num_seqs
                 * scheduler_config.long_prefill_token_threshold
+            )
+            if "override_qaic_config" not in vllm_config.additional_config:
+                additional_config["override_qaic_config"] = {}
+            additional_config["override_qaic_config"].update(
+                {"prefill_seq_len": model_config.max_model_len}
             )
 
         if model_type in DYNAMIC_RESOLUTION_MODELS:
