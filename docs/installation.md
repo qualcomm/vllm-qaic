@@ -200,7 +200,7 @@ Use this path when distributing a pre-built `vllm-qaic` wheel (e.g., from the QA
 
 ### Step 1 — Build wheels
 
-Run `build_wheels.sh` from within an activated Python 3.12 environment:
+Wheels are always built inside a docker container — run `build_wheels.sh` from the repo root with docker available (no venv activation needed; the script builds/reuses the vllm-qaic base image and does the build inside an ephemeral container):
 
 ```bash
 # Build both AOT and PYT wheels into ./dist/
