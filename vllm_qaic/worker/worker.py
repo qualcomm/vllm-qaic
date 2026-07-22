@@ -621,7 +621,16 @@ class QaicWorkerAoT(QaicWorker):
         if not self.cache_config.enable_prefix_caching:
             self.cache_config.num_gpu_blocks = num_gpu_blocks
             # Sanity check: AOT requires exact block count; eager is flexible
-            assert num_gpu_blocks == self.scheduler_config.max_num_seqs + 1
+            if self.cache_config.num_gpu_blocks_override:
+                expected_num_gpu_blocks = self.cache_config.num_gpu_blocks_override + 1
+            elif (
+                self.vllm_config.kv_transfer_config is not None
+                and self.vllm_config.kv_transfer_config.kv_connector == "NixlConnector"
+            ):
+                expected_num_gpu_blocks = 2 * self.scheduler_config.max_num_seqs + 1
+            else:
+                expected_num_gpu_blocks = self.scheduler_config.max_num_seqs + 1
+            assert num_gpu_blocks == expected_num_gpu_blocks
             return
         else:
             raise NotImplementedError("prefix caching is not supported on QAIC in V1")
@@ -684,11 +693,18 @@ class QaicWorkerAoT(QaicWorker):
         pass
 
     def determine_available_memory(self) -> int:
-        num_gpu_blocks = (
-            self.cache_config.num_gpu_blocks_override
-            if self.cache_config.num_gpu_blocks_override
-            else self.scheduler_config.max_num_seqs
-        ) + 1
+        if self.cache_config.num_gpu_blocks_override:
+            num_gpu_blocks = self.cache_config.num_gpu_blocks_override + 1
+        elif (
+            self.vllm_config.kv_transfer_config is not None
+            and self.vllm_config.kv_transfer_config.kv_connector == "NixlConnector"
+        ):
+            # Keep one active set plus a spare pool for in-flight NIXL sends.
+            # QAIC execution slots stay compact; MemoryPool maps each request
+            # to one of these physical slots.
+            num_gpu_blocks = 2 * self.scheduler_config.max_num_seqs + 1
+        else:
+            num_gpu_blocks = self.scheduler_config.max_num_seqs + 1
         # adapted from get_uniform_page_size
         page_sizes = set(
             layer.page_size_bytes for layer in self.get_kv_cache_spec().values()

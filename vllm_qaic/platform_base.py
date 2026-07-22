@@ -147,6 +147,10 @@ class QaicPlatform(Platform):
         return dtype in [torch.float16, torch.float32]
 
     @classmethod
+    def support_hybrid_kv_cache(cls) -> bool:
+        return True
+
+    @classmethod
     def inference_mode(cls):
         return torch.inference_mode()
 
