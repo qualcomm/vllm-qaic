@@ -47,8 +47,8 @@ Usage: install_vllm_qaic_in_docker.sh --mode aot|pyt
 EOM
 }
 
-DOCKER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(dirname "${DOCKER_DIR}")"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(dirname "${SCRIPT_DIR}")"
 
 DEFAULT_PYTHON_VERSION="3.12"
 DEFAULT_IMAGE_TAG="vllm-qaic:latest"

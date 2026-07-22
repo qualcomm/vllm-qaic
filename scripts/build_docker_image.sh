@@ -8,7 +8,7 @@
 #
 # This image only sets up base OS/Python dependencies. To install
 # vllm-qaic (aot or pyt mode) into a running container, use
-# docker/install_vllm_qaic_in_docker.sh afterwards.
+# scripts/install_vllm_qaic_in_docker.sh afterwards.
 #
 # Usage:
 #   ./build_docker_image.sh [ --python <version> ]
@@ -28,21 +28,23 @@ Usage: build_docker_image.sh [ --python <version> ]
                               [ --dry-run ]
 
 --python      Python version to install in the image (default: ${DEFAULT_PYTHON_VERSION}).
---tag         Docker image tag to build (default: ${DEFAULT_IMAGE_TAG}).
+--tag         Docker image tag to build (default: vllm-qaic-<base_image_slug>:latest).
 --base-image  Override the QAIC SDK base image (default: ${DEFAULT_BASE_IMAGE}).
 --force       Rebuild even if an image with this tag already exists.
 --dry-run     Print the docker build command without running it.
 EOM
 }
 
-DOCKER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(dirname "${SCRIPT_DIR}")"
+DOCKER_DIR="${REPO_ROOT}/docker"
+
+source "${SCRIPT_DIR}/utility.sh"
 
 DEFAULT_PYTHON_VERSION="3.12"
-DEFAULT_IMAGE_TAG="vllm-qaic:latest"
-DEFAULT_BASE_IMAGE="ghcr.io/quic/cloud_ai_inference_ubuntu24:1.21.6.0"
 
 PYTHON_VERSION="${DEFAULT_PYTHON_VERSION}"
-IMAGE_TAG="${DEFAULT_IMAGE_TAG}"
+IMAGE_TAG=""
 BASE_IMAGE=""
 FORCE_REBUILD="OFF"
 DRY_RUN="OFF"
@@ -73,6 +75,12 @@ while [ $# -gt 0 ]; do
     fi
 done
 
+EFFECTIVE_BASE_IMAGE="${BASE_IMAGE:-${DEFAULT_BASE_IMAGE}}"
+
+if [ -z "${IMAGE_TAG}" ]; then
+    IMAGE_TAG="vllm-qaic-$(base_image_tag_slug "${EFFECTIVE_BASE_IMAGE}"):latest"
+fi
+
 if [ "${FORCE_REBUILD}" == "OFF" ] && docker images --format "{{.Repository}}:{{.Tag}}" | grep -q "^${IMAGE_TAG}$"; then
     echo "Image ${IMAGE_TAG} already exists. Skipping build (use --force to rebuild)."
     exit 0
@@ -83,7 +91,7 @@ echo "Build Configuration"
 echo "----------------------------------------------------------------"
 echo "PYTHON_VERSION : ${PYTHON_VERSION}"
 echo "IMAGE_TAG      : ${IMAGE_TAG}"
-echo "BASE_IMAGE     : ${BASE_IMAGE:-${DEFAULT_BASE_IMAGE} (default)}"
+echo "BASE_IMAGE     : ${EFFECTIVE_BASE_IMAGE}"
 echo "================================================================"
 
 CMD=(docker build
