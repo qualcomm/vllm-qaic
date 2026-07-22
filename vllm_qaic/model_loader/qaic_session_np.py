@@ -711,28 +711,3 @@ class QAICInferenceSession:
         logger.debug("Releasing exec obj: %s", index)
         if is_prefill:
             self.prefill_available_exec_objs.put(index)
-
-    def refresh_retained_state_buffers(
-        self, buffer_names: list[str], index: int
-    ) -> dict[str, np.ndarray]:
-        """Explicitly fetch multiple *_RetainedState output buffers via a single
-        getData() call, matching QEfficient's own reference cloud_infer.py pattern
-        (one getData() call per completion, all needed outputs extracted from that
-        single result), instead of relying on implicit qaicrt.QBuffer(ndarray)
-        zero-copy aliasing for these bindings.
-        """
-        status, output_qbuffers = self.execObj[index].getData()
-        assert status == qaicrt.QStatus.QS_SUCCESS, (
-            f"Failed to getData for retained-state buffers {buffer_names}"
-        )
-        refreshed_buffers: dict[str, np.ndarray] = {}
-        for buffer_name in buffer_names:
-            buffer_index = self.binding_index_map[buffer_name]
-            binding = self.bindings[buffer_index]
-            np_dtype = aic_to_np_dtype_mapping[binding.type]
-            shape = tuple(binding.dims)
-            refreshed_buffers[buffer_name] = np.frombuffer(
-                bytes(output_qbuffers[buffer_index]), dtype=np_dtype
-            ).reshape(shape)
-
-        return refreshed_buffers

@@ -30,8 +30,6 @@ except ImportError:
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
-    from vllm.pooling_params import PoolingParams
-    from vllm.sampling_params import SamplingParams
 else:
     ModelConfig = None
     VllmConfig = None
@@ -71,11 +69,6 @@ class QaicPlatform(Platform):
     worker_cls_pkg_root = "vllm_qaic.worker.worker"
     worker_cls = worker_cls_pkg_root + "." + worker_cls_name
     device_communicator_cls = "vllm_qaic.distributed.communicator.QAicCommunicator"
-    # ODS enablement is deployment-level (startup/load-time) only; there is no
-    # per-request toggle to enable or disable it.
-    on_device_sampling_en: bool = False
-    ods_max_top_k_ids: int = 512
-    debug_return_probs_en: bool = False
 
     @classmethod
     def import_kernels(cls) -> None:
@@ -247,7 +240,7 @@ class QaicPlatform(Platform):
             override_qaic_config.update(cleaned)
             if additional_config and "override_qaic_config" in additional_config:
                 additional_config["override_qaic_config"].update(cleaned)
-        # Ensure online-serving paths always use the QAIC device type.
+        # a hack for online serving's Async EngineArgs
         if vllm_config.device_config.device_type != cls.device_type:
             vllm_config.device_config.device_type = cls.device_type
 
@@ -378,41 +371,15 @@ class QaicPlatform(Platform):
                 mode,
             )
             compilation_config.mode = CompilationMode.NONE
-        from vllm_qaic.utils.qaic_utils import derive_ods_state
+            on_device_sampling_en = override_qaic_config.get("aic_include_sampler", False)
+        if isinstance(on_device_sampling_en, str):
+            on_device_sampling_en = on_device_sampling_en.lower() in [
+                "true",
+                "1",
+            ]
 
-        (
-            on_device_sampling_en,
-            ods_max_top_k_ids,
-            debug_return_probs_en,
-        ) = derive_ods_state(
-            override_qaic_config,
-            model_config.get_vocab_size(),
-        )
-        if on_device_sampling_en and not cls.is_aot:
-            raise ValueError(
-                "On-device sampling is only supported in the Ahead-of-Time "
-                "(precompiled) QAIC execution path. Disable aic_include_sampler "
-                "or run in AOT mode."
-            )
-
-        if on_device_sampling_en and vllm_config.speculative_config:
-            raise ValueError(
-                "Speculative decoding with on-device sampling is not supported "
-                "for QAIC backend."
-            )
-
-        if on_device_sampling_en and vllm_config.kv_transfer_config:
-            raise ValueError(
-                "On-device sampling is not supported with Disaggregated "
-                "serving (split prefill/decode) for any KV role. Disable "
-                "disaggregated serving when on-device sampling is enabled."
-            )
-
-        # ODS is a deployment-level startup/load-time setting from
-        # override_qaic_config; there is no per-request ODS enable/disable path.
-        cls.on_device_sampling_en = on_device_sampling_en
-        cls.ods_max_top_k_ids = ods_max_top_k_ids
-        cls.debug_return_probs_en = debug_return_probs_en
+        assert not (on_device_sampling_en and vllm_config.speculative_config), (
+            "SPD with On-device sampling is not yet supported for QAIC backend"
 
         # Disaggregated prefill/decode is supported standalone for now
         if vllm_config.kv_transfer_config:

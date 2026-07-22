@@ -44,7 +44,7 @@ from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
 
-from vllm_qaic.utils.qaic_utils import _clean_config, derive_ods_state
+from vllm_qaic.utils.qaic_utils import _clean_config
 
 logger = init_logger(__name__)
 
@@ -150,17 +150,11 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self.lora_mode = bool(vllm_config.lora_config)
         self.last_decode = False
         self.num_spec_tokens = 0
-        override_qaic_config = (vllm_config.additional_config or {}).get(
-            "override_qaic_config"
-        ) or {}
-        (
-            self.on_device_sampling_en,
-            self.ods_max_top_k_ids,
-            self.debug_return_probs_en,
-        ) = derive_ods_state(
-            override_qaic_config,
-            self.vocab_size,
-        )
+        self.on_device_sampling_en = override_qaic_config.get('aic_include_sampler', False)
+        if self.on_device_sampling_en:
+            # Setting default to 512 to maximum to vocab_size
+            # Becasue overall cannot be greater than vocab_size
+            self.max_top_k_ids = min(int(override_qaic_config.get('max_top_k_ids', 512)), self.vocab_size)
         self.max_decode_tokens = 1
         if vllm_config.speculative_config:
             self.num_spec_tokens = vllm_config.speculative_config.num_speculative_tokens
@@ -190,24 +184,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
 
         # Pre-allocate one input dict per K so session.run() receives the correct
         # static input shape for hardware dispatch.
-        self.prefill_ods_inputs: dict[str, np.ndarray] | None = None
-        self.prefill_next_tokens: np.ndarray | None = None
-        self.prefill_last_accepted_output_tokens: np.ndarray | None = None
-        self.past_repetition_penalty_buffer: np.ndarray | None = None
-        self.past_presence_penalty_buffer: np.ndarray | None = None
-        self.past_repetition_penalty_buffer_retained_state: np.ndarray | None = None
-        self.past_presence_penalty_buffer_retained_state: np.ndarray | None = None
-        self.decode_next_tokens_by_k: dict[int, np.ndarray] | None = None
-        self.ods_step_prefill_next_tokens: np.ndarray | None = None
-        self.ods_step_num_decodes: int = 0
-        self.ods_step_decode_mdt: int = 1
-        self.decode_probs_by_k: dict[int, np.ndarray] | None = None
-        self.prefill_probs: np.ndarray | None = None
-        # Debug/eval-only ODS probability capture (full vocab transfer each step);
-        # not part of request/response sampling output, and unsuitable for
-        # production throughput/latency paths.
-        self.ods_debug_last_decode_probs: np.ndarray | None = None
-        self.ods_debug_last_prefill_probs: np.ndarray | None = None
         self.decode_batch_inputs_by_k: dict[int, dict] = {}
         for _k in self.decode_ks:
             _mdt = _k + 1
@@ -230,26 +206,13 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                             (self.decode_bsz, 1), dtype=np.float32
                         ),
                         "random_numbers": np.zeros(
-                            (self.decode_bsz, self.ods_max_top_k_ids), dtype=np.float32
+                            (self.decode_bsz, self.max_top_k_ids), dtype=np.float32
                         ),
                     }
                 )
             if self.lora_mode:
                 _d["lora_ids"] = np.full((self.decode_bsz, 1), -1, dtype=np.int64)
             self.decode_batch_inputs_by_k[_k] = _d
-
-        if self.on_device_sampling_en:
-            self.prefill_ods_inputs = {
-                "temperatures": np.zeros((self.prefill_bsz, 1), dtype=np.float32),
-                "top_ks": np.zeros((self.prefill_bsz, 1), dtype=np.int32),
-                "top_ps": np.zeros((self.prefill_bsz, 1), dtype=np.float32),
-                "min_ps": np.zeros((self.prefill_bsz, 1), dtype=np.float32),
-                "repetition_penalties": np.zeros((self.prefill_bsz, 1), dtype=np.float32),
-                "presence_penalties": np.zeros((self.prefill_bsz, 1), dtype=np.float32),
-                "random_numbers": np.zeros(
-                    (self.prefill_bsz, self.ods_max_top_k_ids), dtype=np.float32
-                ),
-            }
 
         # Backward-compat alias pointing at the max-K input dict.
         self.decode_batch_inputs = self.decode_batch_inputs_by_k[self.decode_ks[-1]]
@@ -328,7 +291,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                         logits,
                         lora_ids=lora_ids,
                         sampling_params=sampling_params,
-                        callback=callback,
                     )
         return None
 
@@ -350,33 +312,10 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
+        next_token: np.ndarray | None = None
     ) -> SamplerOutput | None:
         if self.on_device_sampling_en:
-            current_k = self.active_k
-            decode_next_tokens = self.decode_next_tokens_by_k.get(current_k)
-            num_decode_reqs = self.ods_step_num_decodes
-            decode_mdt = self.ods_step_decode_mdt if num_decode_reqs > 0 else 1
-            if num_decode_reqs > 0:
-                decode_token_ids = decode_next_tokens[:num_decode_reqs, :decode_mdt, 0]
-            else:
-                decode_token_ids = np.empty((0, 1), dtype=np.int64)
-
-            prefill_token_ids = self.ods_step_prefill_next_tokens
-            if prefill_token_ids is None:
-                prefill_token_ids = np.empty(
-                    (0, decode_token_ids.shape[1]), dtype=decode_token_ids.dtype
-                )
-
-            sampled_token_ids_np = np.concatenate(
-                (decode_token_ids, prefill_token_ids), axis=0
-            )
-            # temperature can be None on vLLM's all_greedy/no_top_k/no_top_p
-            # batch-level fast path, while repetition_penalties is always set.
-            expected_num_reqs = int(sampling_metadata.repetition_penalties.shape[0])
-            sampled_token_ids = torch.from_numpy(
-                sampled_token_ids_np.astype(np.int64, copy=False)
-            )
-            return SamplerOutput(sampled_token_ids, None)
+            return SamplerOutput(torch.from_numpy(next_token), None)
 
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
@@ -473,10 +412,9 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             cluster_id=cluster_id,
             use_async_scheduling=self.use_async_scheduling,
         )
-        # ODS-compiled QPCs (including the aic_return_pdfs debug sub-mode) never
-        # expose a `logits` binding, so querying it here is unnecessary and
-        # produces a spurious qaicrt binding-not-found warning. self.logits_ndim
-        # is only consumed by non-ODS disaggregated-serving warmup code below.
+
+        # Dummy output dimension in case ods becasue QPC doesn't contain logits
+        # and will throw error in case of ods
         self.logits_ndim = (
             3 if self.on_device_sampling_en else self.session.get_logits_ndim()
         )
@@ -539,9 +477,11 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                                     (self.decode_bsz, 1), dtype=np.float32
                                 ),
                                 "random_numbers": np.zeros(
-                                    (self.decode_bsz, self.ods_max_top_k_ids),
+                                    (self.decode_bsz, self.max_top_k_ids),
                                     dtype=np.float32,
                                 ),
+                                "last_accepted_output_tokens": np.zeros((self.decode_bsz, _mdt, 1), dtype = np.float32),
+    
                             }
                         )
                     self.decode_batch_inputs_by_k[_k] = _d
@@ -549,6 +489,10 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             # Pre-allocate per-K logit output buffers.
             self.decode_logits_by_k: dict[int, dict] = {}
             self.decode_num_logits_buffer_by_k: dict[int, dict] = {}
+
+            # Pre-allocate ODS output buffers
+            self.decode_next_tokens_by_k: dict[int, dict] = {}
+            
             for _k in self.decode_ks:
                 _mdt = _k + 1
                 self.decode_logits_by_k[_k] = dict(
@@ -560,6 +504,13 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     num_logits_to_keep=np.zeros((_mdt, 1), np.int64)
                 )
 
+                if self.on_device_sampling_en:
+                    self.decode_next_tokens_by_k[_k] = dict(
+                        next_tokens=np.random.randn(
+                            self.decode_bsz, _mdt, 1
+                        ).astype(np.float32)
+                    )
+
             # Backward-compat aliases pointing at max-K buffers.
             self.decode_logits = self.decode_logits_by_k[self.decode_ks[-1]]
             self.decode_num_logits_buffer = self.decode_num_logits_buffer_by_k[
@@ -570,132 +521,52 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             )
             self.session.set_buffers(self.prefill_num_logits_buffer)
         else:
-            if not self.on_device_sampling_en:
-                self.decode_logits = dict(
-                    logits=np.random.randn(self.decode_bsz, 1, self.vocab_size).astype(
-                        np.float32
+            # In case of ODS there is no logits binding
+            # But even if we set logits binding and QPC doesn't have binding
+            # InferenceSession will simply throw a warning
+            self.decode_logits = dict(
+                logits=np.random.randn(self.decode_bsz, 1, self.vocab_size).astype(
+                    np.float32
+                )
+            )
+
+            if self.on_device_sampling_en:
+                # Capturing output next_tokens to indetify the token generated in case of ods
+                # Inputting last_accepted_output_tokens to input the last token
+                last_accepted_output_tokens_info = self.get_io_shape_and_dtype(
+                    "last_accepted_output_tokens", is_input=True
+                )
+                last_accepted_output_tokens_width = last_accepted_output_tokens_info[0][-1]
+                last_accepted_output_tokens_dtype = last_accepted_output_tokens_info[1]
+                self.prefill_last_accepted_output_tokens = np.zeros(
+                    (self.prefill_bsz, last_accepted_output_tokens_width),
+                    dtype=last_accepted_output_tokens_dtype,
+                )
+
+                next_tokens_info = self.get_io_shape_and_dtype("next_tokens", is_input=False)
+                next_tokens_dtype = next_tokens_info[1]
+                self.decode_next_tokens_by_k = {}
+                for _k in self.decode_ks:
+                    _mdt = _k + 1
+                    expected_next_tokens_shape = (self.decode_bsz, _mdt, 1)
+                    self.session.create_output_buffers(
+                        self.decode_batch_inputs_by_k[_k],
+                        expected_next_tokens_shape,
+                        next_tokens_dtype,
+                        buffer_name="next_tokens",
                     )
-                )
-            else:
-                self.decode_logits = None
+                    registered_next_tokens = self.decode_batch_inputs_by_k[_k]["next_tokens"]
+                    self.decode_next_tokens_by_k[_k] = registered_next_tokens
 
-            penalty_info = self.get_io_shape_and_dtype(
-                "past_repetition_penalty_buffer", is_input=True
-            )
-            penalty_shape = tuple(penalty_info[0])
-            penalty_dtype = penalty_info[1]
-
-            penalty_history_buffers: dict[str, np.ndarray] = {}
-            self.session.create_numpy_penalty_buffers(
-                penalty_history_buffers,
-                direction="in",
-                shape=penalty_shape,
-                dtype=penalty_dtype,
-            )
-            self.session.create_numpy_penalty_buffers(
-                penalty_history_buffers,
-                direction="out",
-                shape=penalty_shape,
-                dtype=penalty_dtype,
-            )
-
-            # Keep penalty-history input and *_RetainedState output as distinct
-            # host arrays. Each step explicitly copies prior retained-state output
-            # back into the next step's input buffer via np.copyto in prefill/decode,
-            # avoiding reliance on unverified SDK-level aliasing behavior.
-
-            self.past_repetition_penalty_buffer = penalty_history_buffers[
-                "past_repetition_penalty_buffer"
-            ]
-            self.past_presence_penalty_buffer = penalty_history_buffers[
-                "past_presence_penalty_buffer"
-            ]
-            self.past_repetition_penalty_buffer_retained_state = (
-                penalty_history_buffers[
-                    "past_repetition_penalty_buffer_RetainedState"
-                ]
-            )
-            self.past_presence_penalty_buffer_retained_state = penalty_history_buffers[
-                "past_presence_penalty_buffer_RetainedState"
-            ]
-
-            for _k in self.decode_ks:
-                self.decode_batch_inputs_by_k[_k].update(
-                    {
-                        "past_repetition_penalty_buffer": self.past_repetition_penalty_buffer,
-                        "past_presence_penalty_buffer": self.past_presence_penalty_buffer,
-                        "past_repetition_penalty_buffer_RetainedState": self.past_repetition_penalty_buffer_retained_state,
-                        "past_presence_penalty_buffer_RetainedState": self.past_presence_penalty_buffer_retained_state,
-                    }
-                )
-
-            self.prefill_ods_inputs.update(
-                {
-                    "past_repetition_penalty_buffer": self.past_repetition_penalty_buffer,
-                    "past_presence_penalty_buffer": self.past_presence_penalty_buffer,
-                    "past_repetition_penalty_buffer_RetainedState": self.past_repetition_penalty_buffer_retained_state,
-                    "past_presence_penalty_buffer_RetainedState": self.past_presence_penalty_buffer_retained_state,
-                }
-            )
-
-            last_accepted_output_tokens_info = self.get_io_shape_and_dtype(
-                "last_accepted_output_tokens", is_input=True
-            )
-            last_accepted_output_tokens_width = last_accepted_output_tokens_info[0][-1]
-            last_accepted_output_tokens_dtype = last_accepted_output_tokens_info[1]
-            self.prefill_last_accepted_output_tokens = np.zeros(
-                (self.prefill_bsz, last_accepted_output_tokens_width),
-                dtype=last_accepted_output_tokens_dtype,
-            )
-
-            next_tokens_info = self.get_io_shape_and_dtype("next_tokens", is_input=False)
-            next_tokens_dtype = next_tokens_info[1]
-            self.decode_next_tokens_by_k = {}
-            for _k in self.decode_ks:
-                _mdt = _k + 1
-                expected_next_tokens_shape = (self.decode_bsz, _mdt, 1)
+                prefill_next_tokens_buffer: dict[str, np.ndarray] = {}
                 self.session.create_output_buffers(
-                    self.decode_batch_inputs_by_k[_k],
-                    expected_next_tokens_shape,
+                    prefill_next_tokens_buffer,
+                    (self.prefill_bsz, 1, 1),
                     next_tokens_dtype,
                     buffer_name="next_tokens",
                 )
-                registered_next_tokens = self.decode_batch_inputs_by_k[_k]["next_tokens"]
-                self.decode_next_tokens_by_k[_k] = registered_next_tokens
+                self.prefill_next_tokens = prefill_next_tokens_buffer["next_tokens"]
 
-            prefill_next_tokens_buffer: dict[str, np.ndarray] = {}
-            self.session.create_output_buffers(
-                prefill_next_tokens_buffer,
-                (self.prefill_bsz, 1, 1),
-                next_tokens_dtype,
-                buffer_name="next_tokens",
-            )
-            self.prefill_next_tokens = prefill_next_tokens_buffer["next_tokens"]
-
-            if self.debug_return_probs_en:
-                probs_info = self.get_io_shape_and_dtype("probs", is_input=False)
-                probs_dtype = probs_info[1]
-                self.decode_probs_by_k = {}
-                for _k in self.decode_ks:
-                    _mdt = _k + 1
-                    expected_probs_shape = (self.decode_bsz, _mdt, self.vocab_size)
-                    self.session.create_output_buffers(
-                        self.decode_batch_inputs_by_k[_k],
-                        expected_probs_shape,
-                        probs_dtype,
-                        buffer_name="probs",
-                    )
-                    registered_probs = self.decode_batch_inputs_by_k[_k]["probs"]
-                    self.decode_probs_by_k[_k] = registered_probs
-
-                prefill_probs_buffer: dict[str, np.ndarray] = {}
-                self.session.create_output_buffers(
-                    prefill_probs_buffer,
-                    (self.prefill_bsz, 1, self.vocab_size),
-                    probs_dtype,
-                    buffer_name="probs",
-                )
-                self.prefill_probs = prefill_probs_buffer["probs"]
         # CCL state for prefill: dict keyed by prefill exec-object slot id, value
         # is the bucket currently in flight on that slot (0 = idle). Used by
         # _run_pipeline_prefill to pick one CCL per batch =
@@ -939,35 +810,37 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
     ) -> np.ndarray:
         # perform prefill (only prefill_bsz=1 is supported)
         pending_exec_count = 0  # in-flight executions in current batch
-        num_prefill_reqs = int(len(prefill_cum_sum))
-        ods_prefill_temperatures = None
-        ods_prefill_top_ks = None
-        ods_prefill_top_ps = None
-        ods_prefill_min_ps = None
-        ods_prefill_repetition_penalties = None
-        ods_prefill_presence_penalties = None
-        ods_prefill_random_numbers = None
+
+        # ODS io and sampling variables
         if self.on_device_sampling_en:
-            self.ods_step_prefill_next_tokens = np.empty(
-                (num_prefill_reqs, 1),
-                dtype=self.prefill_next_tokens.dtype,
-            )
+            ods_inputs = {
+                "temperatures": np.zeros((self.prefill_bsz, 1), dtype=np.float32),
+                "top_ks": np.zeros((self.prefill_bsz, 1), dtype=np.int32),
+                "top_ps": np.zeros((self.prefill_bsz,1), dtype=np.float32),
+                "min_ps":  np.zeros((self.prefill_bsz,1), dtype=np.float32),
+                "repetition_penalties": np.zeros((self.prefill_bsz,1), dtype=np.float32),
+                "presence_penalties": np.zeros((self.prefill_bsz, 1), dtype=np.float32),
+                "random_numbers": np.zeros((self.prefill_bsz,self.max_top_k_ids), dtype=np.float32),
+                "next_tokens": np.zeros((self.prefill_bsz, 1, 1), dtype=self.get_io_shape_and_dtype("next_tokens", is_input=False)),
+                "last_accepted_output_tokens": np.zeros((self.prefill_bsz, 1, 1), dtype=self.get_io_shape_and_dtype("last_accepted_output_tokens", is_input=True)),
+            }
             if sampling_params is not None:
-                ods_prefill_temperatures = np.asarray(
+                ods_inputs['temperatures']= np.asarray(
                     sampling_params["temperatures"], dtype=np.float32
-                )
-                ods_prefill_top_ks = np.asarray(sampling_params["top_ks"], dtype=np.int32)
-                ods_prefill_top_ps = np.asarray(sampling_params["top_ps"], dtype=np.float32)
-                ods_prefill_min_ps = np.asarray(sampling_params["min_ps"], dtype=np.float32)
-                ods_prefill_repetition_penalties = np.asarray(
+                )[...,None]
+                ods_inputs['top_ks']= np.asarray(sampling_params["top_ks"], dtype=np.int32)[...,None]
+                ods_inputs['top_ps']= np.asarray(sampling_params["top_ps"], dtype=np.float32)[...,None]
+                ods_inputs['min_ps']= np.asarray(sampling_params["min_ps"], dtype=np.float32)[...,None]
+                ods_inputs['repetition_penalties']= np.asarray(
                     sampling_params["repetition_penalties"], dtype=np.float32
-                )
-                ods_prefill_presence_penalties = np.asarray(
+                )[..., None]
+                ods_inputs['presence_penalties']= np.asarray(
                     sampling_params["presence_penalties"], dtype=np.float32
-                )
-                ods_prefill_random_numbers = np.asarray(
+                )[...,None]
+                ods_inputs['random_numbers'] = np.asarray(
                     sampling_params["random_numbers"], dtype=np.float32
                 )
+ 
         idx_start = 0
         for i, idx_end in enumerate(prefill_cum_sum):
             # extract indices of specific request
@@ -989,8 +862,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     pids = np.concatenate([pids, pad], dtype=np.int64)
 
             if self.config.model_type == "whisper":
-                # Keep encoder-decoder prefill input shape compatible with the
-                # current QEff support (seq_len=1) when serving Whisper.
+                # A hack for using Whisper model with OpenAI's audio.transcriptions API
                 # vLLM does not allow prefill chunking for encoder-decoder model,
                 # and currently QEff only supports seq_len=1.
                 iids = np.full(
@@ -1009,32 +881,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             if mm_kwargs_list and (mm_kwargs := mm_kwargs_list[i]):
                 chunk_inputs.update(mm_kwargs)
             if self.on_device_sampling_en:
-                chunk_inputs.update(self.prefill_ods_inputs)
-                chunk_inputs["next_tokens"] = self.prefill_next_tokens
-                if self.debug_return_probs_en:
-                    chunk_inputs["probs"] = self.prefill_probs
-                # During prefill the sampler selects prefill_path via is_prefill,
-                # so decode_path's last_accepted_output_tokens input is ignored.
-                # Still provide a correctly-shaped placeholder tensor.
-                chunk_inputs["last_accepted_output_tokens"] = (
-                    self.prefill_last_accepted_output_tokens
-                )
-                if ods_prefill_temperatures is not None:
-                    self.prefill_ods_inputs["temperatures"][0, 0] = (
-                        ods_prefill_temperatures[i]
-                    )
-                    self.prefill_ods_inputs["top_ks"][0, 0] = ods_prefill_top_ks[i]
-                    self.prefill_ods_inputs["top_ps"][0, 0] = ods_prefill_top_ps[i]
-                    self.prefill_ods_inputs["min_ps"][0, 0] = ods_prefill_min_ps[i]
-                    self.prefill_ods_inputs["repetition_penalties"][0, 0] = (
-                        ods_prefill_repetition_penalties[i]
-                    )
-                    self.prefill_ods_inputs["presence_penalties"][0, 0] = (
-                        ods_prefill_presence_penalties[i]
-                    )
-                    self.prefill_ods_inputs["random_numbers"][0, :] = (
-                        ods_prefill_random_numbers[i]
-                    )
+                chunk_inputs.update(ods_inputs)
             # chunk the request
             n_chunks: int = iids.shape[-1] // self.prefill_seq_len
 
@@ -1086,18 +933,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     # SpD target QPC: prefill keeps 1 logit (last token position).
                     chunk_inputs["num_logits_to_keep"] = np.array([[1]], dtype=np.int64)
 
-                if self.on_device_sampling_en:
-                    # Explicit host round-trip: feed previous step's retained-state
-                    # output back as this step's penalty-history input.
-                    np.copyto(
-                        self.past_repetition_penalty_buffer,
-                        self.past_repetition_penalty_buffer_retained_state,
-                    )
-                    np.copyto(
-                        self.past_presence_penalty_buffer,
-                        self.past_presence_penalty_buffer_retained_state,
-                    )
-
                 if pending_exec_count == self.session.prefill_num_execObj:
                     logger.debug(
                         "All execObjs allocated; waiting for pending execObj completion."
@@ -1105,37 +940,9 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     eid = pending_exec_queue.get()
                     self.session.complete_inf(eid, True)
                     pending_exec_count -= 1
-
                 exec_obj_idx = self.session.np_run(chunk_inputs, is_prefill=True)
                 logger.debug("Ran prefill on %s", exec_obj_idx)
-                if self.on_device_sampling_en:
-                    self.session.complete_inf(exec_obj_idx, True)
-                    fresh_retained_states = self.session.refresh_retained_state_buffers(
-                        [
-                            "past_repetition_penalty_buffer_RetainedState",
-                            "past_presence_penalty_buffer_RetainedState",
-                        ],
-                        exec_obj_idx,
-                    )
-                    np.copyto(
-                        self.past_repetition_penalty_buffer_retained_state,
-                        fresh_retained_states[
-                            "past_repetition_penalty_buffer_RetainedState"
-                        ],
-                    )
-                    np.copyto(
-                        self.past_presence_penalty_buffer_retained_state,
-                        fresh_retained_states[
-                            "past_presence_penalty_buffer_RetainedState"
-                        ],
-                    )
-                    if self.debug_return_probs_en:
-                        self.ods_debug_last_prefill_probs = self.prefill_probs.copy()
-                    if chunk + 1 == n_chunks:
-                        self.ods_step_prefill_next_tokens[i, 0] = (
-                            self.prefill_next_tokens[0, 0, 0]
-                        )
-                elif not self.use_async_scheduling:
+                if not self.use_async_scheduling:
                     self.session.complete_inf(exec_obj_idx, True)
                 else:
                     time.sleep(0.01)
@@ -1168,66 +975,39 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         mdt = current_k + 1  # tokens per decode request for this step
         num_tokens = input_ids.shape[0]
         num_decodes = num_tokens // mdt  # number of decode requests
-        if self.on_device_sampling_en:
-            self.ods_step_num_decodes = num_decodes
-            self.ods_step_decode_mdt = mdt
         batch_inputs = self.decode_batch_inputs_by_k[current_k]
-        ods_decode_temperatures = None
-        ods_decode_top_ks = None
-        ods_decode_top_ps = None
-        ods_decode_min_ps = None
-        ods_decode_repetition_penalties = None
-        ods_decode_presence_penalties = None
-        ods_decode_random_numbers = None
-        if self.on_device_sampling_en and sampling_params is not None:
-            ods_decode_temperatures = np.asarray(
-                sampling_params["temperatures"], dtype=np.float32
-            )
-            ods_decode_top_ks = np.asarray(sampling_params["top_ks"], dtype=np.int32)
-            ods_decode_top_ps = np.asarray(sampling_params["top_ps"], dtype=np.float32)
-            ods_decode_min_ps = np.asarray(sampling_params["min_ps"], dtype=np.float32)
-            ods_decode_repetition_penalties = np.asarray(
-                sampling_params["repetition_penalties"], dtype=np.float32
-            )
-            ods_decode_presence_penalties = np.asarray(
-                sampling_params["presence_penalties"], dtype=np.float32
-            )
-            ods_decode_random_numbers = np.asarray(
-                sampling_params["random_numbers"], dtype=np.float32
-            )
-
-            # Scalar ODS decode controls may arrive as either 1D
-            # (num_decodes,) or one-column 2D (num_decodes, 1). Assigning the
-            # un-squeezed one-column form into per-slot [:, 0] slices (shape
-            # (num_decodes,)) raises NumPy "could not broadcast" ValueError
-            # when num_decodes > 1 (a hard failure, not silent corruption).
-            # num_decodes == 1 happens to work via incidental broadcasting, but
-            # relying on that is fragile, so we always squeeze one-column
-            # inputs. random_numbers is intentionally exempt because it is
-            # truly 2D (num_decodes, ods_max_top_k_ids).
-            if (
-                ods_decode_temperatures.ndim == 2
-                and ods_decode_temperatures.shape[1] == 1
-            ):
-                ods_decode_temperatures = ods_decode_temperatures[:, 0]
-            if ods_decode_top_ks.ndim == 2 and ods_decode_top_ks.shape[1] == 1:
-                ods_decode_top_ks = ods_decode_top_ks[:, 0]
-            if ods_decode_top_ps.ndim == 2 and ods_decode_top_ps.shape[1] == 1:
-                ods_decode_top_ps = ods_decode_top_ps[:, 0]
-            if ods_decode_min_ps.ndim == 2 and ods_decode_min_ps.shape[1] == 1:
-                ods_decode_min_ps = ods_decode_min_ps[:, 0]
-            if (
-                ods_decode_repetition_penalties.ndim == 2
-                and ods_decode_repetition_penalties.shape[1] == 1
-            ):
-                ods_decode_repetition_penalties = ods_decode_repetition_penalties[:, 0]
-            if (
-                ods_decode_presence_penalties.ndim == 2
-                and ods_decode_presence_penalties.shape[1] == 1
-            ):
-                ods_decode_presence_penalties = ods_decode_presence_penalties[:, 0]
-
         batch_inputs["input_ids"][:num_decodes] = input_ids.reshape(num_decodes, mdt)
+
+        # ODS io and sampling variables
+        if self.on_device_sampling_en:
+            ods_inputs = {
+                "temperatures": np.zeros((self.prefill_bsz, 1), dtype=np.float32),
+                "top_ks": np.zeros((self.prefill_bsz, 1), dtype=np.int32),
+                "top_ps": np.zeros((self.prefill_bsz,1), dtype=np.float32),
+                "min_ps":  np.zeros((self.prefill_bsz,1), dtype=np.float32),
+                "repetition_penalties": np.zeros((self.prefill_bsz,1), dtype=np.float32),
+                "presence_penalties": np.zeros((self.prefill_bsz, 1), dtype=np.float32),
+                "random_numbers": np.zeros((self.prefill_bsz,self.max_top_k_ids), dtype=np.float32),
+                "next_tokens": np.zeros((self.prefill_bsz, 1, 1), dtype=self.get_io_shape_and_dtype("next_tokens", is_input=False)),
+                "last_accepted_output_tokens": np.zeros((self.prefill_bsz, 1, 1), dtype=self.get_io_shape_and_dtype("last_accepted_output_tokens", is_input=True))
+            }
+            if sampling_params is not None:
+                ods_inputs['temperatures']= np.asarray(
+                    sampling_params["temperatures"], dtype=np.float32
+                )[...,None]
+                ods_inputs['top_ks']= np.asarray(sampling_params["top_ks"], dtype=np.int32)[...,None]
+                ods_inputs['top_ps']= np.asarray(sampling_params["top_ps"], dtype=np.float32)[...,None]
+                ods_inputs['min_ps']= np.asarray(sampling_params["min_ps"], dtype=np.float32)[...,None]
+                ods_inputs['repetition_penalties']= np.asarray(
+                    sampling_params["repetition_penalties"], dtype=np.float32
+                )[..., None]
+                ods_inputs['presence_penalties']= np.asarray(
+                    sampling_params["presence_penalties"], dtype=np.float32
+                )[...,None]
+                ods_inputs['random_numbers'] = np.asarray(
+                    sampling_params["random_numbers"], dtype=np.float32
+                )
+
         if self.uses_mrope:
             # positions shape: (4, num_decodes * mdt) -> (4, num_decodes, mdt)
             batch_inputs["position_ids"][:, :num_decodes] = positions.reshape(
@@ -1246,19 +1026,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         if not self.ignore_batch_index:
             batch_inputs["batch_index"][:num_decodes, 0] = batch_indices
             if num_decodes < self.decode_bsz:
-                # Pad idle rows with real, unused physical slots: negative indices
-                # can wrap to the last slot in device-side KV-cache indexing.
-                active_batch_slots = {int(slot_index) for slot_index in batch_indices}
-                unused_batch_slots = [
-                    slot_index
-                    for slot_index in range(self.decode_bsz)
-                    if slot_index not in active_batch_slots
-                ]
-                num_idle_rows = self.decode_bsz - num_decodes
-                batch_inputs["batch_index"][num_decodes:, 0] = unused_batch_slots[
-                    :num_idle_rows
-                ]
-
+                batch_inputs["batch_index"][num_decodes:] = -1
         if lora_ids is not None:
             batch_inputs["lora_ids"][:num_decodes] = lora_ids.reshape(num_decodes, 1)
             if num_decodes < self.decode_bsz:
@@ -1270,39 +1038,10 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             batch_inputs.update(self.decode_num_logits_buffer_by_k[current_k])
 
         if self.on_device_sampling_en:
-            if ods_decode_temperatures is not None:
-                batch_inputs["temperatures"][:num_decodes, 0] = ods_decode_temperatures
-                batch_inputs["top_ks"][:num_decodes, 0] = ods_decode_top_ks
-                batch_inputs["top_ps"][:num_decodes, 0] = ods_decode_top_ps
-                batch_inputs["min_ps"][:num_decodes, 0] = ods_decode_min_ps
-                batch_inputs["repetition_penalties"][:num_decodes, 0] = (
-                    ods_decode_repetition_penalties
-                )
-                batch_inputs["presence_penalties"][:num_decodes, 0] = (
-                    ods_decode_presence_penalties
-                )
-                batch_inputs["random_numbers"][:num_decodes, :] = ods_decode_random_numbers
-                if num_decodes < self.decode_bsz:
-                    batch_inputs["temperatures"][num_decodes:, 0] = 0.0
-                    batch_inputs["top_ks"][num_decodes:, 0] = 0
-                    batch_inputs["top_ps"][num_decodes:, 0] = 0.0
-                    batch_inputs["min_ps"][num_decodes:, 0] = 0.0
-                    batch_inputs["repetition_penalties"][num_decodes:, 0] = 0.0
-                    batch_inputs["presence_penalties"][num_decodes:, 0] = 0.0
-                    batch_inputs["random_numbers"][num_decodes:, :] = 0.0
+            batch_inputs.update(ods_inputs)
             # For non-speculative ODS decode, next-step input_ids already contain
             # the accepted token IDs from the previous step.
             batch_inputs["last_accepted_output_tokens"] = batch_inputs["input_ids"]
-            # Explicit host round-trip: previous decode step's retained-state
-            # output becomes this step's penalty-history input.
-            np.copyto(
-                self.past_repetition_penalty_buffer,
-                self.past_repetition_penalty_buffer_retained_state,
-            )
-            np.copyto(
-                self.past_presence_penalty_buffer,
-                self.past_presence_penalty_buffer_retained_state,
-            )
 
         if self.comp_ctx_lengths_decode is not None:
             assert self.list_of_comp_ctx_lengths is not None
@@ -1325,32 +1064,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
 
         if not self.use_async_scheduling:
             self.session.complete_inf(exec_obj_idx, is_prefill=False)
-            if self.on_device_sampling_en:
-                # NOTE: This readback handles only the synchronous completion path here.
-                # Async-scheduling completion runs later in model_runner.py's
-                # complete_all_inf(), which refreshes retained-state buffers in that path.
-                fresh_retained_states = self.session.refresh_retained_state_buffers(
-                    [
-                        "past_repetition_penalty_buffer_RetainedState",
-                        "past_presence_penalty_buffer_RetainedState",
-                    ],
-                    exec_obj_idx,
-                )
-                np.copyto(
-                    self.past_repetition_penalty_buffer_retained_state,
-                    fresh_retained_states[
-                        "past_repetition_penalty_buffer_RetainedState"
-                    ],
-                )
-                np.copyto(
-                    self.past_presence_penalty_buffer_retained_state,
-                    fresh_retained_states[
-                        "past_presence_penalty_buffer_RetainedState"
-                    ],
-                )
-            if self.debug_return_probs_en:
-                decode_probs = self.decode_probs_by_k.get(current_k)
-                self.ods_debug_last_decode_probs = decode_probs.copy()
 
         return
 
@@ -1849,6 +1562,8 @@ def load_qaic_model(
     # Generate qpc using QEfficient transformer
     if not qpc_path:
         # TODO: what will break by me doing this?
+        # `_parse_quant_hf_config` no longer exists
+        # quant_cfg = vllm_config.model_config._parse_quant_hf_config()
         quant_cfg = None
         quant_method = None
         if quant_cfg is not None:

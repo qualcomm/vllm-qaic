@@ -16,40 +16,6 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-
-def derive_ods_state(
-    override_qaic_config: dict[str, Any], vocab_size: int
-) -> tuple[bool, int, bool]:
-    on_device_sampling_en = override_qaic_config.get("aic_include_sampler", False)
-    if isinstance(on_device_sampling_en, str):
-        on_device_sampling_en = on_device_sampling_en.lower() in ["true", "1"]
-    else:
-        on_device_sampling_en = bool(on_device_sampling_en)
-
-    # Debug/eval-only ODS sub-mode: when enabled, QPC returns full-vocab
-    # probability tensors each step (high transfer cost), so keep it opt-in and
-    # disabled by default for production serving.
-    debug_return_probs_en = override_qaic_config.get("aic_return_pdfs", False)
-    if isinstance(debug_return_probs_en, str):
-        debug_return_probs_en = debug_return_probs_en.lower() in ["true", "1"]
-    else:
-        debug_return_probs_en = bool(debug_return_probs_en)
-
-    ods_max_top_k_ids = 512
-    if on_device_sampling_en:
-        max_top_k_ids = override_qaic_config.get("max_top_k_ids")
-        if max_top_k_ids is not None:
-            try:
-                ods_max_top_k_ids = min(int(max_top_k_ids), vocab_size)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    "override_qaic_config.max_top_k_ids must be an integer "
-                    "when on-device sampling is enabled."
-                ) from exc
-
-    return on_device_sampling_en, ods_max_top_k_ids, debug_return_probs_en
-
-
 def _clean_config(
     cfg: dict[str, Any] | None,
     vllm_config: "VllmConfig | None" = None,
