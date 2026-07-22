@@ -34,6 +34,7 @@ from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, SupportedTask
+from vllm.utils.func_utils import supports_kw
 from vllm.utils.import_utils import PlaceholderModule
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (
@@ -474,6 +475,11 @@ class QaicModelRunnerAoT(GPUModelRunner):
         self.kv_caches: list[list] = [
             [] for _ in range(vllm_config.scheduler_config.max_num_seqs)
         ]
+        self.kv_cache_layers: dict[str, torch.Tensor] = {}
+        self._kv_connector_name: str | None = (
+            vllm_config.kv_transfer_config.kv_connector
+            if vllm_config.kv_transfer_config else None
+        )
         self.num_decode_tokens = 0
         self.max_decode_tokens = 1 + self.num_spec_tokens
         # Variable-K decode specializations: for ngram/suffix we compile two
@@ -1759,6 +1765,169 @@ class QaicModelRunnerAoT(GPUModelRunner):
 
         return tuple(tasks)
 
+    def _uses_torch_view_kv_connector(self) -> bool:
+        return self._kv_connector_name in ("NixlConnector", "MooncakeConnector")
+
+    @staticmethod
+    def _parse_kv_layer_idx(layer_name: str) -> int:
+        if layer_name.startswith("layer_"):
+            return int(layer_name.split("_", 1)[1])
+        parts = layer_name.replace(".", "_").split("_")
+        for part in parts:
+            if part.isdigit():
+                return int(part)
+        raise ValueError(f"Unable to parse KV layer index from {layer_name}")
+
+    def _collect_qpc_kv_binding_info(
+        self,
+    ) -> tuple[
+        list[tuple[str, int]],
+        dict[str, tuple[int, int]],
+        dict[int, tuple[int, ...]],
+        dict[int, int],
+        torch.dtype,
+    ]:
+        """Collect QPC KV binding metadata once for torch/NumPy views."""
+        decode_buff_map = self.model.session.decode_buff_map
+
+        # Keep QAIC binding order, but cache parsed layer/KV metadata once.
+        buffers_by_layer: dict[int, list[tuple[str, int]]] = {}
+        binding_info: dict[str, tuple[int, int]] = {}
+        qpc_shapes: dict[int, tuple[int, ...]] = {}
+        qpc_payloads: dict[int, int] = {}
+        torch_dtype: torch.dtype | None = None
+
+        for name, binding_idx in decode_buff_map:
+            layer_idx = self._parse_kv_layer_idx(name)
+            buffers_by_layer.setdefault(layer_idx, []).append((name, binding_idx))
+
+        # Validate per-layer QPC shapes/dtypes and record each binding's K/V index.
+        for layer_idx, layer_buffers in buffers_by_layer.items():
+            shapes: list[tuple[int, ...]] = []
+            for kv_idx, (name, _) in enumerate(layer_buffers):
+                shape_dtype = self.model.get_io_shape_and_dtype(name)
+
+                shape, np_dtype, _ = shape_dtype
+                qpc_shape = tuple(shape)
+                if len(qpc_shape) != 4:
+                    raise RuntimeError(
+                        "QAIC NIXL first patch expects HND QPC KV shape "
+                        f"[slot, heads, context, dim], got layer={layer_idx}, "
+                        f"name={name}, shape={qpc_shape}"
+                    )
+
+                shapes.append(qpc_shape)
+                curr_dtype = torch.from_numpy(np.empty(0, dtype=np_dtype)).dtype
+                if torch_dtype is None:
+                    torch_dtype = curr_dtype
+
+                binding_info[name] = (layer_idx, kv_idx)
+
+            if len(set(shapes)) != 1:
+                raise RuntimeError(
+                    f"QPC KV shape mismatch within layer {layer_idx}: {shapes}"
+                )
+
+            qpc_shapes[layer_idx] = shapes[0]
+            qpc_payloads[layer_idx] = shapes[0][1] * shapes[0][2] * shapes[0][3]
+
+        return decode_buff_map, binding_info, qpc_shapes, qpc_payloads, torch_dtype
+
+    @staticmethod
+    def _get_elements_per_kv_block(
+        kv_cache_tensor_size: int,
+        dtype_size: int,
+        num_blocks: int,
+        shared_by: list[str],
+    ) -> int:
+        """Validate a vLLM KV tensor size and return elements per block."""
+
+        elements_per_block = kv_cache_tensor_size // dtype_size // num_blocks
+        return elements_per_block
+
+    def _build_torch_view_kv_caches(
+        self,
+        kv_cache_config: KVCacheConfig,
+    ) -> dict[str, torch.Tensor]:
+        """Build connector KV tensors that directly back QAIC KV inputs."""
+        # vLLM block 0 is reserved as the null block.
+        # At least one additional data block is needed.
+        num_blocks = int(kv_cache_config.num_blocks)
+        if num_blocks <= 1:
+            raise RuntimeError(
+                "QAIC NIXL KV cache needs at least one null block and one data block."
+            )
+
+        (
+            decode_buff_map,
+            binding_info,
+            qpc_shapes,
+            qpc_payloads,
+            torch_dtype,
+        ) = self._collect_qpc_kv_binding_info()
+
+        # Allocate connector-visible torch tensors, one per parsed layer index.
+        dtype_size = torch.tensor([], dtype=torch_dtype).element_size()
+        layer_tensors: dict[int, torch.Tensor] = {}
+        kv_cache_layers: dict[str, torch.Tensor] = {}
+        has_registered_layer = False
+
+        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+            elements_per_block = self._get_elements_per_kv_block(
+                kv_cache_tensor.size,
+                dtype_size,
+                num_blocks,
+                kv_cache_tensor.shared_by,
+            )
+            flat_kv_payload = elements_per_block // 2
+
+            for layer_name in kv_cache_tensor.shared_by:
+                layer_idx = self._parse_kv_layer_idx(layer_name)
+                qpc_payload = qpc_payloads.get(layer_idx)
+
+                if layer_idx not in layer_tensors:
+                    layer_tensors[layer_idx] = torch.empty(
+                        (2, num_blocks, flat_kv_payload),
+                        dtype=torch_dtype,
+                    )
+                    # Keep physical block 0 as vLLM's null block.
+                    layer_tensors[layer_idx][:, 0].zero_()
+
+                kv_cache_layers[layer_name] = layer_tensors[layer_idx]
+                has_registered_layer = True
+
+        if not has_registered_layer:
+            raise RuntimeError("No KV cache layers found for NIXL registration.")
+
+        # Build QAIC slot-local NumPy views over the connector torch tensors.
+        self.kv_caches = [[] for _ in range(self.scheduler_config.max_num_seqs)]
+        for qpc_slot in range(self.scheduler_config.max_num_seqs):
+            # Slot N maps to physical block N+1 because block 0 is the null block.
+            physical_block = qpc_slot + 1
+            if physical_block >= num_blocks:
+                raise RuntimeError(
+                    "Not enough vLLM KV blocks to map QAIC slot to non-null block: "
+                    f"qpc_slot={qpc_slot}, num_blocks={num_blocks}"
+                )
+
+            qpc_views = []
+            for name, _ in decode_buff_map:
+                layer_idx, kv_idx = binding_info[name]
+                qpc_shape = qpc_shapes[layer_idx]
+                qpc_payload = qpc_payloads[layer_idx]
+                qpc_views.append(
+                    layer_tensors[layer_idx][
+                        kv_idx,
+                        physical_block,
+                        :qpc_payload,
+                    ]
+                    .reshape((1, *qpc_shape[1:]))
+                    .numpy()
+                )
+            self.kv_caches[qpc_slot] = qpc_views
+
+        return kv_cache_layers
+
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Initialize KV cache based on `kv_cache_config`.
@@ -1768,7 +1937,13 @@ class QaicModelRunnerAoT(GPUModelRunner):
         """
         self.kv_cache_config = kv_cache_config
         if has_kv_transfer_group():
-            get_kv_transfer_group().register_kv_caches(self.kv_caches)
+            if self._uses_torch_view_kv_connector():
+                self.kv_cache_layers = self._build_torch_view_kv_caches(
+                    kv_cache_config
+                )
+                get_kv_transfer_group().register_kv_caches(self.kv_cache_layers)
+            else:
+                get_kv_transfer_group().register_kv_caches(self.kv_caches)
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """
@@ -1812,7 +1987,10 @@ class QaicModelRunnerAoT(GPUModelRunner):
             **kwargs,
         )
         if wait_for_save:
-            kv_connector.wait_for_save(**kwargs)
+            if kwargs and supports_kw(kv_connector.wait_for_save, "kv_cache_info"):
+                kv_connector.wait_for_save(**kwargs)
+            else:
+                kv_connector.wait_for_save()
         output.finished_sending, output.finished_recving = kv_connector.get_finished(
             finished_req_ids
         )
