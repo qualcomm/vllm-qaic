@@ -47,8 +47,13 @@ usermod -aG sudo "${USERNAME}"
 echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
 # Join the qaic group (matching the host's qaic gid) if one was provided.
+# The QAIC runtime looks up the group by name ("qaic"), not by gid, so a
+# group literally named "qaic" must exist — even if that gid is already
+# taken by another group in the base image (-o allows the duplicate gid).
 if [ -n "${QAIC_GID:-}" ]; then
-    groupadd -g "${QAIC_GID}" qaic
+    if ! getent group qaic >/dev/null; then
+        groupadd -o -g "${QAIC_GID}" qaic
+    fi
     usermod -aG qaic "${USERNAME}"
 fi
 

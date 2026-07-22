@@ -32,3 +32,14 @@ TORCHAUDIO_VERSION_PYT="2.10.0+cpu"
 # === Paths ===
 TORCH_QAIC_BASE_PATH="/opt/qti-aic/integrations/torch_qaic"
 VLLM_QAIC_SDK_PATH="${VLLM_QAIC_SDK_PATH:-/opt/qti-aic/integrations/vllm_qaic}"
+
+# === Docker ===
+DEFAULT_BASE_IMAGE="ghcr.io/quic/cloud_ai_inference_ubuntu24:1.21.6.0"
+
+# Derive a docker-tag-safe slug from a base image ref, e.g.
+# "ghcr.io/quic/cloud_ai_inference_ubuntu24:1.21.6.0" -> "cloud_ai_inference_ubuntu24-1.21.6.0"
+base_image_tag_slug() {
+    local name_tag
+    name_tag="$(basename "$1")"
+    echo "${name_tag//[:@]/-}"
+}
