@@ -149,6 +149,11 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self.full_batch_size = vllm_config.scheduler_config.max_num_seqs
         self.prefill_bsz = 1
         self.lora_mode = bool(vllm_config.lora_config)
+        self._kv_connector_name = (
+            vllm_config.kv_transfer_config.kv_connector
+            if vllm_config.kv_transfer_config
+            else None
+        )
         self.last_decode = False
         self.num_spec_tokens = 0
         self.max_decode_tokens = 1
@@ -203,6 +208,9 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self.uses_mrope = model_config.uses_mrope
         self.is_vision_encoder = False
         self.is_multimodal_model = vllm_config.model_config.is_multimodal_model
+
+    def _uses_torch_view_kv_connector(self) -> bool:
+        return self._kv_connector_name in ("NixlConnector", "MooncakeConnector")
 
     def forward(
         self,
@@ -1259,9 +1267,14 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 bidx = 0
                 input_kv_buffers: dict[str, Any] = {}
                 KvCache_buff = []
+                use_torch_view_kv = self._uses_torch_view_kv_connector()
                 for kv_shape, kv_type, _ in self.kv_cache_info:
-                    _kv_shape = (self.decode_bsz,) + kv_shape[1:]
-                    KvCache_buff.append(np.empty(shape=kv_shape, dtype=kv_type))
+                    _kv_shape = (
+                        (self.decode_bsz,) + kv_shape[1:]
+                        if use_torch_view_kv
+                        else kv_shape
+                    )
+                    KvCache_buff.append(np.empty(shape=_kv_shape, dtype=kv_type))
 
                 decode_logits_shape = (
                     (self.decode_bsz, 1, self.vocab_size)
@@ -1284,8 +1297,13 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     self.decode_batch_inputs["comp_ctx_lengths"] = np.zeros(
                         self.comp_ctx_lengths_decode[-1], dtype=np.int64
                     )
+                if use_torch_view_kv:
+                    self.session.unskip_buffers(
+                        [name for name, _ in self.session.decode_buff_map],
+                        self.decode_execObj_idx,
+                    )
                 _ = self.session.set_data_for_kv_handoff(
-                    input_kv_buffers,
+                    KvCache_buff if use_torch_view_kv else input_kv_buffers,
                     [("batch_index", bidx), ("ctx_start", 0)],
                     self.decode_execObj_idx,
                     self.session.decode_buff_map,

@@ -116,6 +116,12 @@ class QaicPlatform(Platform):
         return cls.device_communicator_cls
 
     @classmethod
+    def discover_numa_topology(cls) -> list[list[int]]:
+        # QAIC AOT reports as CPU to vLLM. NIXL calls this optional CPU-platform
+        # hook to reserve transfer cores; return no reservation for QAIC.
+        return []
+
+    @classmethod
     def is_async_output_supported(cls, enforce_eager: bool | None) -> bool:
         return False
 
@@ -148,7 +154,7 @@ class QaicPlatform(Platform):
     def set_device(cls, device: torch.device):
         # Not Implemented for aot
         if isinstance(qaic, PlaceholderModule):
-            raise NotImplementedError
+            return 
         # for eager mode
         qaic.set_device(device)
 

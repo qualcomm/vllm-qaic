@@ -144,7 +144,7 @@ class QaicWorker(WorkerBase):
             return None
 
         tp_rank = get_tp_group().rank_in_group
-        return {tp_rank: metadata}
+        return {(0, tp_rank): metadata}
 
     @torch.inference_mode()
     def sample_tokens(
