@@ -94,10 +94,33 @@ echo ""
 echo "========================================================"
 echo "  vllm-qaic installer"
 echo "  mode     : ${MODE}"
-echo "  source   : ${INSTALL_SOURCE}"
-echo "  triton-cpu: $([ "${TRITON_CPU}" = "1" ] && echo "enabled (${TRITON_CPU_SRC})" || echo "disabled")"
+echo "  source   : ${INSTALL_SOURCE}$([ "${INSTALL_SOURCE}" = "source" ] && echo " (${REPO_ROOT})" || echo "")"
 echo "  python   : $(${PYTHON} --version)"
 echo "  env      : $(${PYTHON} -c 'import sys; print(sys.prefix)')"
+echo "  --------------------------------------------------------"
+if [ "${MODE}" = "aot" ]; then
+    echo "  vllm           : ${VLLM_VERSION}       vllm-qaic: ${VLLM_QAIC_VERSION}"
+    echo "  torch (AOT)    : ${TORCH_VERSION_AOT}  torchvision: ${TORCHVISION_VERSION_AOT}"
+    echo "  qeff branch    : ${QEFF_BRANCH}"
+    echo "  target device  : ${VLLM_TARGET_DEVICE_AOT}"
+    if [ "${TRITON_CPU}" = "1" ]; then
+        echo "  triton-cpu     : enabled"
+        echo "    src          : ${TRITON_CPU_SRC}"
+        echo "    commit       : ${TRITON_CPU_COMMIT}"
+        echo "    max jobs     : ${TRITON_CPU_COMPILE_MAX_JOBS}"
+    else
+        echo "  triton-cpu     : disabled  (set TRITON_CPU=1 to enable)"
+    fi
+else
+    echo "  vllm           : ${VLLM_VERSION}       vllm-qaic: ${VLLM_QAIC_VERSION}"
+    echo "  torch (PYT)    : ${TORCH_VERSION_PYT}  torchvision: ${TORCHVISION_VERSION_PYT}"
+    echo "  torchaudio     : ${TORCHAUDIO_VERSION_PYT}"
+    echo "  torch-qaic     : ${TORCH_QAIC_VERSION}"
+    echo "  target device  : ${VLLM_TARGET_DEVICE_PYT}"
+fi
+echo "  --------------------------------------------------------"
+echo "  Override any variable before running, e.g.:"
+echo "    TRITON_CPU=1 TRITON_CPU_SRC=/data/triton-cpu ./scripts/install.sh aot"
 echo "========================================================"
 echo ""
 
