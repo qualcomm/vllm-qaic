@@ -338,8 +338,12 @@ class QaicPlatform(Platform):
             scheduler_config.max_num_scheduled_tokens = None
 
         if cls.is_aot:
-            # Intel OpenMP tuning — only activate when user has already preloaded
-            # libiomp5.so (Intel OpenMP runtime).
+            # libiomp5.so (Intel's OpenMP runtime) OMP barrier/blocktime tuning —
+            # only activate when the user has already preloaded it via LD_PRELOAD.
+            # Despite the library's name, this tuning benefits both Intel and AMD
+            # CPUs (KMP_TPAUSE is a documented no-op on non-Intel silicon; the other
+            # KMP_* vars measurably speed up CPU-bound speculative-decoding proposers
+            # on AMD EPYC as well).
             # Set VLLM_DISABLE_LD_PRELOAD_OPT=1 to skip this optimization.
             ld_preload_str = os.getenv("LD_PRELOAD", "")
             disable_opt = os.getenv("VLLM_DISABLE_LD_PRELOAD_OPT", "0") == "1"
