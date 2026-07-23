@@ -5,10 +5,7 @@
 
 """Register QAIC grouped top-k router overrides.
 
-The grouped router needs to override module/class routing behavior, not just a
-single torch custom op.  Keeping this under ``model_executor.ops`` aligns it
-with other QAIC backend overrides while preserving the same plugin/fork symlink
-layout as ``layernorm.py``.
+The grouped router needs to override module/class routing behavior.
 """
 
 from __future__ import annotations
