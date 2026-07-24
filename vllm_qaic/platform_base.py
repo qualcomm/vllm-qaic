@@ -430,7 +430,7 @@ class QaicPlatform(Platform):
                 # Monkey patch uniproc_executor to QaicUniProcExecutor
                 import vllm.v1.executor.uniproc_executor as uniproc_executor
 
-                from vllm_qaic.qaic_uniproc_executor import QaicUniProcExecutor
+                from vllm_qaic.executor.qaic_uniproc_executor import QaicUniProcExecutor
 
                 uniproc_executor.UniProcExecutor = QaicUniProcExecutor
                 stages = int(override_qaic_config.get("stages"))
