@@ -371,7 +371,7 @@ class QaicPlatform(Platform):
                 mode,
             )
             compilation_config.mode = CompilationMode.NONE
-            on_device_sampling_en = override_qaic_config.get("aic_include_sampler", False)
+        on_device_sampling_en = override_qaic_config.get("aic_include_sampler", False)
         if isinstance(on_device_sampling_en, str):
             on_device_sampling_en = on_device_sampling_en.lower() in [
                 "true",
@@ -380,7 +380,7 @@ class QaicPlatform(Platform):
 
         assert not (on_device_sampling_en and vllm_config.speculative_config), (
             "SPD with On-device sampling is not yet supported for QAIC backend"
-
+        )
         # Disaggregated prefill/decode is supported standalone for now
         if vllm_config.kv_transfer_config:
             assert not vllm_config.lora_config, (

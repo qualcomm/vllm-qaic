@@ -88,6 +88,9 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self._pooler = None
         self.is_pooling_model = False
         self.task = None
+        override_qaic_config = (vllm_config.additional_config or {}).get(
+            "override_qaic_config"
+        ) or {}
         if vllm_config.model_config.runner_type == "pooling":
             self.is_pooling_model = True
             self._pooler = DispatchPooler(
@@ -119,9 +122,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             self.is_qaic_pooler = False
             self.normalize = False
             self.softmax = False
-            override_qaic_config = (vllm_config.additional_config or {}).get(
-                "override_qaic_config"
-            ) or {}
             if override_qaic_config.get("pooling_device", None) == "qaic":
                 self.is_qaic_pooler = True
                 self.normalize = bool(override_qaic_config.get("normalize", False))
@@ -312,10 +312,29 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-        next_token: np.ndarray | None = None
+        next_token: np.ndarray | dict[str, np.ndarray] | None = None
     ) -> SamplerOutput | None:
         if self.on_device_sampling_en:
-            return SamplerOutput(torch.from_numpy(next_token), None)
+            if isinstance(next_token, dict):
+                next_token = next_token.get("next_tokens")
+            if next_token is None:
+                raise ValueError("On-device sampling requires non-empty next_token buffer")
+            next_token_np = np.asarray(next_token)
+            if next_token_np.ndim == 3 and next_token_np.shape[-1] == 1:
+                next_token_np = next_token_np[..., 0]
+            if next_token_np.ndim == 1:
+                next_token_np = next_token_np.reshape(-1, 1)
+
+            num_reqs = len(sampling_metadata.output_token_ids)
+            if next_token_np.shape[0] < num_reqs:
+                raise ValueError(
+                    "On-device sampling returned fewer rows than active requests: "
+                    f"rows={next_token_np.shape[0]}, reqs={num_reqs}"
+                )
+            if next_token_np.shape[0] > num_reqs:
+                next_token_np = next_token_np[:num_reqs]
+
+            return SamplerOutput(torch.from_numpy(next_token_np), None)
 
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
@@ -480,7 +499,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                                     (self.decode_bsz, self.max_top_k_ids),
                                     dtype=np.float32,
                                 ),
-                                "last_accepted_output_tokens": np.zeros((self.decode_bsz, _mdt, 1), dtype = np.float32),
+                                "last_accepted_output_tokens": np.zeros((self.decode_bsz, _mdt, 1), dtype = np.int64),
     
                             }
                         )
@@ -508,7 +527,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     self.decode_next_tokens_by_k[_k] = dict(
                         next_tokens=np.random.randn(
                             self.decode_bsz, _mdt, 1
-                        ).astype(np.float32)
+                        ).astype(np.int64)
                     )
 
             # Backward-compat aliases pointing at max-K buffers.
@@ -529,43 +548,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     np.float32
                 )
             )
-
-            if self.on_device_sampling_en:
-                # Capturing output next_tokens to indetify the token generated in case of ods
-                # Inputting last_accepted_output_tokens to input the last token
-                last_accepted_output_tokens_info = self.get_io_shape_and_dtype(
-                    "last_accepted_output_tokens", is_input=True
-                )
-                last_accepted_output_tokens_width = last_accepted_output_tokens_info[0][-1]
-                last_accepted_output_tokens_dtype = last_accepted_output_tokens_info[1]
-                self.prefill_last_accepted_output_tokens = np.zeros(
-                    (self.prefill_bsz, last_accepted_output_tokens_width),
-                    dtype=last_accepted_output_tokens_dtype,
-                )
-
-                next_tokens_info = self.get_io_shape_and_dtype("next_tokens", is_input=False)
-                next_tokens_dtype = next_tokens_info[1]
-                self.decode_next_tokens_by_k = {}
-                for _k in self.decode_ks:
-                    _mdt = _k + 1
-                    expected_next_tokens_shape = (self.decode_bsz, _mdt, 1)
-                    self.session.create_output_buffers(
-                        self.decode_batch_inputs_by_k[_k],
-                        expected_next_tokens_shape,
-                        next_tokens_dtype,
-                        buffer_name="next_tokens",
-                    )
-                    registered_next_tokens = self.decode_batch_inputs_by_k[_k]["next_tokens"]
-                    self.decode_next_tokens_by_k[_k] = registered_next_tokens
-
-                prefill_next_tokens_buffer: dict[str, np.ndarray] = {}
-                self.session.create_output_buffers(
-                    prefill_next_tokens_buffer,
-                    (self.prefill_bsz, 1, 1),
-                    next_tokens_dtype,
-                    buffer_name="next_tokens",
-                )
-                self.prefill_next_tokens = prefill_next_tokens_buffer["next_tokens"]
 
         # CCL state for prefill: dict keyed by prefill exec-object slot id, value
         # is the bucket currently in flight on that slot (0 = idle). Used by
@@ -821,8 +803,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 "repetition_penalties": np.zeros((self.prefill_bsz,1), dtype=np.float32),
                 "presence_penalties": np.zeros((self.prefill_bsz, 1), dtype=np.float32),
                 "random_numbers": np.zeros((self.prefill_bsz,self.max_top_k_ids), dtype=np.float32),
-                "next_tokens": np.zeros((self.prefill_bsz, 1, 1), dtype=self.get_io_shape_and_dtype("next_tokens", is_input=False)),
-                "last_accepted_output_tokens": np.zeros((self.prefill_bsz, 1, 1), dtype=self.get_io_shape_and_dtype("last_accepted_output_tokens", is_input=True)),
+                "next_tokens": np.zeros((self.prefill_bsz, 1, 1), dtype=np.int64),
+                "last_accepted_output_tokens": np.zeros((self.prefill_bsz, self.prefill_seq_len), dtype=np.int64),
             }
             if sampling_params is not None:
                 ods_inputs['temperatures']= np.asarray(
@@ -981,15 +963,15 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         # ODS io and sampling variables
         if self.on_device_sampling_en:
             ods_inputs = {
-                "temperatures": np.zeros((self.prefill_bsz, 1), dtype=np.float32),
-                "top_ks": np.zeros((self.prefill_bsz, 1), dtype=np.int32),
-                "top_ps": np.zeros((self.prefill_bsz,1), dtype=np.float32),
-                "min_ps":  np.zeros((self.prefill_bsz,1), dtype=np.float32),
-                "repetition_penalties": np.zeros((self.prefill_bsz,1), dtype=np.float32),
-                "presence_penalties": np.zeros((self.prefill_bsz, 1), dtype=np.float32),
-                "random_numbers": np.zeros((self.prefill_bsz,self.max_top_k_ids), dtype=np.float32),
-                "next_tokens": np.zeros((self.prefill_bsz, 1, 1), dtype=self.get_io_shape_and_dtype("next_tokens", is_input=False)),
-                "last_accepted_output_tokens": np.zeros((self.prefill_bsz, 1, 1), dtype=self.get_io_shape_and_dtype("last_accepted_output_tokens", is_input=True))
+                "temperatures": np.zeros((self.decode_bsz, 1), dtype=np.float32),
+                "top_ks": np.zeros((self.decode_bsz,1), dtype=np.int32),
+                "top_ps": np.zeros((self.decode_bsz,1), dtype=np.float32),
+                "min_ps":  np.zeros((self.decode_bsz,1), dtype=np.float32),
+                "repetition_penalties": np.zeros((self.decode_bsz, 1), dtype=np.float32),
+                "presence_penalties": np.zeros((self.decode_bsz, 1), dtype=np.float32),
+                "random_numbers": np.zeros((self.decode_bsz,self.max_top_k_ids), dtype=np.float32),
+                "next_tokens": np.zeros((self.decode_bsz, 1, 1), dtype=np.int64),
+                "last_accepted_output_tokens": np.zeros((self.decode_bsz, 1, 1), dtype=np.int64)
             }
             if sampling_params is not None:
                 ods_inputs['temperatures']= np.asarray(
