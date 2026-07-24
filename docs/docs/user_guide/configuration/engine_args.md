@@ -83,6 +83,9 @@ All `qaic-compile` arguments can be passed as input arguments. The table below l
 | 25 | `normalize` | — | Set `True` to normalize pooled outputs (`qaic` pooling only) |
 | 26 | `softmax` | — | Set `True` to apply softmax to pooled outputs (`qaic` pooling only) |
 | 27 | `prefill_only` | `None` | Disaggregated serving mode: `True` = compile prefill QPC only, `False` = decode QPC only, `None` = single QPC for both |
+| 28 | `aic_include_sampler` | `False` | Enable on-device sampling (ODS) — sampling runs on the accelerator instead of the host. Deployment-level (compile-time) toggle only; there is no per-request enable/disable. |
+| 29 | `max_top_k_ids` | `512` | Maximum top-k candidate count supported by the compiled ODS binding. Per-request `top_k` values above this limit are rejected. Only meaningful when `aic_include_sampler` is enabled. |
+| 30 | `aic_return_pdfs` | `False` | Debug/evaluation-only ODS sub-mode: returns full probability distributions from the device each step for offline accuracy comparison. High transfer cost — never enable for production serving. Only meaningful when `aic_include_sampler` is enabled. |
 
 ### `draft_override_qaic_config` Fields
 

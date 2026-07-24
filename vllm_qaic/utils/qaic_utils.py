@@ -16,7 +16,6 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-
 def _clean_config(
     cfg: dict[str, Any] | None,
     vllm_config: "VllmConfig | None" = None,

@@ -9,7 +9,7 @@ import json
 import os
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from queue import Queue
 from typing import Any
@@ -50,7 +50,6 @@ logger = init_logger(__name__)
 
 lock = threading.Lock()
 
-
 class QaicCompilationComplete(Exception):
     def __init__(
         self,
@@ -89,6 +88,9 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self._pooler = None
         self.is_pooling_model = False
         self.task = None
+        override_qaic_config = (vllm_config.additional_config or {}).get(
+            "override_qaic_config"
+        ) or {}
         if vllm_config.model_config.runner_type == "pooling":
             self.is_pooling_model = True
             self._pooler = DispatchPooler(
@@ -120,9 +122,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             self.is_qaic_pooler = False
             self.normalize = False
             self.softmax = False
-            override_qaic_config = (vllm_config.additional_config or {}).get(
-                "override_qaic_config"
-            ) or {}
             if override_qaic_config.get("pooling_device", None) == "qaic":
                 self.is_qaic_pooler = True
                 self.normalize = bool(override_qaic_config.get("normalize", False))
@@ -151,6 +150,11 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self.lora_mode = bool(vllm_config.lora_config)
         self.last_decode = False
         self.num_spec_tokens = 0
+        self.on_device_sampling_en = override_qaic_config.get('aic_include_sampler', False)
+        if self.on_device_sampling_en:
+            # Setting default to 512 to maximum to vocab_size
+            # Becasue overall cannot be greater than vocab_size
+            self.max_top_k_ids = min(int(override_qaic_config.get('max_top_k_ids', 512)), self.vocab_size)
         self.max_decode_tokens = 1
         if vllm_config.speculative_config:
             self.num_spec_tokens = vllm_config.speculative_config.num_speculative_tokens
@@ -188,6 +192,24 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 "position_ids": np.full((self.decode_bsz, _mdt), -1, dtype=np.int64),
                 "batch_index": np.full((self.decode_bsz, 1), -1, dtype=np.int64),
             }
+            if self.on_device_sampling_en:
+                _d.update(
+                    {
+                        "temperatures": np.zeros((self.decode_bsz, 1), dtype=np.float32),
+                        "top_ks": np.zeros((self.decode_bsz, 1), dtype=np.int32),
+                        "top_ps": np.zeros((self.decode_bsz, 1), dtype=np.float32),
+                        "min_ps": np.zeros((self.decode_bsz, 1), dtype=np.float32),
+                        "repetition_penalties": np.zeros(
+                            (self.decode_bsz, 1), dtype=np.float32
+                        ),
+                        "presence_penalties": np.zeros(
+                            (self.decode_bsz, 1), dtype=np.float32
+                        ),
+                        "random_numbers": np.zeros(
+                            (self.decode_bsz, self.max_top_k_ids), dtype=np.float32
+                        ),
+                    }
+                )
             if self.lora_mode:
                 _d["lora_ids"] = np.full((self.decode_bsz, 1), -1, dtype=np.int64)
             self.decode_batch_inputs_by_k[_k] = _d
@@ -211,7 +233,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         batch_indices: np.ndarray,
         is_prompt: bool,
         lora_ids: np.ndarray | None = None,
-        sampling_params: dict[str, list[float] | list[int]] | None = None,
+        sampling_params: dict[str, np.ndarray] | None = None,
         kv_caches: list[list[np.ndarray]] | None = None,
         callback: Callable | None = None,
         mm_kwargs_list: list[dict] | None = None,
@@ -258,6 +280,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                         logits,
                         lora_ids,
                         mm_kwargs_list,
+                        sampling_params,
                     )
                     return pending_prefill_exec_queue
                 else:
@@ -266,7 +289,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                         positions,
                         batch_indices,
                         logits,
-                        lora_ids,
+                        lora_ids=lora_ids,
+                        sampling_params=sampling_params,
                     )
         return None
 
@@ -288,7 +312,30 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
+        next_token: np.ndarray | dict[str, np.ndarray] | None = None
     ) -> SamplerOutput | None:
+        if self.on_device_sampling_en:
+            if isinstance(next_token, dict):
+                next_token = next_token.get("next_tokens")
+            if next_token is None:
+                raise ValueError("On-device sampling requires non-empty next_token buffer")
+            next_token_np = np.asarray(next_token)
+            if next_token_np.ndim == 3 and next_token_np.shape[-1] == 1:
+                next_token_np = next_token_np[..., 0]
+            if next_token_np.ndim == 1:
+                next_token_np = next_token_np.reshape(-1, 1)
+
+            num_reqs = len(sampling_metadata.output_token_ids)
+            if next_token_np.shape[0] < num_reqs:
+                raise ValueError(
+                    "On-device sampling returned fewer rows than active requests: "
+                    f"rows={next_token_np.shape[0]}, reqs={num_reqs}"
+                )
+            if next_token_np.shape[0] > num_reqs:
+                next_token_np = next_token_np[:num_reqs]
+
+            return SamplerOutput(torch.from_numpy(next_token_np), None)
+
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
@@ -384,7 +431,12 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             cluster_id=cluster_id,
             use_async_scheduling=self.use_async_scheduling,
         )
-        self.logits_ndim = self.session.get_logits_ndim()
+
+        # Dummy output dimension in case ods becasue QPC doesn't contain logits
+        # and will throw error in case of ods
+        self.logits_ndim = (
+            3 if self.on_device_sampling_en else self.session.get_logits_ndim()
+        )
 
         e = time.perf_counter() - s
         logger.info("Successfully loaded QPC in %s secs", e)
@@ -400,15 +452,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             self.get_comp_ctx_lengths()
         )
         self.prefill_num_logits_buffer = None
-        self.prefill_logits = dict(
-            logits=np.random.randn(self.prefill_bsz, 1, self.vocab_size).astype(
-                np.float32
-            )
-        )
-        self.session.set_buffers(self.prefill_logits)
-        self.batch_prefill_logits = np.empty(
-            (self.decode_bsz, self.vocab_size), dtype=np.float32
-        )
         self.decode_num_logits_buffer = None
         if self.num_logits_to_keep is not None:
             self.is_spec_decode_target_model = True
@@ -437,11 +480,38 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                         _d["lora_ids"] = np.full(
                             (self.decode_bsz, 1), -1, dtype=np.int64
                         )
+                    if self.on_device_sampling_en:
+                        _d.update(
+                            {
+                                "temperatures": np.zeros(
+                                    (self.decode_bsz, 1), dtype=np.float32
+                                ),
+                                "top_ks": np.zeros((self.decode_bsz, 1), dtype=np.int32),
+                                "top_ps": np.zeros((self.decode_bsz, 1), dtype=np.float32),
+                                "min_ps": np.zeros((self.decode_bsz, 1), dtype=np.float32),
+                                "repetition_penalties": np.zeros(
+                                    (self.decode_bsz, 1), dtype=np.float32
+                                ),
+                                "presence_penalties": np.zeros(
+                                    (self.decode_bsz, 1), dtype=np.float32
+                                ),
+                                "random_numbers": np.zeros(
+                                    (self.decode_bsz, self.max_top_k_ids),
+                                    dtype=np.float32,
+                                ),
+                                "last_accepted_output_tokens": np.zeros((self.decode_bsz, _mdt, 1), dtype = np.int64),
+    
+                            }
+                        )
                     self.decode_batch_inputs_by_k[_k] = _d
 
             # Pre-allocate per-K logit output buffers.
             self.decode_logits_by_k: dict[int, dict] = {}
             self.decode_num_logits_buffer_by_k: dict[int, dict] = {}
+
+            # Pre-allocate ODS output buffers
+            self.decode_next_tokens_by_k: dict[int, dict] = {}
+            
             for _k in self.decode_ks:
                 _mdt = _k + 1
                 self.decode_logits_by_k[_k] = dict(
@@ -453,6 +523,13 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     num_logits_to_keep=np.zeros((_mdt, 1), np.int64)
                 )
 
+                if self.on_device_sampling_en:
+                    self.decode_next_tokens_by_k[_k] = dict(
+                        next_tokens=np.random.randn(
+                            self.decode_bsz, _mdt, 1
+                        ).astype(np.int64)
+                    )
+
             # Backward-compat aliases pointing at max-K buffers.
             self.decode_logits = self.decode_logits_by_k[self.decode_ks[-1]]
             self.decode_num_logits_buffer = self.decode_num_logits_buffer_by_k[
@@ -463,11 +540,15 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             )
             self.session.set_buffers(self.prefill_num_logits_buffer)
         else:
+            # In case of ODS there is no logits binding
+            # But even if we set logits binding and QPC doesn't have binding
+            # InferenceSession will simply throw a warning
             self.decode_logits = dict(
                 logits=np.random.randn(self.decode_bsz, 1, self.vocab_size).astype(
                     np.float32
                 )
             )
+
         # CCL state for prefill: dict keyed by prefill exec-object slot id, value
         # is the bucket currently in flight on that slot (0 = idle). Used by
         # _run_pipeline_prefill to pick one CCL per batch =
@@ -704,12 +785,44 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         batch_indices: np.ndarray,
         prefill_cum_sum: np.ndarray,
         pending_exec_queue: Queue,
-        logits: np.ndarray,
+        logits: np.ndarray | None,
         lora_ids: np.ndarray | None = None,
         mm_kwargs_list: list[dict] | None = None,
+        sampling_params: dict[str, np.ndarray] | None = None,
     ) -> np.ndarray:
         # perform prefill (only prefill_bsz=1 is supported)
         pending_exec_count = 0  # in-flight executions in current batch
+
+        # ODS io and sampling variables
+        if self.on_device_sampling_en:
+            ods_inputs = {
+                "temperatures": np.zeros((self.prefill_bsz, 1), dtype=np.float32),
+                "top_ks": np.zeros((self.prefill_bsz, 1), dtype=np.int32),
+                "top_ps": np.zeros((self.prefill_bsz,1), dtype=np.float32),
+                "min_ps":  np.zeros((self.prefill_bsz,1), dtype=np.float32),
+                "repetition_penalties": np.zeros((self.prefill_bsz,1), dtype=np.float32),
+                "presence_penalties": np.zeros((self.prefill_bsz, 1), dtype=np.float32),
+                "random_numbers": np.zeros((self.prefill_bsz,self.max_top_k_ids), dtype=np.float32),
+                "next_tokens": np.zeros((self.prefill_bsz, 1, 1), dtype=np.int64),
+                "last_accepted_output_tokens": np.zeros((self.prefill_bsz, self.prefill_seq_len), dtype=np.int64),
+            }
+            if sampling_params is not None:
+                ods_inputs['temperatures']= np.asarray(
+                    sampling_params["temperatures"], dtype=np.float32
+                )[...,None]
+                ods_inputs['top_ks']= np.asarray(sampling_params["top_ks"], dtype=np.int32)[...,None]
+                ods_inputs['top_ps']= np.asarray(sampling_params["top_ps"], dtype=np.float32)[...,None]
+                ods_inputs['min_ps']= np.asarray(sampling_params["min_ps"], dtype=np.float32)[...,None]
+                ods_inputs['repetition_penalties']= np.asarray(
+                    sampling_params["repetition_penalties"], dtype=np.float32
+                )[..., None]
+                ods_inputs['presence_penalties']= np.asarray(
+                    sampling_params["presence_penalties"], dtype=np.float32
+                )[...,None]
+                ods_inputs['random_numbers'] = np.asarray(
+                    sampling_params["random_numbers"], dtype=np.float32
+                )
+ 
         idx_start = 0
         for i, idx_end in enumerate(prefill_cum_sum):
             # extract indices of specific request
@@ -749,10 +862,12 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 chunk_inputs["lora_ids"] = lora_index
             if mm_kwargs_list and (mm_kwargs := mm_kwargs_list[i]):
                 chunk_inputs.update(mm_kwargs)
+            if self.on_device_sampling_en:
+                chunk_inputs.update(ods_inputs)
             # chunk the request
             n_chunks: int = iids.shape[-1] // self.prefill_seq_len
 
-            if logits is not None:
+            if logits is not None and not self.on_device_sampling_en:
                 chunk_inputs["logits"] = logits[i : i + 1]
 
             prefill_ccl_id = 0
@@ -831,8 +946,9 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         input_ids: np.ndarray,
         positions: np.ndarray,
         batch_indices: np.ndarray,
-        logits: np.ndarray,
+        logits: np.ndarray | None,
         lora_ids: np.ndarray | None = None,
+        sampling_params: dict[str, np.ndarray] | None = None,
         callback: Callable | None = None,
     ) -> None:
         # Use the per-step K set by QaicModelRunner.  Falls back to max K so
@@ -843,6 +959,37 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         num_decodes = num_tokens // mdt  # number of decode requests
         batch_inputs = self.decode_batch_inputs_by_k[current_k]
         batch_inputs["input_ids"][:num_decodes] = input_ids.reshape(num_decodes, mdt)
+
+        # ODS io and sampling variables
+        if self.on_device_sampling_en:
+            ods_inputs = {
+                "temperatures": np.zeros((self.decode_bsz, 1), dtype=np.float32),
+                "top_ks": np.zeros((self.decode_bsz,1), dtype=np.int32),
+                "top_ps": np.zeros((self.decode_bsz,1), dtype=np.float32),
+                "min_ps":  np.zeros((self.decode_bsz,1), dtype=np.float32),
+                "repetition_penalties": np.zeros((self.decode_bsz, 1), dtype=np.float32),
+                "presence_penalties": np.zeros((self.decode_bsz, 1), dtype=np.float32),
+                "random_numbers": np.zeros((self.decode_bsz,self.max_top_k_ids), dtype=np.float32),
+                "next_tokens": np.zeros((self.decode_bsz, 1, 1), dtype=np.int64),
+                "last_accepted_output_tokens": np.zeros((self.decode_bsz, 1, 1), dtype=np.int64)
+            }
+            if sampling_params is not None:
+                ods_inputs['temperatures']= np.asarray(
+                    sampling_params["temperatures"], dtype=np.float32
+                )[...,None]
+                ods_inputs['top_ks']= np.asarray(sampling_params["top_ks"], dtype=np.int32)[...,None]
+                ods_inputs['top_ps']= np.asarray(sampling_params["top_ps"], dtype=np.float32)[...,None]
+                ods_inputs['min_ps']= np.asarray(sampling_params["min_ps"], dtype=np.float32)[...,None]
+                ods_inputs['repetition_penalties']= np.asarray(
+                    sampling_params["repetition_penalties"], dtype=np.float32
+                )[..., None]
+                ods_inputs['presence_penalties']= np.asarray(
+                    sampling_params["presence_penalties"], dtype=np.float32
+                )[...,None]
+                ods_inputs['random_numbers'] = np.asarray(
+                    sampling_params["random_numbers"], dtype=np.float32
+                )
+
         if self.uses_mrope:
             # positions shape: (4, num_decodes * mdt) -> (4, num_decodes, mdt)
             batch_inputs["position_ids"][:, :num_decodes] = positions.reshape(
@@ -852,7 +999,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             batch_inputs["position_ids"][:num_decodes] = positions.reshape(
                 num_decodes, mdt
             )
-        batch_inputs["logits"] = logits
+        if logits is not None and not self.on_device_sampling_en:
+            batch_inputs["logits"] = logits
         if num_decodes < self.decode_bsz:
             batch_inputs["input_ids"][num_decodes:] = -1
             batch_inputs["position_ids"][..., num_decodes:, :] = -1
@@ -861,7 +1009,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             batch_inputs["batch_index"][:num_decodes, 0] = batch_indices
             if num_decodes < self.decode_bsz:
                 batch_inputs["batch_index"][num_decodes:] = -1
-
         if lora_ids is not None:
             batch_inputs["lora_ids"][:num_decodes] = lora_ids.reshape(num_decodes, 1)
             if num_decodes < self.decode_bsz:
@@ -871,6 +1018,12 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         # so the hardware knows how many token positions to compute logits for.
         if self.is_spec_decode_target_model:
             batch_inputs.update(self.decode_num_logits_buffer_by_k[current_k])
+
+        if self.on_device_sampling_en:
+            batch_inputs.update(ods_inputs)
+            # For non-speculative ODS decode, next-step input_ids already contain
+            # the accepted token IDs from the previous step.
+            batch_inputs["last_accepted_output_tokens"] = batch_inputs["input_ids"]
 
         if self.comp_ctx_lengths_decode is not None:
             assert self.list_of_comp_ctx_lengths is not None
@@ -893,6 +1046,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
 
         if not self.use_async_scheduling:
             self.session.complete_inf(exec_obj_idx, is_prefill=False)
+
         return
 
     def _run_encode(self, prefill_cum_sum, input_ids, positions):
@@ -1196,7 +1350,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         # ]
         # if embeds_name:
         #     self.embeds_name = embeds_name[0]
-
         # run dummy inputs
         if "logits" in self.session.output_names:
             logger.debug("starting dummy run...")
@@ -1552,8 +1705,6 @@ def load_qaic_model(
     if qaic_compile_config.compile_only:
         # Hack for Model-IP execution flow
         # TODO: remove this in future
-        # This will create error in parent process if exited,
-        # need better solution in future
         raise QaicCompilationComplete()
 
     # Load the weights from the cached or downloaded files.

@@ -151,7 +151,7 @@ Decisions applied during documentation review for this release:
 
 | Decision | Rationale |
 |----------|-----------|
-| **On-device sampling removed** | Not supported in this version. Feature page deleted, all references removed. |
+| **On-device sampling removed** | Not supported as of v0.15.0; feature page deleted, all references removed. Supported in v0.23.0. |
 | **SpD + LoRA removed from limitations** | Upstream vLLM also does not support this (GitHub issue #6137). Not QAIC-specific. |
 | **SpD + Multimodal removed from limitations** | Upstream vLLM raises `NotImplementedError` for multimodal + spec decode (`v1/spec_decode/draft_model.py`). Not QAIC-specific. |
 | **Beam search removed from limitations** | Not planning to support; no need to list. |

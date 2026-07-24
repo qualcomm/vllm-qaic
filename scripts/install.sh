@@ -17,7 +17,7 @@
 #
 # Install source detection:
 #   - Run from vllm-qaic repo (GitHub/Gerrit clone):
-#       setup.py found at repo root → installs from source via pip install .
+#       setup.py found at repo root → installs from source via editable pip install -e .
 #   - Run from SDK (/opt/qti-aic/integrations/vllm_qaic/):
 #       no setup.py → installs pre-built wheel from /opt/qti-aic/integrations/vllm_qaic/pyXXX/
 #
@@ -163,7 +163,7 @@ if [ "${MODE}" = "aot" ]; then
 
     echo "=== Step 3: vllm-qaic-aot ==="
     if [ "${INSTALL_SOURCE}" = "source" ]; then
-        TORCH_QAIC_INSTALLED=0 ${PIP} install --no-build-isolation "${REPO_ROOT}"
+        TORCH_QAIC_INSTALLED=0 ${PIP} install --no-build-isolation -e "${REPO_ROOT}"
     else
         ${PIP} install "${SDK_WHEEL_DIR}"/vllm_qaic-*aot*.whl
     fi
@@ -215,7 +215,7 @@ elif [ "${MODE}" = "pyt" ]; then
 
     echo "=== Step 3: vllm-qaic-pyt ==="
     if [ "${INSTALL_SOURCE}" = "source" ]; then
-        ${PIP} install --no-build-isolation "${REPO_ROOT}"
+        ${PIP} install --no-build-isolation -e "${REPO_ROOT}"
     else
         ${PIP} install --no-deps "${SDK_WHEEL_DIR}"/vllm_qaic-*pyt*.whl
     fi

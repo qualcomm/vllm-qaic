@@ -381,7 +381,6 @@ class QaicPlatform(Platform):
         assert not (on_device_sampling_en and vllm_config.speculative_config), (
             "SPD with On-device sampling is not yet supported for QAIC backend"
         )
-
         # Disaggregated prefill/decode is supported standalone for now
         if vllm_config.kv_transfer_config:
             assert not vllm_config.lora_config, (
@@ -402,15 +401,6 @@ class QaicPlatform(Platform):
                 "Prefix caching with KV-role 'kv_consumer' or 'kv_both' not "
                 "yet supported for QAIC backend"
             )
-            if (
-                on_device_sampling_en
-                and vllm_config.kv_transfer_config.kv_role == "kv_producer"
-            ):
-                logger.warning_once(
-                    "On-device sampling with Disaggregated serving is only "
-                    "supported in Decode cluster with no support for "
-                    "repetition penalty"
-                )
 
         if cls.is_aot:
             model_type = model_config.hf_config.model_type
