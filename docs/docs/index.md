@@ -65,7 +65,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 | **Best for** | Production throughput | Development flexibility |
 | **Model compilation** | Pre-compiled QPCs (static graphs) | Dynamic execution |
 | **Feature coverage** | Full (SpD, LoRA, disaggregated, multimodal) | VLMs (experimental) |
-| **torch version** | 2.7.0+cpu | 2.10.0+cpu |
+| **torch version** | 2.7.0+cpu | 2.11.0+cpu |
 
 !!! warning "Mode isolation"
     The two modes cannot coexist in the same Python environment. Use separate virtual environments.
@@ -76,7 +76,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 | vllm-qaic | vLLM | Apps SDK | QEfficient | torch (AOT) | torch (PYT) |
 |-----------|------|----------|------------|-------------|-------------|
-| v0.15.0.dev0 | v0.15.0 | >= 1.22.0 | main | 2.7.0+cpu | 2.10.0+cpu |
+| v0.15.0.dev0 | v0.15.0 | >= 1.22.0 | main | 2.7.0+cpu | 2.11.0+cpu |
 
 ---
 

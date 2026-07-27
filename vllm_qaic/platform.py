@@ -25,6 +25,12 @@ class QaicPlatform(QaicPlatformBase):
         # Adapt the patch here.
         from vllm_qaic import patch  # noqa: F401
 
+        # Install PyTorch rejection-sampler shim for PYT (eager) mode.
+        # AOT mode uses Triton-free paths and does not need this.
+        if not cls.is_aot:
+            from vllm_qaic.v1.sample.rejection_sampler_shim import install
+            install()
+
         if parser is not None:  # For synchronous vLLM engine
             # disable prefix caching as QAIC backend plugin does not support it
             parser.set_defaults(enable_prefix_caching=False)

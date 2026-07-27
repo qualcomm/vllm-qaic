@@ -284,10 +284,15 @@ class QaicPlatform(Platform):
                 "QAIC eager mode does not support disaggregated serving"
             )
             if vllm_config.speculative_config:
-                raise ValueError(
-                    "Speculative decoding (SpD) is not supported in eager mode on QAIC. "
-                    "SpD requires AOT (non-eager) compilation."
-                )
+                _allowed_pyt_spd = {"ngram", "suffix"}
+                _method = vllm_config.speculative_config.method
+                if _method not in _allowed_pyt_spd:
+                    raise ValueError(
+                        f"Speculative decoding method {_method!r} is not "
+                        "supported in eager (PYT) mode on QAIC. "
+                        "Only 'ngram' and 'suffix' are supported. "
+                        "Draft-model SpD requires AOT compilation."
+                    )
             if scheduler_config.async_scheduling:
                 logger.warning_once(
                     "QAIC eager mode does not support async scheduling; "
