@@ -11,7 +11,7 @@ import numpy as np
 import torch
 
 from vllm.config import VllmConfig
-from vllm.logger import init_logger
+from vllm_qaic.logger import init_logger
 from vllm.model_executor.layers.pooler.abstract import Pooler
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
@@ -576,6 +576,22 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
         mm_features: list[MultiModalFeatureSpec],
     ) -> tuple[torch.Tensor, int]:
         source_class = self._get_mrope_source_class()
+        # Some source classes (e.g. Qwen3-VL and its qwen3_5 subclasses)
+        # implement get_mrope_input_positions() by calling a private
+        # `self._get_mrope_input_positions(...)` staticmethod internally.
+        # QaicMultiModal doesn't inherit from these classes, so `self`
+        # duck-typed against the borrowed method lacks that private method.
+        # Call the staticmethod directly when present -- it needs no `self`
+        # beyond the `config` kwarg. Other source classes (e.g. Qwen2.5-VL)
+        # call public helper methods QaicMultiModal does implement, so fall
+        # back to the original self-duck-typed call for those.
+        static_impl = getattr(source_class, "_get_mrope_input_positions", None)
+        if static_impl is not None:
+            return static_impl(
+                input_tokens=input_tokens,
+                mm_features=mm_features,
+                config=self.config,
+            )
         return source_class.get_mrope_input_positions(self, input_tokens, mm_features)
 
     def iter_mm_grid_hw(
