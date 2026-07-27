@@ -128,6 +128,12 @@ class QaicPlatform(Platform):
         ):
             cls.supported_quantization.append(QAIC_GPT_OSS_MXFP4_METHOD)
 
+        # Install PyTorch rejection-sampler shim for PYT (eager) mode.
+        # AOT mode uses Triton-free paths and does not need this.
+        if not cls.is_aot:
+            from vllm_qaic.v1.sample.rejection_sampler_shim import install
+            install()
+
         if parser is not None:  # For synchronous vLLM engine
             # disable prefix caching as QAIC backend plugin does not support it
             parser.set_defaults(enable_prefix_caching=False)
@@ -440,10 +446,14 @@ class QaicPlatform(Platform):
                 "QAIC eager mode does not support disaggregated serving"
             )
             if vllm_config.speculative_config:
-                raise ValueError(
-                    "Speculative decoding (SpD) is not supported in eager "
-                    "mode on QAIC. SpD requires AOT (non-eager) compilation."
-                )
+                _method = vllm_config.speculative_config.method
+                if _method not in {"ngram", "suffix"}:
+                    raise ValueError(
+                        f"Speculative decoding method {_method!r} is not "
+                        "supported in eager (PYT) mode on QAIC. "
+                        "Only 'ngram' and 'suffix' are supported. "
+                        "Draft-model SpD requires AOT compilation."
+                    )
             if scheduler_config.async_scheduling:
                 logger.warning_once(
                     "QAIC eager mode does not support async scheduling; "
