@@ -1,0 +1,220 @@
+# ------------------------------------------------------------------
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause-Clear
+# ------------------------------------------------------------------
+#!/bin/bash
+
+#################### ci_fallback_ops.sh ##############################
+# CI script for collecting fallback ops across model types.
+#
+# Usage:
+#   bash ci_fallback_ops.sh [OPTIONS]
+#
+# Options:
+#   --type       llm|vlm|all    Model type to run (default: all)
+#   --model      <model_id>     Run a single model directly (requires --type llm|vlm)
+#   --priority   P0|P1|P2       Priority tier filter (default: all)
+#   --family     <name>         Run only models matching this family name
+#   --tp-size    <N>            Tensor parallel size (default: 4)
+#   --logs-dir   <dir>          Log output directory (default: ./ci_logs)
+#   --models-dir <dir>          Directory containing scraped JSON files
+#
+# Examples:
+#   bash ci_fallback_ops.sh --type llm --priority P0
+#   bash ci_fallback_ops.sh --type vlm --family qwen --tp-size 4
+#   bash ci_fallback_ops.sh --type llm --model allenai/OLMo-1B-hf
+#   bash ci_fallback_ops.sh --type vlm --model Qwen/Qwen-VL
+#
+# To add a new model type (e.g. embedding):
+#   1. Add entry to RUNNER_MAP, JSON_PREFIX, RUNNER_EXTRA_ARGS below
+#   2. Add run_<type>.py in the eager/ dir
+#   3. Run scrape_models.py with the new type and store its JSON
+######################################################################
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+EAGER_DIR=EAGER_DIR="${SCRIPT_DIR}/eager"
+
+# User-configurable defaults
+TYPE="all"
+MODEL=""
+PRIORITY=""
+FAMILY=""
+TP_SIZE="4"
+QAIC_DEBUG="0"
+LOGS_DIR="${PWD}/ci_logs"
+MODELS_DIR="${EAGER_DIR}"
+PRIORITY_CFG="${EAGER_DIR}/priority_config.json"
+SLEEP_BETWEEN=10
+
+# QAIC runtime environment
+export QAIC_FORCE_PLATFORM_QCCL=1
+export QAIC_QCCL_ALGO=tree
+export QAIC_DDR_SCRATCH_PAD_IN_MB=2000
+export QAIC_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+
+# Auto-detect all available QAIC devices if QAIC_VISIBLE_DEVICES is not already set
+# if [ -z "${QAIC_VISIBLE_DEVICES}" ]; then
+#     _devices=$(sudo /opt/qti-aic/tools/qaic-util -q 2>/dev/null \
+#         | grep -oP '^QID \K\d+' \
+#         | sort -n | tr '\n' ',' | sed 's/,$//')
+#     [ -n "$_devices" ] && export QAIC_VISIBLE_DEVICES="$_devices"
+# fi
+
+
+# Model type registry 
+# To support a new model type:
+#   1. Add its name to ALL_TYPES (controls run order for --type all)
+#   2. Add one entry to each of RUNNER_MAP, JSON_PREFIX, RUNNER_EXTRA_ARGS
+#   3. Create the corresponding run_<type>.py in eager/
+ALL_TYPES=("llm" "vlm")
+
+#python scripts
+declare -A RUNNER_MAP=(
+    ["llm"]="run_llms.py"
+    ["vlm"]="run_vlms.py"
+    # ["embedding"]="run_embeddings.py"
+    # ["spd"]="run_spd.py"
+)
+#model list
+declare -A JSON_PREFIX=(
+    ["llm"]="llm_models"
+    ["vlm"]="vlm_models"
+    # ["embedding"]="embedding_models"
+    # ["spd"]="spd_models"
+)
+#extra args for runner script
+declare -A RUNNER_EXTRA_ARGS=(
+    ["llm"]=""
+    ["vlm"]="--model-impl vllm"
+    # ["embedding"]=""
+    # ["spd"]=""
+)
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --type)        TYPE="$2";        shift 2 ;;
+        --model)       MODEL="$2";       shift 2 ;;
+        --priority)    PRIORITY="$2";    shift 2 ;;
+        --family)      FAMILY="$2";      shift 2 ;;
+        --tp-size)     TP_SIZE="$2";     shift 2 ;;
+        --logs-dir)    LOGS_DIR="$2";    shift 2 ;;
+        --models-dir)  MODELS_DIR="$2";  shift 2 ;;
+        *) echo "Unknown argument: $1"; exit 1 ;;
+    esac
+done
+
+# --model requires a specific type (not "all")
+if [ -n "$MODEL" ] && [ "$TYPE" = "all" ]; then
+    echo "Error: --model requires --type llm|vlm (not 'all')"
+    exit 1
+fi
+
+mkdir -p "${LOGS_DIR}"
+
+# Python helper: filter model list from JSON
+get_models() {
+    local json_file="$1"
+    python3 - "$json_file" "$PRIORITY_CFG" "$PRIORITY" "$FAMILY" << 'PYEOF'
+import json, sys
+
+json_file, priority_cfg_file, priority_filter, family_filter = sys.argv[1:]
+
+with open(json_file) as f:
+    models = json.load(f)
+
+if priority_filter:
+    with open(priority_cfg_file) as f:
+        cfg = json.load(f)
+    p0 = cfg.get("P0", [])
+    p1 = cfg.get("P1", "*")
+
+    def get_priority(family):
+        if any(p in family for p in p0):
+            return "P0"
+        if p1 == "*" or (isinstance(p1, list) and any(p in family for p in p1)):
+            return "P1"
+        return "P2"
+
+    models = [m for m in models if get_priority(m.get("family", "")) == priority_filter]
+
+if family_filter:
+    models = [m for m in models if family_filter in m.get("family", "")]
+
+for m in models:
+    print(m["model"])
+PYEOF
+}
+
+# Run one model
+run_model() {
+    local model_type="$1"
+    local model_name="$2"
+    local runner="${RUNNER_MAP[$model_type]}"
+    local extra_args="${RUNNER_EXTRA_ARGS[$model_type]}"
+
+    local m_name="${model_name//\//_}"
+    m_name="${m_name// /_}"
+
+    # Set or clear QAIC debug env vars before running the model
+    if [ "$QAIC_DEBUG" -eq 1 ]; then
+        source "${EAGER_DIR}/export_qaic_debug.sh"
+    else
+        source "${EAGER_DIR}/unset_qaic_debug.sh"
+    fi
+
+    # Build log file paths: log_<debug>_<model>_tp<N>.log and parse_<debug>_<model>_tp<N>.log
+    local logname="${LOGS_DIR}/log_${QAIC_DEBUG}_${m_name}_tp${TP_SIZE}.log"
+    local parse_logname="${LOGS_DIR}/parse_${QAIC_DEBUG}_${m_name}_tp${TP_SIZE}.log"
+
+    logsave "${logname}" python "${EAGER_DIR}/${runner}" \
+        --model-name "${model_name}" \
+        --tp-size "${TP_SIZE}" \
+        ${extra_args}
+
+    # Parse the log to extract fallback ops and write to parse log
+    log_path="${logname}"
+    logsave "${parse_logname}" python "${EAGER_DIR}/fallback_parser.py" \
+        --file-name "${log_path}"
+
+    echo "sleeping for ${SLEEP_BETWEEN}s.."
+    sleep "${SLEEP_BETWEEN}"
+    echo "awakening.."
+}
+
+# Determine which types to run
+# Expand "all" to the ordered list in ALL_TYPES; otherwise use the single type given
+if [ "$TYPE" = "all" ]; then
+    TYPES=("${ALL_TYPES[@]}")
+else
+    TYPES=("$TYPE")
+fi
+
+# Main loop
+# For each type: find its JSON, filter models by priority/family, run each one
+for model_type in "${TYPES[@]}"; do
+
+    # Single-model mode: bypass JSON entirely and run the given model directly
+    if [ -n "$MODEL" ]; then
+        run_model "$model_type" "$MODEL"
+        continue
+    fi
+
+    json_file="${MODELS_DIR}/${JSON_PREFIX[$model_type]}.json"
+
+    # Skip this type if the scraped JSON for the given ref doesn't exist
+    if [ ! -f "$json_file" ]; then
+        echo "Warning: JSON not found: ${json_file} — skipping ${model_type}"
+        continue
+    fi
+
+    while IFS= read -r model_name; do
+        [ -z "$model_name" ] && continue
+        run_model "$model_type" "$model_name"
+    done < <(get_models "$json_file")
+done
+
+# Aggregate all parse logs into a per-type Excel sheet once all models are done
+python3 "${EAGER_DIR}/parse_logs_to_excel.py" \
+    --log-dir "${LOGS_DIR}" \
+    --models-dir "${MODELS_DIR}"
