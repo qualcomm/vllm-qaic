@@ -400,10 +400,12 @@ class QaicPlatform(Platform):
                 "true",
                 "1",
             ]
-
-        assert not (on_device_sampling_en and vllm_config.speculative_config), (
-            "SPD with On-device sampling is not yet supported for QAIC backend"
-        )
+        if on_device_sampling_en and vllm_config.speculative_config:
+            raise ValueError(
+                "On-device sampling with speculative decoding is not supported "
+                "on QAIC because the QEfficient sampler rejects "
+                "num_speculative_tokens > 0."
+            )
 
         # Disaggregated prefill/decode is supported standalone for now
         if vllm_config.kv_transfer_config:
