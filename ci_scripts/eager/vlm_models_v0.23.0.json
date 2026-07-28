@@ -1,0 +1,698 @@
+[
+  {
+    "model": "rhymes-ai/Aria",
+    "variant": "Aria",
+    "family": "aria",
+    "arch": "AriaForConditionalGeneration"
+  },
+  {
+    "model": "nvidia/audio-flamingo-3-hf",
+    "variant": "AudioFlamingo3",
+    "family": "audioflamingo",
+    "arch": "AudioFlamingo3ForConditionalGeneration"
+  },
+  {
+    "model": "CohereLabs/aya-vision-8b",
+    "variant": "Aya Vision",
+    "family": "aya",
+    "arch": "AyaVisionForConditionalGeneration"
+  },
+  {
+    "model": "ByteDance-Seed/BAGEL-7B-MoT",
+    "variant": "BAGEL",
+    "family": "bagel",
+    "arch": "BagelForConditionalGeneration"
+  },
+  {
+    "model": "Open-Bee/Bee-8B-RL",
+    "variant": "Bee-8B",
+    "family": "bee",
+    "arch": "BeeForConditionalGeneration"
+  },
+  {
+    "model": "Salesforce/blip2-opt-2.7b",
+    "variant": "BLIP-2",
+    "family": "blip",
+    "arch": "Blip2ForConditionalGeneration"
+  },
+  {
+    "model": "facebook/chameleon-7b",
+    "variant": "Chameleon",
+    "family": "chameleon",
+    "arch": "ChameleonForConditionalGeneration"
+  },
+  {
+    "model": "ai9stars/Cheers",
+    "variant": "Cheers",
+    "family": "cheers",
+    "arch": "CheersForConditionalGeneration"
+  },
+  {
+    "model": "CohereLabs/command-a-vision-07-2025",
+    "variant": "Command A Vision",
+    "family": "command",
+    "arch": "Cohere2VisionForConditionalGeneration"
+  },
+  {
+    "model": "nvidia/Cosmos3-Nano",
+    "variant": "Cosmos3 (understanding tower)",
+    "family": "cosmos",
+    "arch": "Cosmos3ForConditionalGeneration"
+  },
+  {
+    "model": "deepseek-ai/deepseek-vl2-tiny",
+    "variant": "DeepSeek-VL2",
+    "family": "deepseek",
+    "arch": "DeepseekVLV2ForCausalLM"
+  },
+  {
+    "model": "deepseek-ai/DeepSeek-OCR",
+    "variant": "DeepSeek-OCR",
+    "family": "deepseek",
+    "arch": "DeepseekOCRForCausalLM"
+  },
+  {
+    "model": "deepseek-ai/DeepSeek-OCR-2",
+    "variant": "DeepSeek-OCR-2",
+    "family": "deepseek",
+    "arch": "DeepseekOCR2ForCausalLM"
+  },
+  {
+    "model": "nvidia/Eagle2.5-8B",
+    "variant": "Eagle2.5-VL",
+    "family": "eagle",
+    "arch": "`Eagle2_5_VLForConditionalGeneration`"
+  },
+  {
+    "model": "baidu/ERNIE-4.5-VL-28B-A3B-PT",
+    "variant": "Ernie4.5-VL",
+    "family": "ernie",
+    "arch": "`Ernie4_5_VLMoeForConditionalGeneration`"
+  },
+  {
+    "model": "LGAI-EXAONE/EXAONE-4.5-33B",
+    "variant": "EXAONE-4.5",
+    "family": "exaone",
+    "arch": "`Exaone4_5_ForConditionalGeneration`"
+  },
+  {
+    "model": "adept/fuyu-8b",
+    "variant": "Fuyu",
+    "family": "fuyu",
+    "arch": "FuyuForCausalLM"
+  },
+  {
+    "model": "google/gemma-3-4b-it",
+    "variant": "Gemma 3",
+    "family": "gemma",
+    "arch": "Gemma3ForConditionalGeneration"
+  },
+  {
+    "model": "google/gemma-3n-E2B-it",
+    "variant": "Gemma 3n",
+    "family": "gemma",
+    "arch": "Gemma3nForConditionalGeneration"
+  },
+  {
+    "model": "google/gemma-4-E2B-it",
+    "variant": "Gemma 4",
+    "family": "gemma",
+    "arch": "Gemma4ForConditionalGeneration"
+  },
+  {
+    "model": "google/gemma-4-12B-it",
+    "variant": "Gemma 4 Unified",
+    "family": "gemma",
+    "arch": "Gemma4UnifiedForConditionalGeneration"
+  },
+  {
+    "model": "zai-org/glm-4v-9b",
+    "variant": "GLM-4V",
+    "family": "glm",
+    "arch": "GLM4VForCausalLM"
+  },
+  {
+    "model": "zai-org/GLM-4.1V-9B-Thinking",
+    "variant": "GLM-4.1V-Thinking",
+    "family": "glm",
+    "arch": "Glm4vForConditionalGeneration"
+  },
+  {
+    "model": "zai-org/GLM-4.5V",
+    "variant": "GLM-4.5V",
+    "family": "glm",
+    "arch": "Glm4vMoeForConditionalGeneration"
+  },
+  {
+    "model": "zai-org/GLM-OCR",
+    "variant": "GLM-OCR",
+    "family": "glm",
+    "arch": "GlmOcrForConditionalGeneration"
+  },
+  {
+    "model": "ibm-granite/granite-4.1-3b-vision",
+    "variant": "Granite 4 Vision",
+    "family": "granite",
+    "arch": "Granite4VisionForConditionalGeneration"
+  },
+  {
+    "model": "ibm-granite/granite-speech-3.3-8b",
+    "variant": "Granite Speech",
+    "family": "granite",
+    "arch": "GraniteSpeechForConditionalGeneration"
+  },
+  {
+    "model": "ibm-granite/granite-speech-4.1-2b-plus",
+    "variant": "Granite Speech Plus",
+    "family": "granite",
+    "arch": "GraniteSpeechPlusForConditionalGeneration"
+  },
+  {
+    "model": "naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B",
+    "variant": "HyperCLOVAX-SEED-Vision-Instruct-3B",
+    "family": "hyperclovax",
+    "arch": "HCXVisionForCausalLM"
+  },
+  {
+    "model": "naver-hyperclovax/HyperCLOVAX-SEED-Think-32B",
+    "variant": "HyperCLOVAX-SEED-Think-32B",
+    "family": "hyperclovax",
+    "arch": "HCXVisionV2ForCausalLM"
+  },
+  {
+    "model": "h2oai/h2ovl-mississippi-800m",
+    "variant": "H2OVL",
+    "family": "h",
+    "arch": "H2OVLChatModel"
+  },
+  {
+    "model": "tencent/HunyuanOCR",
+    "variant": "HunyuanOCR",
+    "family": "hunyuanocr",
+    "arch": "HunYuanVLForConditionalGeneration"
+  },
+  {
+    "model": "HuggingFaceM4/Idefics3-8B-Llama3",
+    "variant": "Idefics3",
+    "family": "idefics",
+    "arch": "Idefics3ForConditionalGeneration"
+  },
+  {
+    "model": "PerceptronAI/Isaac-0.1",
+    "variant": "Isaac",
+    "family": "isaac",
+    "arch": "IsaacForConditionalGeneration"
+  },
+  {
+    "model": "internlm/Intern-S1",
+    "variant": "Intern-S1",
+    "family": "intern",
+    "arch": "InternS1ForConditionalGeneration"
+  },
+  {
+    "model": "internlm/Intern-S1-Pro",
+    "variant": "Intern-S1-Pro",
+    "family": "intern",
+    "arch": "InternS1ProForConditionalGeneration"
+  },
+  {
+    "model": "internlm/Intern-S2-Preview",
+    "variant": "Intern-S2-Preview",
+    "family": "intern",
+    "arch": "InternS2PreviewForConditionalGeneration"
+  },
+  {
+    "model": "OpenGVLab/InternVL3_5-14B",
+    "variant": "InternVL 3.5",
+    "family": "internvl",
+    "arch": "InternVLChatModel"
+  },
+  {
+    "model": "OpenGVLab/InternVL3-9B",
+    "variant": "InternVL 3.0",
+    "family": "internvl",
+    "arch": "InternVLChatModel"
+  },
+  {
+    "model": "OpenGVLab/InternVideo2_5_Chat_8B",
+    "variant": "InternVideo 2.5",
+    "family": "internvideo",
+    "arch": "InternVLChatModel"
+  },
+  {
+    "model": "OpenGVLab/InternVL2_5-4B",
+    "variant": "InternVL 2.5",
+    "family": "internvl",
+    "arch": "InternVLChatModel"
+  },
+  {
+    "model": "OpenGVLab/Mono-InternVL-2B",
+    "variant": "Mono-InternVL",
+    "family": "mono",
+    "arch": "InternVLChatModel"
+  },
+  {
+    "model": "OpenGVLab/InternVL3-1B-hf",
+    "variant": "InternVL 3.0 (HF format)",
+    "family": "internvl",
+    "arch": "InternVLForConditionalGeneration"
+  },
+  {
+    "model": "kakaocorp/kanana-1.5-v-3b-instruct",
+    "variant": "Kanana-V",
+    "family": "kanana",
+    "arch": "KananaVForConditionalGeneration"
+  },
+  {
+    "model": "Kwai-Keye/Keye-VL-8B-Preview",
+    "variant": "Keye-VL-8B-Preview",
+    "family": "keye",
+    "arch": "KeyeForConditionalGeneration"
+  },
+  {
+    "model": "Kwai-Keye/Keye-VL-1_5-8B",
+    "variant": "Keye-VL-1_5-8B",
+    "family": "keye",
+    "arch": "`KeyeVL1_5ForConditionalGeneration`"
+  },
+  {
+    "model": "moonshotai/Kimi-Audio-7B-Instruct",
+    "variant": "Kimi-Audio",
+    "family": "kimi",
+    "arch": "KimiAudioForConditionalGeneration"
+  },
+  {
+    "model": "moonshotai/Kimi-K2.5",
+    "variant": "Kimi-K2.5",
+    "family": "kimi",
+    "arch": "KimiK25ForConditionalGeneration"
+  },
+  {
+    "model": "moonshotai/Kimi-VL-A3B-Instruct",
+    "variant": "Kimi-VL-A3B-Instruct",
+    "family": "kimi",
+    "arch": "KimiVLForConditionalGeneration"
+  },
+  {
+    "model": "moonshotai/Kimi-VL-A3B-Thinking",
+    "variant": "Kimi-VL-A3B-Thinking",
+    "family": "kimi",
+    "arch": "KimiVLForConditionalGeneration"
+  },
+  {
+    "model": "lightonai/LightOnOCR-1B",
+    "variant": "LightOnOCR-1B",
+    "family": "lightonocr",
+    "arch": "LightOnOCRForConditionalGeneration"
+  },
+  {
+    "model": "LiquidAI/LFM2-VL-450M",
+    "variant": "LFM2-VL",
+    "family": "lfm",
+    "arch": "Lfm2VlForConditionalGeneration"
+  },
+  {
+    "model": "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+    "variant": "Llama 4",
+    "family": "llama",
+    "arch": "Llama4ForConditionalGeneration"
+  },
+  {
+    "model": "nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1",
+    "variant": "Llama Nemotron Nano VL",
+    "family": "llama",
+    "arch": "`Llama_Nemotron_Nano_VL`"
+  },
+  {
+    "model": "llava-hf/llava-1.5-7b-hf",
+    "variant": "LLaVA-1.5",
+    "family": "llava",
+    "arch": "LlavaForConditionalGeneration"
+  },
+  {
+    "model": "ibm-granite/granite-vision-3.3-2b",
+    "variant": "Granite Vision",
+    "family": "granite",
+    "arch": "LlavaNextForConditionalGeneration"
+  },
+  {
+    "model": "llava-hf/LLaVA-NeXT-Video-7B-hf",
+    "variant": "LLaVA-NeXT-Video",
+    "family": "llava",
+    "arch": "LlavaNextVideoForConditionalGeneration"
+  },
+  {
+    "model": "llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
+    "variant": "LLaVA-Onevision",
+    "family": "llava",
+    "arch": "LlavaOnevisionForConditionalGeneration"
+  },
+  {
+    "model": "mispeech/midashenglm-7b",
+    "variant": "MiDashengLM",
+    "family": "midashenglm",
+    "arch": "MiDashengLMModel"
+  },
+  {
+    "model": "XiaomiMiMo/MiMo-V2.5-Omni",
+    "variant": "MiMo-V2.5-Omni",
+    "family": "mimo",
+    "arch": "MiMoV2OmniForCausalLM"
+  },
+  {
+    "model": "openbmb/MiniCPM-o-2_6",
+    "variant": "MiniCPM-O",
+    "family": "minicpm",
+    "arch": "MiniCPMO"
+  },
+  {
+    "model": "openbmb/MiniCPM-V-2",
+    "variant": "MiniCPM-V",
+    "family": "minicpm",
+    "arch": "MiniCPMV"
+  },
+  {
+    "model": "MiniMaxAI/MiniMax-VL-01",
+    "variant": "MiniMax-VL",
+    "family": "minimax",
+    "arch": "MiniMaxVL01ForConditionalGeneration"
+  },
+  {
+    "model": "mistralai/Mistral-Small-3.1-24B-Instruct-2503",
+    "variant": "Mistral3 (HF Transformers)",
+    "family": "mistral",
+    "arch": "Mistral3ForConditionalGeneration"
+  },
+  {
+    "model": "allenai/Molmo-7B-D-0924",
+    "variant": "Molmo",
+    "family": "molmo",
+    "arch": "MolmoForCausalLM"
+  },
+  {
+    "model": "allenai/Molmo2-4B",
+    "variant": "Molmo2",
+    "family": "molmo",
+    "arch": "Molmo2ForConditionalGeneration"
+  },
+  {
+    "model": "moondream/moondream3-preview",
+    "variant": "Moondream3",
+    "family": "moondream",
+    "arch": "Moondream3ForCausalLM"
+  },
+  {
+    "model": "nvidia/music-flamingo-2601-hf",
+    "variant": "MusicFlamingo",
+    "family": "musicflamingo",
+    "arch": "MusicFlamingoForConditionalGeneration"
+  },
+  {
+    "model": "nvidia/NVLM-D-72B",
+    "variant": "NVLM-D 1.0",
+    "family": "nvlm",
+    "arch": "`NVLM_D_Model`"
+  },
+  {
+    "model": "xlangai/OpenCUA-7B",
+    "variant": "OpenCUA-7B",
+    "family": "opencua",
+    "arch": "OpenCUAForConditionalGeneration"
+  },
+  {
+    "model": "FreedomIntelligence/openPangu-VL-7B",
+    "variant": "openpangu-VL",
+    "family": "openpangu",
+    "arch": "OpenPanguVLForConditionalGeneration"
+  },
+  {
+    "model": "openvla/openvla-7b",
+    "variant": "OpenVLA",
+    "family": "openvla",
+    "arch": "OpenVLAForActionPrediction"
+  },
+  {
+    "model": "AIDC-AI/Ovis2-1B",
+    "variant": "Ovis2",
+    "family": "ovis",
+    "arch": "Ovis"
+  },
+  {
+    "model": "AIDC-AI/Ovis1.6-Llama3.2-3B",
+    "variant": "Ovis1.6",
+    "family": "ovis",
+    "arch": "Ovis"
+  },
+  {
+    "model": "AIDC-AI/Ovis2.5-9B",
+    "variant": "Ovis2.5",
+    "family": "ovis",
+    "arch": "`Ovis2_5`"
+  },
+  {
+    "model": "AIDC-AI/Ovis2.6-2B",
+    "variant": "Ovis2.6",
+    "family": "ovis",
+    "arch": "`Ovis2_6ForCausalLM`"
+  },
+  {
+    "model": "AIDC-AI/Ovis2.6-30B-A3B",
+    "variant": "Ovis2.6",
+    "family": "ovis",
+    "arch": "`Ovis2_6_MoeForCausalLM`"
+  },
+  {
+    "model": "PaddlePaddle/PaddleOCR-VL",
+    "variant": "Paddle-OCR",
+    "family": "paddle",
+    "arch": "PaddleOCRVLForConditionalGeneration"
+  },
+  {
+    "model": "google/paligemma-3b-pt-224",
+    "variant": "PaliGemma",
+    "family": "paligemma",
+    "arch": "PaliGemmaForConditionalGeneration"
+  },
+  {
+    "model": "google/paligemma2-3b-ft-docci-448",
+    "variant": "PaliGemma 2",
+    "family": "paligemma",
+    "arch": "PaliGemmaForConditionalGeneration"
+  },
+  {
+    "model": "microsoft/Phi-3-vision-128k-instruct",
+    "variant": "Phi-3-Vision",
+    "family": "phi",
+    "arch": "Phi3VForCausalLM"
+  },
+  {
+    "model": "microsoft/Phi-3.5-vision-instruct",
+    "variant": "Phi-3.5-Vision",
+    "family": "phi",
+    "arch": "Phi3VForCausalLM"
+  },
+  {
+    "model": "microsoft/Phi-4-multimodal-instruct",
+    "variant": "Phi-4-multimodal",
+    "family": "phi",
+    "arch": "Phi4MMForCausalLM"
+  },
+  {
+    "model": "microsoft/Phi-4-reasoning-vision-15B",
+    "variant": "Phi-4-reasoning-vision",
+    "family": "phi",
+    "arch": "Phi4ForCausalLMV"
+  },
+  {
+    "model": "baidu/Qianfan-OCR",
+    "variant": "QianfanOCR",
+    "family": "qianfanocr",
+    "arch": "QianfanOCRForConditionalGeneration"
+  },
+  {
+    "model": "Qwen/Qwen-VL",
+    "variant": "Qwen-VL",
+    "family": "qwen",
+    "arch": "QwenVLForConditionalGeneration"
+  },
+  {
+    "model": "Qwen/Qwen2-Audio-7B-Instruct",
+    "variant": "Qwen2-Audio",
+    "family": "qwen",
+    "arch": "Qwen2AudioForConditionalGeneration"
+  },
+  {
+    "model": "Qwen/QVQ-72B-Preview",
+    "variant": "QVQ",
+    "family": "qvq",
+    "arch": "Qwen2VLForConditionalGeneration"
+  },
+  {
+    "model": "Qwen/Qwen2-VL-7B-Instruct",
+    "variant": "Qwen2-VL",
+    "family": "qwen",
+    "arch": "Qwen2VLForConditionalGeneration"
+  },
+  {
+    "model": "Qwen/Qwen2.5-VL-3B-Instruct",
+    "variant": "Qwen2.5-VL",
+    "family": "qwen",
+    "arch": "`Qwen2_5_VLForConditionalGeneration` <sup>Q</sup>"
+  },
+  {
+    "model": "Qwen/Qwen2.5-Omni-3B",
+    "variant": "Qwen2.5-Omni",
+    "family": "qwen",
+    "arch": "`Qwen2_5OmniThinkerForConditionalGeneration`"
+  },
+  {
+    "model": "Qwen/Qwen3.5-9B-Instruct",
+    "variant": "Qwen3.5",
+    "family": "qwen",
+    "arch": "`Qwen3_5ForConditionalGeneration`"
+  },
+  {
+    "model": "Qwen/Qwen3.5-35B-A3B-Instruct",
+    "variant": "Qwen3.5-MOE",
+    "family": "qwen",
+    "arch": "`Qwen3_5MoeForConditionalGeneration`"
+  },
+  {
+    "model": "Qwen/Qwen3-VL-4B-Instruct",
+    "variant": "Qwen3-VL",
+    "family": "qwen",
+    "arch": "Qwen3VLForConditionalGeneration"
+  },
+  {
+    "model": "Qwen/Qwen3-VL-30B-A3B-Instruct",
+    "variant": "Qwen3-VL-MOE",
+    "family": "qwen",
+    "arch": "Qwen3VLMoeForConditionalGeneration"
+  },
+  {
+    "model": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
+    "variant": "Qwen3-Omni",
+    "family": "qwen",
+    "arch": "Qwen3OmniMoeThinkerForConditionalGeneration"
+  },
+  {
+    "model": "Qwen/Qwen3-ASR-1.7B",
+    "variant": "Qwen3-ASR",
+    "family": "qwen",
+    "arch": "Qwen3ASRForConditionalGeneration"
+  },
+  {
+    "model": "YannQi/R-4B",
+    "variant": "R-VL-4B",
+    "family": "r",
+    "arch": "RForConditionalGeneration"
+  },
+  {
+    "model": "Skywork/Skywork-R1V-38B",
+    "variant": "Skywork-R1V-38B",
+    "family": "skywork",
+    "arch": "SkyworkR1VChatModel"
+  },
+  {
+    "model": "stepfun-ai/step3",
+    "variant": "Step3-VL",
+    "family": "step",
+    "arch": "Step3VLForConditionalGeneration"
+  },
+  {
+    "model": "stepfun-ai/Step3-VL-10B",
+    "variant": "Step3-VL-10B",
+    "family": "step",
+    "arch": "StepVLForConditionalGeneration"
+  },
+  {
+    "model": "stepfun-ai/Step-3.7-Flash",
+    "variant": "Step-3.7-Flash",
+    "family": "step",
+    "arch": "Step3p7ForConditionalGeneration"
+  },
+  {
+    "model": "omni-search/Tarsier-7b",
+    "variant": "Tarsier",
+    "family": "tarsier",
+    "arch": "TarsierForConditionalGeneration"
+  },
+  {
+    "model": "omni-research/Tarsier2-Recap-7b",
+    "variant": "Tarsier2",
+    "family": "tarsier",
+    "arch": "Tarsier2ForConditionalGeneration"
+  },
+  {
+    "model": "fixie-ai/ultravox-v0_5-llama-3_2-1b",
+    "variant": "Ultravox",
+    "family": "ultravox",
+    "arch": "UltravoxModel"
+  },
+  {
+    "model": "BAAI/Emu3-Chat-hf",
+    "variant": "Emu3",
+    "family": "emu",
+    "arch": "Emu3ForConditionalGeneration"
+  },
+  {
+    "model": "CohereLabs/cohere-transcribe-03-2026",
+    "variant": "Cohere-Transcribe",
+    "family": "cohere",
+    "arch": "CohereAsrForConditionalGeneration"
+  },
+  {
+    "model": "allendou/FireRedASR2-LLM-vllm",
+    "variant": "FireRedASR2",
+    "family": "fireredasr",
+    "arch": "FireRedASR2ForConditionalGeneration"
+  },
+  {
+    "model": "PatchyTisa/FireRedLID-vllm",
+    "variant": "FireRedLID",
+    "family": "fireredlid",
+    "arch": "FireRedLIDForConditionalGeneration"
+  },
+  {
+    "model": "allendou/Fun-ASR-Nano-2512-vllm",
+    "variant": "FunASR",
+    "family": "funasr",
+    "arch": "FunASRForConditionalGeneration"
+  },
+  {
+    "model": "zai-org/GLM-ASR-Nano-2512",
+    "variant": "GLM-ASR",
+    "family": "glm",
+    "arch": "GlmAsrForConditionalGeneration"
+  },
+  {
+    "model": "ibm-granite/granite-speech-3.3-2b",
+    "variant": "Granite Speech",
+    "family": "granite",
+    "arch": "GraniteSpeechForConditionalGeneration"
+  },
+  {
+    "model": "mistralai/Voxtral-Mini-3B-2507",
+    "variant": "Voxtral (Mistral format)",
+    "family": "voxtral",
+    "arch": "VoxtralForConditionalGeneration"
+  },
+  {
+    "model": "openai/whisper-small",
+    "variant": "Whisper",
+    "family": "whisper",
+    "arch": "WhisperForConditionalGeneration"
+  },
+  {
+    "model": "mistralai/Voxtral-Mini-4B-Realtime-2602",
+    "variant": "Voxtral Realtime",
+    "family": "voxtral",
+    "arch": "VoxtralRealtimeGeneration"
+  },
+  {
+    "model": "Qwen/Qwen3-ASR-0.6B",
+    "variant": "Qwen3-ASR Realtime",
+    "family": "qwen",
+    "arch": "Qwen3ASRRealtimeGeneration"
+  }
+]
