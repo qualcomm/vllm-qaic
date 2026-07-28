@@ -148,6 +148,12 @@ vllm.distributed.parallel_state.cleanup_dist_env_and_memory = (
     _patched_cleanup_dist_env_and_memory
 )
 
+# vllm.distributed's __init__ does `from .parallel_state import *`, which
+# binds its own package-level name at first import — patch that reference too,
+import vllm.distributed as _distributed
+
+_distributed.cleanup_dist_env_and_memory = _patched_cleanup_dist_env_and_memory
+
 # core.py does a direct `from ... import cleanup_dist_env_and_memory`, so its
 # local name is already bound — patch the reference there too.
 import vllm.v1.engine.core as _core

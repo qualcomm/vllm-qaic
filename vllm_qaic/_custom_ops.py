@@ -17,7 +17,6 @@ _rms_norm_kernel = _qaic_custom_ops.rms_norm_dispatch
 _NSP_COUNT = current_platform.get_num_cores()
 _THREAD_COUNT = current_platform.get_num_hvx_threads()
 
-
 def rms_norm_hexagon(
     attn_out: torch.Tensor,  # previous layer's output (acts as the residual)
     x: torch.Tensor,  # current layer's input
@@ -30,50 +29,22 @@ def rms_norm_hexagon(
       new_residual = attn_out + x   (stored in FP16 by the kernel)
       normed = new_residual / rms(new_residual) * weight
     """
-    orig_shape = attn_out.shape
-    device = attn_out.device
-
-    # The NSP kernel expects a 2D (M, N) layout.
-    # 4D (B, M, H, N) → (B*M, H*N): normalize across the full hidden dim.
-    # 2D/3D          → (-1, last_dim): fold all leading dims into rows.
-    if attn_out.dim() == 4:
-        B, _M, H, _N = orig_shape
-        flat_N = H * _N
-        attn_out_2d = (
-            attn_out.reshape(B * _M, flat_N).to(dtype=attn_out.dtype).contiguous()
-        )
-        x_2d = x.reshape(B * _M, flat_N).to(dtype=attn_out.dtype).contiguous()
-    else:
-        attn_out_2d = (
-            attn_out.reshape(-1, orig_shape[-1]).to(dtype=attn_out.dtype).contiguous()
-        )
-        x_2d = x.reshape(-1, orig_shape[-1]).to(dtype=attn_out.dtype).contiguous()
-
-    weight_cast = weight.to(dtype=attn_out.dtype, device=device).contiguous()
-    M, N = attn_out_2d.shape
-
-    out = torch.zeros_like(
-        attn_out_2d
-    )  # residual scratch (attn_out + x), filled by kernel phase 1
-    dst = torch.zeros_like(attn_out_2d)  # normalized output, filled by kernel phase 2
-
-    params = torch.tensor(
-        [float(epsilon), float(M), float(N), float(attn_out.dtype == torch.bfloat16)],
-        dtype=torch.float32,
-        device=attn_out.device,
-    ).contiguous()
-
+    out = torch.empty_like(attn_out)
+    dst = torch.empty_like(attn_out)
     # Launch grid: [_NSP_COUNT cores, _THREAD_COUNT HVX threads per core]
     _rms_norm_kernel[_NSP_COUNT, _THREAD_COUNT](
-        attn_out_2d,
-        x_2d,
-        weight_cast,
-        out,  # written as residual by the kernel
-        dst,  # written as normed output by the kernel
-        params,
+        attn_out,
+        x,
+        weight,
+        out,      # written as residual by the kernel
+        dst,      # written as normed output by the kernel
+        float(epsilon),
+        attn_out.shape[-1],
+        attn_out.numel(),
+        int(attn_out.dtype == torch.bfloat16),
     )
 
-    return dst.reshape(orig_shape), out.reshape(orig_shape)
+    return dst, out
 
 
 current_platform.import_kernels()

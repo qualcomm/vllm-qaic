@@ -23,7 +23,6 @@ import torch
 import torch.distributed as dist
 from torch import nn
 
-from vllm import envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
@@ -54,7 +53,8 @@ from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import record_function_or_nullcontext
 from vllm.v1.worker.gpu_input_batch import InputBatch
-from vllm.v1.worker.gpu_model_runner import GPUModelRunner, AsyncGPUPoolingModelRunnerOutput
+from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+from vllm_qaic import envs
 
 try:
     import torch_qaic.profile as qaic_profile
@@ -354,7 +354,7 @@ class QaicModelRunnerPyt(GPUModelRunner):
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
         with optional_qaic_profiling(
-            profiling_dir=getattr(envs, "VLLM_TORCH_PROFILER_DIR", None),
+            profiling_dir=envs.VLLM_TORCH_QAIC_PROFILER_DIR,
             profiling_wrapper=qaic_profile.ProfileForwardWithSampling,
             model=self.model,  # type: ignore[has-type]
             n_samples=10,
@@ -671,6 +671,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
         if spec_tokens and any(len(v) > 0 for v in spec_tokens.values()):
             return self.decode_ks[-1]  # proposals exist → full SpD kernel
         return 0  # no proposals → cheap fallback kernel
+
     def _pool(
         self,
         hidden_states: torch.Tensor,
@@ -917,13 +918,17 @@ class QaicModelRunnerAoT(GPUModelRunner):
         yield
 
     def create_logits_np(self, batch_size, vocab_size, num_decode_tokens: int = 1):
+        # Match the QPC logits output binding dtype (float16 for mxfp6/mxint8
+        # models, float32 for full-precision). The read-back hidden_states are
+        # upcast to float32 before sampling in _compute_hidden_states_and_logits.
+        _dtype = getattr(self.model, "logits_dtype", np.float32)  # type: ignore[has-type]
         if num_decode_tokens > 1:
             return np.empty(
-                (batch_size, num_decode_tokens, vocab_size), dtype=np.float32
+                (batch_size, num_decode_tokens, vocab_size), dtype=_dtype
             )
         if self.model.logits_ndim == 3:  # type: ignore[has-type]
-            return np.empty((batch_size, 1, vocab_size), dtype=np.float32)
-        return np.empty((batch_size, vocab_size), dtype=np.float32)
+            return np.empty((batch_size, 1, vocab_size), dtype=_dtype)
+        return np.empty((batch_size, vocab_size), dtype=_dtype)
 
     def complete_all_inf(
         self, pending_prefill_exec_queue: Queue | None, num_decodes: int | None
