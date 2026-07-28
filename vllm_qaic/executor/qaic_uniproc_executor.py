@@ -1,7 +1,7 @@
-# ---------------------------------------------------------------------------------------
-# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries. All rights reserved.
-# Confidential and Proprietary - Qualcomm Technologies, Inc. and/or its subsidiaries.
-# ---------------------------------------------------------------------------------------
+# ------------------------------------------------------------------
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause-Clear
+# ------------------------------------------------------------------
 from functools import cached_property
 
 from vllm.v1.executor.uniproc_executor import UniProcExecutor
