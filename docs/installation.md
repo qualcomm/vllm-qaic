@@ -72,6 +72,10 @@ source .venv/bin/activate
 
 The script handles all dependency ordering, version pinning, and `uv`/`pip` detection automatically.
 
+> **Configuration banner:** Before installation starts, `install.sh` prints a full summary of
+> every version and setting it will use (vllm, vllm-qaic, torch, qeff branch, target device,
+> triton-cpu state). Review it and override any variable before re-running.
+
 ### AOT mode — `install.sh`
 
 ```bash
@@ -93,7 +97,15 @@ TRANSFORMERS_VERSION_AOT=4.55.3 ./scripts/install.sh aot
 TRANSFORMERS_VERSION_PYT=4.57.3 ./scripts/install.sh pyt
 
 # Enable triton-cpu backend for AOT Speculative Decoding
+# triton-cpu is a large C++ build — requires ~10 GB of free disk space at TRITON_CPU_SRC
 TRITON_CPU=1 ./scripts/install.sh aot
+
+# Redirect the triton-cpu clone+build to a filesystem with more space
+# (use when $HOME has limited disk space or a user quota)
+TRITON_CPU=1 TRITON_CPU_SRC=/path/with/more/space/triton-cpu ./scripts/install.sh aot
+
+# Skip the disk-space pre-flight check entirely
+TRITON_CPU=1 TRITON_CPU_SKIP_DISK_CHECK=1 ./scripts/install.sh aot
 
 # Force wheel install from a custom SDK path
 VLLM_QAIC_INSTALL_SOURCE=wheel VLLM_QAIC_SDK_PATH=/path/to/sdk ./scripts/install.sh pyt
@@ -280,5 +292,6 @@ All version constants are defined in [`scripts/utility.sh`](../scripts/utility.s
 | `TRITON_CPU_COMMIT` | `e60f448f...` | Pinned triton-cpu commit hash |
 | `TRITON_CPU_SRC` | `$HOME/triton-cpu` | Clone destination for triton-cpu source |
 | `TRITON_CPU_COMPILE_MAX_JOBS` | `4` | Parallel build jobs for triton-cpu compilation |
+| `TRITON_CPU_SKIP_DISK_CHECK` | `0` | Set to `1` to skip the 10 GB disk-space pre-flight check |
 | `TORCH_QAIC_BASE_PATH` | `/opt/qti-aic/integrations/torch_qaic` | SDK path for torch_qaic wheels |
 | `VLLM_QAIC_SDK_PATH` | `/opt/qti-aic/integrations/vllm_qaic` | SDK path for pre-built vllm-qaic wheels |

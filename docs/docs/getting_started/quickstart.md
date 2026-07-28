@@ -10,6 +10,9 @@ Get vLLM running on QAIC hardware in minutes. Zero to first inference in under 5
 
 Start an OpenAI-compatible server with a pre-built container:
 
+!!! note "First run takes several minutes"
+    The first invocation will download the model from HuggingFace and compile it to a QPC binary for your hardware. This typically takes 3-10 minutes depending on model size and network speed. Subsequent runs reuse the cached artifacts and start much faster.
+
 ```bash
 docker run --rm -it --network host \
   --device /dev/accel/ \

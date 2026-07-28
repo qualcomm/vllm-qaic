@@ -8,10 +8,10 @@ Each Cloud AI 100 Ultra card contains **4 QIDs** (Qualcomm device IDs), and each
 
 ```
 Cloud AI 100 Ultra Card (1 board serial)
-├── QID 0  (16 NSP cores)
-├── QID 1  (16 NSP cores)
-├── QID 2  (16 NSP cores)
-└── QID 3  (16 NSP cores)
++-- QID 0  (16 NSP cores)
++-- QID 1  (16 NSP cores)
++-- QID 2  (16 NSP cores)
++-- QID 3  (16 NSP cores)
 ```
 
 Multiple cards in a system provide additional QID groups (e.g., QIDs 0-3, 4-7, 8-11...).

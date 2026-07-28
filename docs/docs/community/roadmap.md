@@ -2,7 +2,7 @@
 
 Upcoming features and improvements for the vLLM QAIC plugin.
 
-*Last updated: June 2025*
+*Last updated: June 2026*
 
 ## AOT Mode
 

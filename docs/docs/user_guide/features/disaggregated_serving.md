@@ -17,18 +17,22 @@ Running both on the same hardware forces a compromised configuration. Disaggrega
 
 ```
 Client (OpenAI-compatible request)
-    │
-    ▼
+        |
+        v
 qaic_disagg Router / API Server
-    ├─────────────────────────────┐
-    ▼                             ▼
-Prefill Stage                 Decode Stage
-(Device Group A)              (Device Group B)
-    │                             │
-    └─── KV cache transfer ──────►│
-                                  ▼
-                           Streaming tokens
-                           back to client
+        |
+   +----+----+
+   |         |
+   v         v
+Prefill    Decode
+Stage      Stage
+(Group A)  (Group B)
+   |         |
+   +-- KV -->+
+   transfer  |
+             v
+      Streaming tokens
+      back to client
 ```
 
 The disaggregation is invisible to the client — a single OpenAI-compatible endpoint is exposed.
@@ -77,11 +81,11 @@ SpD can be layered onto disaggregated serving — proposals are generated and ve
 
 ```
 Prefill Stage (Device Group 0..15)
-  └── Generates KV cache (no SpD overhead)
+  +-- Generates KV cache (no SpD overhead)
 
 Decode Stage (Device Group 16..23)
-  ├── Draft model proposes tokens
-  └── Target model verifies and streams output
+  +-- Draft model proposes tokens
+  +-- Target model verifies and streams output
 ```
 
 Enable with `--decode-speculative-config`:
@@ -116,10 +120,10 @@ For n-gram without a draft model:
 ## Disaggregation Modes
 
 | Configuration | Encode | Prefill | Decode | Status |
-|---------------|---------|--------|--------|--------|
-| xPyD || x **P**refill nodes | x **D**ecode nodes | :white_check_mark: |
-| xEyPD | x **E**ncode nodes (Vision Encode) || y **PD** Language nodes | :white_check_mark: |
-| xEyPzD |x **E**ncode nodes (Vision Encode) | y **P**refill nodes | z **D**ecode nodes | :white_check_mark: |
+|---------------|--------|---------|--------|--------|
+| xPyD | — | x **P**refill nodes | y **D**ecode nodes | :white_check_mark: |
+| xEyPD | x **E**ncode nodes (Vision) | — | y **PD** (Prefill+Decode) nodes | :white_check_mark: |
+| xEyPzD | x **E**ncode nodes (Vision) | y **P**refill nodes | z **D**ecode nodes | :white_check_mark: |
 
 ## LMCache Integration
 

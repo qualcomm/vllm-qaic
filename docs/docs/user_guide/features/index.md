@@ -1,44 +1,55 @@
 # Feature Support Matrix
 
-Status of vLLM features on Qualcomm Cloud AI hardware. Features marked :white_check_mark: are production-ready and validated; :test_tube: features are functional but may change without notice.
+Status of vLLM features on Qualcomm Cloud AI hardware.
 
 ## Status Legend
 
 | Symbol | Meaning |
 |--------|---------|
-| :white_check_mark: | Supported and validated |
-| :test_tube: | Experimental |
-| :clipboard: | Planned |
-| :no_entry: | Not supported |
+| ✅ | Supported and validated |
+| 🧪 | Experimental |
+| 📝 | Planned |
+| ❌ | Not supported |
 
 ## Feature Matrix
 
 | Feature | AOT Mode | Eager Mode | Notes |
 |---------|----------|------------|-------|
 | **Inference** | | | |
-| Text generation | :white_check_mark: | :white_check_mark: | Core serving capability |
-| Continuous batching | :white_check_mark: | :white_check_mark: | |
+| Text generation | ✅ | ✅ | Core serving capability |
+| Continuous batching | ✅ | ✅ | |
 | **Quantization** | | | |
-| mxfp6 | :white_check_mark: | :no_entry: | Hardware-native compute quantization |
-| mxint8 KV cache | :white_check_mark: | :no_entry: | `--kv-cache-dtype mxint8` |
+| mxfp6 | ✅ | ❌ | Hardware-native compute quantization |
+| mxint8 KV cache | ✅ | ❌ | `--kv-cache-dtype mxint8` |
 | **Speculative Decoding** | | | |
-| N-gram | :white_check_mark: | :no_entry: | |
-| Suffix | :white_check_mark: | :no_entry: | |
-| Draft model | :white_check_mark: | :no_entry: | Separate DLM on same device |
+| N-gram | ✅ | ❌ | |
+| Suffix | ✅ | ❌ | |
+| Draft model | ✅ | ❌ | Separate DLM on same device |
 | **Advanced Features** | | | |
-| LoRA adapters | :white_check_mark: | :no_entry: | Hot-swap adapters |
-| Disaggregated serving | :white_check_mark: | :no_entry: | xEyPzD prefill/decode split |
-| Multimodal (VLM) | :white_check_mark: | :test_tube: | kv_offload architecture |
-| Embedding models | :white_check_mark: | :no_entry: | Pooling tasks (Score, embed, classify, rerank) |
-| Encoder-decoder | :white_check_mark: | :no_entry: | Whisper |
-| Tensor parallelism | :white_check_mark: | :white_check_mark: | Across QIDs |
-| Pipeline parallelism | :white_check_mark: | :no_entry: | Across QIDs |
+| LoRA adapters | ✅ | ❌ | Hot-swap adapters |
+| Disaggregated serving | ✅ | ❌ | xEyPzD prefill/decode split |
+| Multimodal (VLM) | ✅ | 🧪 | kv_offload architecture |
+| Embedding models | ✅ | ❌ | Pooling tasks (Score, embed, classify, rerank) |
+| Encoder-decoder | ✅ | ❌ | Whisper |
+| Tensor parallelism | ✅ | ✅ | Across QIDs |
+| Pipeline parallelism | ✅ | ❌ | Across QIDs |
 
-## Known Limitations
+## Known Constraints
 
-| Limitation | Scope | Notes |
+| Constraint | Scope | Notes |
 |------------|-------|-------|
-| Prefix caching | Both modes | :clipboard: Planned |
-| MLA attention | Both modes | Multi-head Latent Attention not supported |
-| Async output | Both modes | `supports_async_output` is False |
+| Prefix caching | Both modes | 📝 Planned |
+| MLA attention | Both modes | Multi-head Latent Attention — 📝 Planned |
+| Async output | Both modes | `supports_async_output` is False — 📝 Planned |
 
+## Feature Combinations
+
+Some features cannot be used together. Here is the compatibility matrix for common combinations:
+
+| Combination | AOT | Eager | Notes |
+|-------------|-----|-------|-------|
+| SpD + Disaggregated | ✅ | ❌ | Supported on decode node |
+| LoRA + Disaggregated | ❌ | ❌ | Not supported |
+| Multimodal + CCL (Compiled Context Lengths) | ✅ | 🧪 | Supported (vision encoder on separate device) |
+| Tensor Parallel + Disaggregated | ✅ | ❌ | Supported (TP within each node) |
+| Quantization + LoRA | ✅ | ❌ | Supported (quantized base + LoRA adapters) |

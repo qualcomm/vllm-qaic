@@ -25,6 +25,35 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/utility.sh"
 
+# ── Disk space pre-flight ────────────────────────────────────────────────────
+# Triton-CPU is a large C++ build; running out of disk space or hitting a per-user
+# quota causes the build to fail.  This check tests filesystem available space.
+# NOTE: per-user quotas are invisible to df and cannot be pre-checked here —
+#       if the build later fails with "Disk quota exceeded", see the error message
+#       printed after the pip install step for how to redirect the build.
+# Walk up TRITON_CPU_SRC to find the first existing ancestor (the dir doesn't exist yet).
+if [ "${TRITON_CPU_SKIP_DISK_CHECK:-0}" != "1" ]; then
+    _chk="${TRITON_CPU_SRC}"
+    while [ ! -d "${_chk}" ]; do _chk="$(dirname "${_chk}")"; done
+    _avail_kb=$(df -Pk "${_chk}" | awk 'NR==2 {print $4}')
+    _need_kb=$(( 10 * 1024 * 1024 ))   # 10 GB in KB
+    if [ "${_avail_kb}" -lt "${_need_kb}" ]; then
+        _avail_gb=$(( _avail_kb / 1024 / 1024 ))
+        echo "ERROR: insufficient disk space for triton-cpu build." >&2
+        echo "  available  : ${_avail_gb} GB on filesystem containing ${_chk}" >&2
+        echo "  recommended: 10 GB  (C++ build consumes 5-10 GB)" >&2
+        echo "  build path : ${TRITON_CPU_SRC}" >&2
+        echo "" >&2
+        echo "  Redirect the build to a filesystem with more space:" >&2
+        echo "    export TRITON_CPU_SRC=/path/with/more/space/triton-cpu" >&2
+        echo "  Then re-run:  ./scripts/install.sh aot  (or install_triton_cpu.sh)" >&2
+        echo "" >&2
+        echo "  To skip this check:  export TRITON_CPU_SKIP_DISK_CHECK=1" >&2
+        exit 1
+    fi
+    unset _chk _avail_kb _need_kb _avail_gb
+fi
+
 # ── Clone / checkout triton-cpu ───────────────────────────────────────────────
 if [ ! -f "${TRITON_CPU_SRC}/python/setup.py" ]; then
     echo "INFO: triton-cpu not found at ${TRITON_CPU_SRC} — cloning..."
@@ -103,7 +132,18 @@ ${PIP} install "pybind11>=2.13.1" "ninja>=1.11.1"
 
 # ── Install (editable, no build isolation so it reuses existing torch) ──────
 echo "=== Building and installing triton-cpu (editable) ==="
-MAX_JOBS="${TRITON_CPU_COMPILE_MAX_JOBS:-4}" ${PIP} install -e "${TRITON_CPU_SRC}/python" --no-build-isolation
+if ! MAX_JOBS="${TRITON_CPU_COMPILE_MAX_JOBS:-4}" ${PIP} install -e "${TRITON_CPU_SRC}/python" --no-build-isolation; then
+    echo "" >&2
+    echo "ERROR: triton-cpu C++ build failed (see output above)." >&2
+    echo "  If the error mentions 'Disk quota exceeded' or 'No space left on device':" >&2
+    echo "    df shows filesystem free space but cannot see per-user quota limits." >&2
+    echo "    Your quota on the filesystem containing ${TRITON_CPU_SRC} may be exhausted." >&2
+    echo "    Redirect the build to a quota-free filesystem:" >&2
+    echo "      export TRITON_CPU_SRC=/tmp/triton-cpu                      # tmpfs, no user quota" >&2
+    echo "      export TRITON_CPU_SRC=/prj/crd/.../scratch/triton-cpu      # scratch space" >&2
+    echo "    Then re-run:  ./scripts/install.sh aot  (or install_triton_cpu.sh)" >&2
+    exit 1
+fi
 
 # ── Sanity check ────────────────────────────────────────────────────────────
 echo ""

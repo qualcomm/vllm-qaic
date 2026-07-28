@@ -34,7 +34,6 @@ prompt = {
 
 sampling_params = SamplingParams(temperature=0, top_p=1.0, max_tokens=200)
 
-start = time.time()
 outputs = llm.generate(prompt, sampling_params)
 
 for output in outputs:
@@ -52,9 +51,8 @@ for output in outputs:
 | `limit_mm_per_prompt` | `{"audio": 1}` | Limit to one audio input per prompt |
 | `enable_prefix_caching` | `False` | Must be disabled for Whisper |
 
-## Limitations
-
-- AOT mode only
-- Currently validated for Whisper family
-- Continuous batching not supported
-- Encoder context length determined at compilation time
+!!! warning "Constraints"
+    - AOT mode only
+    - Currently validated for Whisper family
+    - Continuous batching not supported
+    - Encoder context length determined at compilation time

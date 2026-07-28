@@ -1,6 +1,6 @@
 # Supported Models — Eager Mode
 
-Eager (PYT) mode currently supports a focused set of vision-language models via `torch_qaic`, an out-of-tree pytorch backend for Qualcomm Cloud AI Devices
+Eager (PYT) mode currently supports a focused set of vision-language models via `torch_qaic`, an out-of-tree PyTorch backend for Qualcomm Cloud AI devices.
 
 ## Validated Models
 

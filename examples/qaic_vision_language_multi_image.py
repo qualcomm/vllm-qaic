@@ -732,6 +732,9 @@ def main(args):
     engine_args = asdict(req_data.engine_args) | {
         "seed": args.seed,
     }
+    # asdict() serializes CompilationConfig as a dict with None sentinel fields
+    # which pydantic rejects when re-validating; drop it to let LLM use defaults.
+    engine_args.pop("compilation_config", None)
 
     engine_args_vision = copy.deepcopy(engine_args)
     engine_args_vision["runner"] = "pooling"

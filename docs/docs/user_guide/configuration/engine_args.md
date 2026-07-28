@@ -60,29 +60,29 @@ LLM(
 
 All `qaic-compile` arguments can be passed as input arguments. The table below lists the key supported options:
 
-| # | Field | Default | Description |
-|---|-----------|---------|-------------|
-| 1 | `num_cores`, `aic_num_cores` | `16` (or `8` for SpD draft on same device group) | Number of NSP cores |
-| 2 | `dfs`, `aic_enable_depth_first` | `True` | Depth-first scheduling, To disable use dfs = False |
-| 3 | `mos` | `-1` | Degree of weight splitting across cores to reduce on-chip memory |
-| 4 | `num_devices` | — | Number of devices for auto-device mode. Provide either `num_devices` or explicit QiDs using `device_group` |
-| 5 | `mdts_mos` | — | Degree of weight splitting across multi-device tensor slices to improve memory and compute efficiency |
-| 6 | `mxint8`, `mxint8_en`, `mxint8_kv_cache` | — | MXINT8 compression of MDP IO traffic. Prefer `--kv-cache-dtype mxint8` vLLM argument |
-| 7 | `mxfp6`, `mxfp6_matmul`, `mxfp6_en` | — | Compress MatMul weights to MXFP6 E2M3. Prefer `--quantization mxfp6` vLLM argument |
-| 8 | `device_group` | — | List of device IDs |
-| 9 | `embed_seq_len` | `None` | List of model lengths; compiler generates one QPC for multiple lengths, vLLM switches based on prompt for higher performance |
-| 10 | `comp_ctx_lengths_prefill` | — | List of prefill-stage context lengths for CCL; compiler generates a single binary with multiple program codes, enabling dynamic context length switching for prefill|
-| 12 | `comp_ctx_lengths_decode` | — | List of decode-stage context lengths for CCL; compiler generates a single binary with multiple program codes, enabling dynamic context length switching for decode|
-| 13 | `ccl_enabled` | `False` | Auto-generate optimized CCL lists for prefill/decode when `comp_ctx_lengths_prefill`/`comp_ctx_lengths_decode` are not provided |
-| 14 | `num_patches` | — | Number of patches for VLM compilation |
-| 15 | `height` | — | List of Image height for vision+language binary compilation |
-| 16 | `width` | — | List of Image width for vision+language binary compilation |
-| 20 | `kv_offload` | `False` | Enable KV cache offload |
-| 23 | `pooling_device` | — | Device for pooler execution: `"qaic"` or `"cpu"`. Required to get pooled outputs |
-| 24 | `pooling_method` | — | Pooling method for `qaic` pooling: `"mean"`, `"avg"`, `"cls"`, `"max"`, or custom |
-| 25 | `normalize` | — | Set `True` to normalize pooled outputs (`qaic` pooling only) |
-| 26 | `softmax` | — | Set `True` to apply softmax to pooled outputs (`qaic` pooling only) |
-| 27 | `prefill_only` | `None` | Disaggregated serving mode: `True` = compile prefill QPC only, `False` = decode QPC only, `None` = single QPC for both |
+| Field | Default | Description |
+|-----------|---------|-------------|
+| `num_cores`, `aic_num_cores` | `16` (or `8` for SpD draft on same device group) | Number of NSP cores |
+| `dfs`, `aic_enable_depth_first` | `True` | Depth-first scheduling. To disable, set `dfs=False` |
+| `mos` | `-1` | Degree of weight splitting across cores to reduce on-chip memory |
+| `num_devices` | — | Number of devices for auto-device mode. Provide either `num_devices` or explicit QIDs using `device_group` |
+| `mdts_mos` | — | Degree of weight splitting across multi-device tensor slices to improve memory and compute efficiency |
+| `mxint8`, `mxint8_en`, `mxint8_kv_cache` | — | MXINT8 compression of MDP IO traffic. Prefer `--kv-cache-dtype mxint8` vLLM argument |
+| `mxfp6`, `mxfp6_matmul`, `mxfp6_en` | — | Compress MatMul weights to MXFP6 E2M3. Prefer `--quantization mxfp6` vLLM argument |
+| `device_group` | — | List of device IDs |
+| `embed_seq_len` | `None` | List of model lengths; compiler generates one QPC for multiple lengths, vLLM switches based on prompt for higher performance |
+| `comp_ctx_lengths_prefill` | — | List of prefill-stage context lengths for CCL; compiler generates a single binary with multiple program codes, enabling dynamic context length switching for prefill |
+| `comp_ctx_lengths_decode` | — | List of decode-stage context lengths for CCL; compiler generates a single binary with multiple program codes, enabling dynamic context length switching for decode |
+| `ccl_enabled` | `False` | Auto-generate optimized CCL lists for prefill/decode when `comp_ctx_lengths_prefill`/`comp_ctx_lengths_decode` are not provided |
+| `num_patches` | — | Number of patches for VLM compilation |
+| `height` | — | List of image heights for vision+language binary compilation |
+| `width` | — | List of image widths for vision+language binary compilation |
+| `kv_offload` | `False` | Enable KV cache offload |
+| `pooling_device` | — | Device for pooler execution: `"qaic"` or `"cpu"`. Required to get pooled outputs |
+| `pooling_method` | — | Pooling method for `qaic` pooling: `"mean"`, `"avg"`, `"cls"`, `"max"`, or custom |
+| `normalize` | — | Set `True` to normalize pooled outputs (`qaic` pooling only) |
+| `softmax` | — | Set `True` to apply softmax to pooled outputs (`qaic` pooling only) |
+| `prefill_only` | `None` | Disaggregated serving mode: `True` = compile prefill QPC only, `False` = decode QPC only, `None` = single QPC for both |
 
 ### `draft_override_qaic_config` Fields
 

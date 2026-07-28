@@ -6,10 +6,16 @@ Run an OpenAI-compatible API server on QAIC hardware.
 
 ### Docker (Recommended for Production)
 
+For production deployments, use bind mounts to cache model downloads and compiled QPCs across container restarts:
+
 ```bash
 docker run --rm -it --network host \
+  --workdir /workspace \
   --device /dev/accel/ \
   --shm-size=4gb \
+  --mount type=bind,source=$HOME/.cache,target=/cache \
+  -e HF_HOME=/cache/huggingface \
+  -e QEFF_HOME=/cache/qeff_models \
   -e HF_TOKEN=<your_hf_token> \
   ghcr.io/quic/cloud_ai_inference_vllm:1.21.2.0 \
   --host 0.0.0.0 \
@@ -21,6 +27,11 @@ docker run --rm -it --network host \
   --quantization mxfp6 \
   --kv-cache-dtype mxint8
 ```
+
+!!! tip "Cache reuse for faster restarts"
+    The `--mount` binds and `-e HF_HOME`/`-e QEFF_HOME` environment variables persist model downloads and compiled QPCs in `$HOME/.cache/`. The first run will take 3-10 minutes (model download + QPC compilation), but subsequent runs reuse the cache and start in seconds.
+
+For quick testing without cache persistence, use the minimal form from the [Quickstart](../../getting_started/quickstart.md).
 
 ### Source-Based
 

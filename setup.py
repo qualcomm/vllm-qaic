@@ -119,10 +119,7 @@ def _is_qaic() -> bool:
 
 
 def get_qaic_sdk_version():
-    """Get the QAIC sdk version from qaicrt.
-
-    Runs in a subprocess so that a SIGABRT from qaicrt (e.g. when the user
-    lacks qaic group membership) does not abort the build process itself.
+    """Get the QAIC sdk version.
     """
     import platform
 

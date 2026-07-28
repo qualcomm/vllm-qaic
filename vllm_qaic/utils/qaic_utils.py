@@ -52,13 +52,13 @@ def _clean_config(
                     and key != "mdp_load_partition_config"
                     and key != "aic_pmu_recipe"
                     and key != "mdp_dump_partition_config"
+                    and key != "mdp_compiler_dump_path"
                     and key != "node_precision_info"
                 ):
                     value = str(value).lower()
                 value = str(value).strip()
             # Ignore donot update list
             _ignore_list = [
-                "prefill_seq_len",
                 "ctx_len",
                 "batch_size",
                 "full_batch_size",

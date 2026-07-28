@@ -22,8 +22,11 @@ Traditional AOT compilation specializes a model for one fixed context length. As
 CCL works across:
 
 - Standard vLLM serving
-- SpD + vLLM
+- SpD with `draft_model` method
 - Disaggregated Serving (decode-only)
+
+!!! warning "CCL + SpD limitation"
+    CCL with speculative decoding is **only supported using the `draft_model` method**. The `suffix` and `ngram` methods are not compatible with CCL because they require multiple decode specializations, which QEfficient does not currently support with CCL-enabled models.
 
 Performance benefits increase significantly for **8K+ context lengths**.
 

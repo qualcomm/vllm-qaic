@@ -4,7 +4,7 @@ vLLM Qualcomm Cloud AI (QAIC) Plugin
 
 
 <p align="center">
-| <a href="https://www.qualcomm.com/artificial-intelligence/data-center"><b>Qualcomm Data Center AI</b></a> | <a href="https://quic.github.io/cloud-ai-sdk-pages/"><b>User Guide</b></a> | <a href="https://quic.github.io/cloud-ai-sdk-pages/latest/API/"><b>API Documentation</b></a> | <a href="docs/installation.md"><b>Installation Guide</b></a> |
+| <a href="https://www.qualcomm.com/artificial-intelligence/data-center"><b>Qualcomm Data Center AI</b></a> | <a href="https://qualcomm.github.io/vllm-qaic/"><b>Documentation</b></a> | <a href="https://quic.github.io/cloud-ai-sdk-pages/"><b>User Guide</b></a> | <a href="docs/installation.md"><b>Installation Guide</b></a> |
 </p>
 
 > **This branch is under active development — plugin rebase to vLLM v0.23.0.**
@@ -39,7 +39,7 @@ For more information about Qualcomm Cloud AI 100, check out:
 - 🚀 [Qualcomm Data Center AI Solutions](https://www.qualcomm.com/artificial-intelligence/data-center)
 - 📚 [Cloud AI SDK User Guide](https://quic.github.io/cloud-ai-sdk-pages/)
 - 🎯 [Cloud AI SDK API Reference](https://quic.github.io/cloud-ai-sdk-pages/latest/Python-API/index.html)
-- ✅ [Validated Models and Configurations](https://quic.github.io/efficient-transformers/source/validate.html)
+- ✅ [Validated Models and Configurations](https://qualcomm.github.io/vllm-qaic/user_guide/models/supported_models_aot/)
 
 ## Prerequisites
 
@@ -54,13 +54,16 @@ For more information about Qualcomm Cloud AI 100, check out:
 
 Please use the following recommended versions to get started quickly:
 
-| vllm-qaic version | vLLM version | Apps SDK version | Release type | Doc |
-|---|---|---|---|---|
-| v0.23.0.dev0 | v0.23.0 | >= 1.22.0 | Development | See [QuickStart](#installation) and [Installation Guide](docs/installation.md) for more details |
+| vllm-qaic version | vLLM version | Apps SDK version | Branch | Release type | Doc |
+|---|---|---|---|---|---|
+| v0.15.0.dev0 | v0.15.0 | >= 1.22.0 | [main](https://github.com/qualcomm/vllm-qaic/tree/main) | Pre-release | See [QuickStart](#installation) and [Installation Guide](docs/installation.md) for more details |
+| v0.23.0.dev0 | v0.23.0 | >= 1.22.0 | [v0.23.0](https://github.com/qualcomm/vllm-qaic/tree/v0.23.0) | Active Development | SpD and LoRaX not yet ported |
 
 ## Branches
 
-**main**: Primary development branch. Contributors should develop submissions based on this branch, and submit pull requests to this branch.
+**[main](https://github.com/qualcomm/vllm-qaic/tree/main)**: Primary development branch. Contributors should develop submissions based on this branch, and submit pull requests to this branch.
+
+**[v0.23.0](https://github.com/qualcomm/vllm-qaic/tree/v0.23.0)**: Active development branch for plugin rebase to vLLM v0.23.0. Some features (SpD, LoRaX) are not yet ported. For production use, stay on `main`.
 
 ### Installation
 
@@ -147,17 +150,11 @@ for output in outputs:
 
 ### Ahead-of-Time Compiled Mode
 
-For the most up-to-date list of supported models and their validation status, please check our [model compatibility matrix](https://quic.github.io/efficient-transformers/source/validate.html).
+For the most up-to-date list of supported models and their validation status, please check [Supported Models through AoT](https://qualcomm.github.io/vllm-qaic/user_guide/models/supported_models_aot/).
 
-### Eager Mode
+### PyTorch Eager Mode
 
-We currently support the following models:
-- Qwen/Qwen2.5-VL-3B-Instruct
-- Qwen/Qwen2.5-VL-7B-Instruct
-- Qwen/Qwen2.5-VL-32B-Instruct
-- Qwen/Qwen3-VL-32B-Instruct
-- OpenGVLab/InternVL3_5-8B-Instruct
-- OpenGVLab/InternVL2_5-38B
+For the most up-to-date list of supported models and their validation status, please check [Supported Models through PyTorch Eager Mode](https://qualcomm.github.io/vllm-qaic/user_guide/models/supported_models_eager/).
 
 ## Support
 

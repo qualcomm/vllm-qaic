@@ -81,7 +81,6 @@ for output in outputs:
 | `additional_config.lora_modules` | List of `LoRAModulePath` entries pre-registering adapters by name and path | `[]` |
 | `additional_config.device_group` | List of device indices to use | `[0]` |
 
-## Limitations
-
-- AOT mode only (not supported in PYT/Eager mode)
-- LoRA adapters must be compatible with the compiled base model architecture
+!!! warning "Constraints"
+    - AOT mode only (not supported in PYT/Eager mode)
+    - LoRA adapters must be compatible with the compiled base model architecture

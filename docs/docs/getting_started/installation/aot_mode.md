@@ -12,13 +12,26 @@ AOT (Ahead-of-Time) mode uses the QEfficient library to compile models into Qual
 ./scripts/install.sh aot
 ```
 
+!!! info "Configuration banner"
+    Before installation starts, `install.sh` prints a full summary of every version and
+    setting it will use (vllm, vllm-qaic, torch, qeff branch, target device, triton-cpu
+    state). Review the banner output and override any variable before re-running.
+
 ??? example "Optional environment overrides"
     ```bash
     # Pin transformers version
     TRANSFORMERS_VERSION_AOT=4.55.3 ./scripts/install.sh aot
 
     # Enable triton-cpu backend (for Speculative Decoding)
+    # triton-cpu is a large C++ build — requires ~10 GB of free disk space at TRITON_CPU_SRC
     TRITON_CPU=1 ./scripts/install.sh aot
+
+    # Redirect the triton-cpu clone+build to a filesystem with more space
+    # (use when $HOME has limited disk space or a user quota)
+    TRITON_CPU=1 TRITON_CPU_SRC=/path/with/more/space/triton-cpu ./scripts/install.sh aot
+
+    # Skip the disk-space pre-flight check entirely
+    TRITON_CPU=1 TRITON_CPU_SKIP_DISK_CHECK=1 ./scripts/install.sh aot
 
     # Install from pre-built wheel
     VLLM_QAIC_INSTALL_SOURCE=wheel \
