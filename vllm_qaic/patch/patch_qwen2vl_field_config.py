@@ -25,8 +25,6 @@ and re-bind the by-name copies imported into qwen3_vl and friends. Mirrors
 the fix the monolithic v0.15.0 fork applied inline in qwen2_vl.py.
 """
 
-import importlib
-
 from packaging.version import Version as _Version
 from transformers import __version__ as _transformers_version
 
@@ -59,16 +57,26 @@ def _create_qwen2vl_field_factory_qaic(spatial_merge_size: int):
 
 _qwen2_vl._create_qwen2vl_field_factory = _create_qwen2vl_field_factory_qaic
 
-# Re-bind the by-name copies imported into other model modules.
-for _mod_name in (
-    "vllm.model_executor.models.qwen3_vl",
-    "vllm.model_executor.models.glm4_1v",
-    "vllm.model_executor.models.opencua",
-    "vllm.model_executor.models.mimo_v2_omni",
-):
-    try:
-        _mod = importlib.import_module(_mod_name)
-    except Exception:
-        continue
-    if hasattr(_mod, "_create_qwen2vl_field_factory"):
+# Re-bind the by-name copies imported into other model modules. Modules are
+# imported explicitly (static names) to avoid dynamic imports; missing optional
+# modules are tolerated.
+try:
+    from vllm.model_executor.models import qwen3_vl as _qwen3_vl
+except Exception:
+    _qwen3_vl = None
+try:
+    from vllm.model_executor.models import glm4_1v as _glm4_1v
+except Exception:
+    _glm4_1v = None
+try:
+    from vllm.model_executor.models import opencua as _opencua
+except Exception:
+    _opencua = None
+try:
+    from vllm.model_executor.models import mimo_v2_omni as _mimo_v2_omni
+except Exception:
+    _mimo_v2_omni = None
+
+for _mod in (_qwen3_vl, _glm4_1v, _opencua, _mimo_v2_omni):
+    if _mod is not None and hasattr(_mod, "_create_qwen2vl_field_factory"):
         _mod._create_qwen2vl_field_factory = _create_qwen2vl_field_factory_qaic
