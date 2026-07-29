@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from queue import Queue
 from threading import Event
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
-
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -110,6 +110,10 @@ class QaicPrefillBank:
                 f"physical_block={physical_block}, usable_blocks=1.."
                 f"{self.num_blocks - 1}"
             )
+        
+        if self.owner.get(req_id) == physical_block:
+            return
+        
         timeout_s = float(os.environ.get("QAIC_PREFILL_MEMPOOL_WAIT_TIMEOUT_S", "30"))
         deadline = time.monotonic() + timeout_s
         while self.busy[physical_block]:
@@ -2173,13 +2177,6 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 get_kv_transfer_group().register_kv_caches(self.kv_cache_layers)
             else:
                 get_kv_transfer_group().register_kv_caches(self.kv_caches)
-            if self._uses_torch_view_kv_connector():
-                self.kv_cache_layers = self._build_torch_view_kv_caches(
-                    kv_cache_config
-                )
-                get_kv_transfer_group().register_kv_caches(self.kv_cache_layers)
-            else:
-                get_kv_transfer_group().register_kv_caches(self.kv_caches)
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """
@@ -2189,37 +2186,6 @@ class QaicModelRunnerAoT(GPUModelRunner):
             KVCacheSpec: A dictionary mapping layer names to their KV cache
             format. Layers that do not need KV cache are not included.
         """
-        block_size = self.cache_config.block_size
-        kv_cache_spec: dict[str, KVCacheSpec] = {}
-        layer_type = cast(type[Any], AttentionLayerBase)
-        attn_layers = get_layers_from_vllm_config(self.vllm_config, layer_type)
-        for layer_name, attn_module in attn_layers.items():
-            spec = attn_module.get_kv_cache_spec(self.vllm_config)
-            if spec is None:
-                continue
-            if isinstance(spec, MambaSpec):
-                kv_cache_spec[layer_name] = spec
-            else:
-                # QAIC gives every FA/SWA layer one block sized for the full
-                # context (block_size == max_model_len). Sliding-window
-                # layers are padded to the same page size as full attention
-                # (inefficient but simple) so NIXL/vLLM see one uniform page
-                # size and never split them into separate hybrid groups.
-                # `sliding_window` is still carried over so the QAIC attention
-                # backend keeps masking correctly at compute time.
-                kv_cache_spec[layer_name] = FullAttentionSpec(
-                    block_size=block_size,
-                    num_kv_heads=self.num_kv_heads,
-                    head_size=self.head_size,
-                    dtype=self.kv_cache_dtype,
-                    sliding_window=getattr(spec, "sliding_window", None),
-                )
-
-        if kv_cache_spec:
-            return kv_cache_spec
-
-        # Legacy fallback for older QAIC model configs that do not expose
-        # AttentionLayerBase metadata.
         n_layers = self.model_config.get_num_layers(self.parallel_config)
         for i in range(n_layers):
             layer_name = f"layer_{i}"
