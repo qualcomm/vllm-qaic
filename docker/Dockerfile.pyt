@@ -20,6 +20,10 @@
 #   dev        FROM pyt-base. Installs vllm-qaic editable (pip install -e)
 #              for fast in-container iteration.
 #
+#   wheel      FROM pyt-base. Builds a vllm-qaic PYT wheel (compiling the
+#              Hexagon kernel extension) from the build-context checkout
+#              and exports it via BuildKit's local exporter.
+#
 # Key differences from Dockerfile.aot
 # ------------------------------------
 #   - torch_qaic comes from the SDK wheel at /opt/qti-aic (not from git)
@@ -51,8 +55,20 @@
 #   # Dev (editable vllm-qaic):
 #   docker build --target dev -f docker/Dockerfile.pyt -t vllm-qaic-pyt:dev .
 #
+#   # Wheel (specific python version + device arch, export to ./dist/pyt/py311):
+#   docker buildx build --target wheel -f docker/Dockerfile.pyt \
+#     --build-arg PYTHON_VERSION=3.11 --build-arg QAIC_DEVICE_ARCH=v81 \
+#     --output type=local,dest=./dist/pyt/py311 .
+#
 # The BASE_IMAGE must have the QAIC Platform and Apps SDKs installed
 # (i.e. /opt/qti-aic/ present with torch_qaic wheels).
+#
+# Run dev container with host-matching UID/GID and qaic group access:
+#   docker run -it --rm \
+#     -e USER_UID=$(id -u) -e USER_GID=$(id -g) \
+#     -e QAIC_GID=$(getent group qaic | cut -d: -f3) \
+#     --device /dev/accel/ -v $(pwd):/src/vllm-qaic \
+#     vllm-qaic-pyt:dev
 #
 # Verify any target:
 #   docker run --rm <image> python -c "import vllm_qaic; print('OK')"
@@ -64,15 +80,16 @@
 ARG BASE_IMAGE="ghcr.io/quic/cloud_ai_inference_ubuntu24:1.21.6.0"
 ARG VENV="/opt/venv-pyt"
 ARG UV_VERSION="0.11.29"
+ARG PYTHON_VERSION="3.12"
 
 # ---------------------------------------------------------------------------
 # Shared stack version pins — defaults mirror scripts/utility.sh.
 # ---------------------------------------------------------------------------
 ARG VLLM_VERSION="0.23.0"
 ARG VLLM_QAIC_VERSION="1.22"
-ARG TORCH_VERSION_PYT="2.9.1+cpu"
-ARG TORCHVISION_VERSION_PYT="0.24.1+cpu"
-ARG TORCHAUDIO_VERSION_PYT="2.9.1+cpu"
+ARG TORCH_VERSION_PYT="2.11.0+cpu"
+ARG TORCHVISION_VERSION_PYT="0.26.0+cpu"
+ARG TORCHAUDIO_VERSION_PYT="2.11.0+cpu"
 ARG VLLM_TARGET_DEVICE_PYT="empty"
 ARG TORCH_QAIC_BASE_PATH="/opt/qti-aic/integrations/torch_qaic"
 
@@ -115,9 +132,17 @@ FROM ${BASE_IMAGE} AS pyt-base
 COPY --from=uv /uv /usr/local/bin/uv
 
 # UV environment — set once, inherited by all downstream stages.
+# UV_PYTHON_DOWNLOADS=manual: never auto-download a runtime implicitly; the
+# infra layer below explicitly installs PYTHON_VERSION via `uv python install`.
+# UV_PYTHON_INSTALL_DIR: pinned to a known path (uv's default is
+# $HOME/.local/share/uv/python) so it can be COPY'd alongside VENV into
+# release/ci/dev — `uv venv --seed` symlinks the venv's python binary to this
+# external store rather than copying it in, so any final stage that only
+# copies VENV out of its builder is left with a dangling symlink.
 ENV UV_LINK_MODE=copy \
     UV_COMPILE_BYTECODE=1 \
-    UV_PYTHON_DOWNLOADS=never \
+    UV_PYTHON_DOWNLOADS=manual \
+    UV_PYTHON_INSTALL_DIR=/opt/uv-python \
     UV_NO_PROGRESS=1 \
     UV_HTTP_TIMEOUT=500 \
     UV_INDEX_STRATEGY=unsafe-best-match \
@@ -129,19 +154,26 @@ SHELL ["/bin/bash", "-c"]
 # Declare all ARGs after the last ENV block — ARGs declared before an ENV
 # instruction can lose their RUN-scope binding in Docker BuildKit.
 ARG VENV="/opt/venv-pyt"
+ARG PYTHON_VERSION="3.12"
 ARG VLLM_VERSION="0.23.0"
 ARG VLLM_QAIC_VERSION="1.22"
-ARG TORCH_VERSION_PYT="2.9.1+cpu"
-ARG TORCHVISION_VERSION_PYT="0.24.1+cpu"
-ARG TORCHAUDIO_VERSION_PYT="2.9.1+cpu"
+ARG TORCH_VERSION_PYT="2.11.0+cpu"
+ARG TORCHVISION_VERSION_PYT="0.26.0+cpu"
+ARG TORCHAUDIO_VERSION_PYT="2.11.0+cpu"
 ARG VLLM_TARGET_DEVICE_PYT="empty"
 ARG TORCH_QAIC_BASE_PATH="/opt/qti-aic/integrations/torch_qaic"
 ARG QAIC_DEVICE_ARCH="v68"
 
 # ---------------------------------------------------------------------------
-# Layer 1 — infra: system packages + uv venv + build tools (merged)
-# build-essential + cmake + python3.12-dev: needed to compile vllm_qaic's
-# Hexagon kernel C++ extensions from csrc/ during pip install.
+# Layer 1 — infra: system packages + uv-managed python + build tools (merged)
+# build-essential + cmake: needed to compile vllm_qaic's Hexagon kernel C++
+# extensions from csrc/ during pip install. Python comes from uv (not apt)
+# so PYTHON_VERSION can be any of 3.10/3.11/3.12 regardless of what the base
+# image's apt repos carry — uv's standalone CPython builds ship their own
+# headers, so no python3.X-dev package is needed either.
+# NOTE: the uv-installed Python must NOT sit under a cache mount — uv venv
+# symlinks into it, and a cache mount's contents vanish when the RUN ends,
+# leaving a dangling symlink in the venv for every later layer.
 # ---------------------------------------------------------------------------
 RUN --mount=type=cache,sharing=locked,target=/var/cache/apt \
     --mount=type=cache,sharing=locked,target=/var/lib/apt \
@@ -149,9 +181,9 @@ RUN --mount=type=cache,sharing=locked,target=/var/cache/apt \
     apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         cmake \
-        python3.12-dev \
         git && \
-    uv venv ${VENV} --python python3.12 --seed && \
+    uv python install ${PYTHON_VERSION} && \
+    uv venv ${VENV} --python ${PYTHON_VERSION} --seed && \
     PATH="${VENV}/bin:${PATH}" uv pip install \
         "setuptools>=77.0.3,<80.0.0" \
         setuptools-scm \
@@ -176,23 +208,29 @@ RUN python -m pip install --quiet \
 
 # ---------------------------------------------------------------------------
 # Layer 3 — step2: torch_qaic from SDK wheel
-# The wheel lives at ${TORCH_QAIC_BASE_PATH}/py312/torch_qaic-*.whl inside
-# the BASE_IMAGE. It links against Ubuntu's OpenSSL 3 and libQAic.so.
+# The wheel lives at ${TORCH_QAIC_BASE_PATH}/py<PYTHON_VERSION>/torch_qaic-*.whl
+# inside the BASE_IMAGE. It links against Ubuntu's OpenSSL 3 and libQAic.so.
 # ---------------------------------------------------------------------------
 RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
-    PYVER="py$(python -c 'import sys; print(str(sys.version_info.major) + str(sys.version_info.minor))')" && \
+    PYVER="py$(echo "${PYTHON_VERSION}" | tr -d '.')" && \
     uv pip install "${TORCH_QAIC_BASE_PATH}/${PYVER}"/torch_qaic-*.whl
 
 # ---------------------------------------------------------------------------
 # Layer 4 — step3: vllm dependencies + vllm
 # Re-pin build deps after the dependency install which may downgrade them.
 # vllm-cpu is a prebuilt PyPI wheel — no C++ compilation needed here.
+# TORCH_DEVICE_BACKEND_AUTOLOAD=0: vllm's setup.py does `import torch` at
+# module load; torch auto-loads torch_qaic as a registered backend extension,
+# which enumerates live QAIC devices and SIGABRTs when none are present in
+# this build environment. Scoped to this RUN only — real containers still
+# want torch_qaic auto-loaded at runtime.
 # ---------------------------------------------------------------------------
 COPY requirements/vllm_dependency_pyt.txt /src/vllm-qaic/requirements/vllm_dependency_pyt.txt
 RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
     uv pip install -r /src/vllm-qaic/requirements/vllm_dependency_pyt.txt && \
     uv pip install \
         "setuptools>=77.0.3,<80.0.0" setuptools-scm setuptools-rust wheel "cmake>=3.26" && \
+    TORCH_DEVICE_BACKEND_AUTOLOAD=0 \
     VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE_PYT}" uv pip install \
         --no-build-isolation --no-deps \
         "vllm @ git+https://github.com/vllm-project/vllm.git@v${VLLM_VERSION}"
@@ -227,6 +265,7 @@ ARG VENV="/opt/venv-pyt"
 
 COPY --from=uv /uv /usr/local/bin/uv
 COPY --from=release-builder ${VENV} ${VENV}
+COPY --from=release-builder /opt/uv-python /opt/uv-python
 
 ENV PATH="${VENV}/bin:${PATH}" \
     VIRTUAL_ENV="${VENV}" \
@@ -273,6 +312,7 @@ ARG VENV="/opt/venv-pyt"
 
 COPY --from=uv /uv /usr/local/bin/uv
 COPY --from=ci-builder ${VENV} ${VENV}
+COPY --from=ci-builder /opt/uv-python /opt/uv-python
 
 ENV PATH="${VENV}/bin:${PATH}" \
     VIRTUAL_ENV="${VENV}" \
@@ -301,13 +341,48 @@ FROM ${BASE_IMAGE} AS dev
 
 ARG VENV="/opt/venv-pyt"
 
+# sudo + entrypoint.sh: map the container user to the host's uid/gid (and the
+# host's qaic device group) on `docker run`, so bind-mounted files keep host
+# ownership and /dev/accel stays accessible without running as root.
+RUN --mount=type=cache,sharing=locked,target=/var/cache/apt \
+    --mount=type=cache,sharing=locked,target=/var/lib/apt \
+    apt-get update && apt-get install -y --no-install-recommends sudo
+
 COPY --from=uv /uv /usr/local/bin/uv
 COPY --from=dev-builder ${VENV} ${VENV}
+COPY --from=dev-builder /opt/uv-python /opt/uv-python
 COPY --from=dev-builder /src/vllm-qaic /src/vllm-qaic
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
 
 ENV PATH="${VENV}/bin:${PATH}" \
     VIRTUAL_ENV="${VENV}" \
     VLLM_PLUGINS="qaic" \
     VENV="${VENV}"
 
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["bash"]
+
+# ===========================================================================
+# WHEEL — build a vllm-qaic PYT wheel from the build-context checkout and
+# export it via BuildKit's local exporter (no container run / bind mount
+# needed). PYT wheels are cp<pyver>-linux_x86_64 (compiles Hexagon kernels).
+#
+#   docker buildx build --target wheel -f docker/Dockerfile.pyt \
+#     --build-arg PYTHON_VERSION=3.11 --build-arg QAIC_DEVICE_ARCH=v81 \
+#     --output type=local,dest=./dist/pyt/py311 .
+# ===========================================================================
+FROM pyt-base AS wheel-builder
+
+ARG VLLM_VERSION="0.23.0"
+ARG VLLM_QAIC_VERSION="1.22"
+ARG QAIC_DEVICE_ARCH="v68"
+
+COPY . /src/vllm-qaic
+RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
+    QAIC_DEVICE_ARCH="${QAIC_DEVICE_ARCH}" \
+    VLLM_VERSION_OVERRIDE="${VLLM_VERSION}+pyt${VLLM_QAIC_VERSION}" \
+    uv build --wheel --no-build-isolation --out-dir /out /src/vllm-qaic
+
+FROM scratch AS wheel
+COPY --from=wheel-builder /out /

@@ -146,6 +146,13 @@ def get_qaic_build_ext():
             def get_ext_filename(self, ext_name):
                 bare = ext_name.split(".")[-1]
                 filename = super().get_ext_filename(bare)
+                if bare == "hexagon_kernels":
+                    # Mirror torch_qaic's QAicBuildExt.get_ext_filename: this
+                    # extension is hand-compiled by the Hexagon toolchain, not
+                    # cpython's ABI, so strip the cpython-*-linux-gnu tag that
+                    # setuptools appends by default.
+                    parts = filename.split(".")
+                    filename = ".".join(parts[:-2] + parts[-1:])
                 prefix = "/".join(ext_name.split(".")[:-1])
                 return f"{prefix}/{filename}" if prefix else filename
 
