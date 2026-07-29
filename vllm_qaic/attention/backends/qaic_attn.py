@@ -92,7 +92,6 @@ class QAicTorchAttentionBackend(AttentionBackend):
 
 @dataclass
 class QAicAttentionMetadata:
-    isa: str
     num_actual_tokens: int  # Number of tokens excluding padding.
     max_query_len: int
     query_start_loc: torch.Tensor
@@ -144,7 +143,6 @@ class QAicAttentionMetadataBuilder(AttentionMetadataBuilder[QAicAttentionMetadat
         if self.window_size is None:
             self.window_size = -1
         self.block_size = vllm_config.cache_config.block_size
-        self.isa = _get_attn_isa(self.dtype, self.block_size, self.head_dim)
 
     def update_req_ids(self, req_ids: list[str]) -> None:
         """Called by the model runner before build() to supply the current batch's request IDs."""
@@ -187,7 +185,6 @@ class QAicAttentionMetadataBuilder(AttentionMetadataBuilder[QAicAttentionMetadat
         scheduler_metadata = None
 
         attn_metadata = QAicAttentionMetadata(
-            isa=self.isa,
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
             query_start_loc=query_start_loc,
@@ -575,20 +572,3 @@ def _make_sliding_window_bias(
         attn_biases.append(mask)
 
     return attn_biases
-
-
-def _get_attn_isa(
-    dtype: torch.dtype, block_size: int, head_size: int | None = None
-) -> str:
-    if head_size is not None and head_size % 32 != 0 and head_size % 16 == 0:
-        return "vec16"
-    supports_amx = torch._C._cpu._is_amx_tile_supported()
-    if supports_amx and dtype in (torch.bfloat16,) and block_size % 32 == 0:
-        return "amx"
-    elif block_size % 32 == 0:
-        if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
-            return "neon"
-        else:
-            return "vec"
-    else:
-        return "vec16"

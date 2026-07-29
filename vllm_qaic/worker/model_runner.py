@@ -671,7 +671,6 @@ class QaicModelRunnerAoT(GPUModelRunner):
         if spec_tokens and any(len(v) > 0 for v in spec_tokens.values()):
             return self.decode_ks[-1]  # proposals exist → full SpD kernel
         return 0  # no proposals → cheap fallback kernel
-
     def _pool(
         self,
         hidden_states: torch.Tensor,
