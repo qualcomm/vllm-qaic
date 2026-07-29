@@ -116,6 +116,12 @@ class QaicPlatform(Platform):
         return cls.device_communicator_cls
 
     @classmethod
+    def discover_numa_topology(cls) -> list[list[int]]:
+        # QAIC AOT reports as CPU to vLLM. NIXL calls this optional CPU-platform
+        # hook to reserve transfer cores; return no reservation for QAIC.
+        return []
+
+    @classmethod
     def is_async_output_supported(cls, enforce_eager: bool | None) -> bool:
         return False
 
@@ -141,6 +147,10 @@ class QaicPlatform(Platform):
         return dtype in [torch.float16, torch.float32]
 
     @classmethod
+    def support_hybrid_kv_cache(cls) -> bool:
+        return True
+
+    @classmethod
     def inference_mode(cls):
         return torch.inference_mode()
 
@@ -148,7 +158,7 @@ class QaicPlatform(Platform):
     def set_device(cls, device: torch.device):
         # Not Implemented for aot
         if isinstance(qaic, PlaceholderModule):
-            raise NotImplementedError
+            return 
         # for eager mode
         qaic.set_device(device)
 
@@ -459,13 +469,6 @@ class QaicPlatform(Platform):
                 cls._configure_multimodal_model(
                     vllm_config, model_config, scheduler_config, model_type
                 )
-
-        if cls.is_aot and scheduler_config.async_scheduling:
-            logger.warning(
-                "QAIC currently does not support async scheduling; "
-                "Falling back to non-async scheduling."
-            )
-            scheduler_config.async_scheduling = False
 
         if cls.is_aot and scheduler_config.async_scheduling:
             logger.warning(
