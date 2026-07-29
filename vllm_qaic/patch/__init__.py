@@ -71,6 +71,18 @@
 #       Because vLLM defaults to fork-based subprocesses, patching here (in the
 #       main process before fork) is sufficient.
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#
+# ** 8. File: patch_qwen2vl_field_config.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. vllm.model_executor.models.qwen2_vl._create_qwen2vl_field_factory
+#    Why:
+#       In the QAIC disagg path, _merge_embeds adds a leading batch dim to
+#       image_grid_thw ([N, 3] -> [1, N, 3]) and calls _get_mm_fields_config
+#       directly, so prod(-1) is 2-D and flat_from_sizes rejects it.
+#    How:
+#       Wrap _create_qwen2vl_field_factory to squeeze ndim==3 grids back to
+#       ndim==2; re-bind the by-name copies in qwen3_vl etc.
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # =================
 
 import vllm_qaic.patch.patch_config  # noqa
@@ -80,3 +92,4 @@ import vllm_qaic.patch.patch_rejection_sampler  # noqa
 import vllm_qaic.patch.patch_graph_pickler  # noqa
 import vllm_qaic.patch.patch_mem_utils  # noqa
 import vllm_qaic.patch.patch_block_table  # noqa
+import vllm_qaic.patch.patch_qwen2vl_field_config  # noqa
