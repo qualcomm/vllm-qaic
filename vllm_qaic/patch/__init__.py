@@ -71,6 +71,20 @@
 #       Because vLLM defaults to fork-based subprocesses, patching here (in the
 #       main process before fork) is sufficient.
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#
+# ** 6. File: patch_structured_output.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. vllm.v1.structured_output.utils.apply_grammar_bitmask
+#    Why:
+#       On QAIC (non-CUDA) the upstream function builds the xgrammar index
+#       tensor with pin_memory=True (no CUDA allocator -> crash) and passes a
+#       torch.Tensor to the CPU xgrammar kernel, which only accepts a python
+#       Sequence[int]. This breaks guided/structured decoding.
+#    How:
+#       Replace apply_grammar_bitmask with a version that gates the pinned
+#       tensor path on is_pin_memory_available() and passes a plain list of
+#       indices on QAIC.
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # =================
 
 import vllm_qaic.patch.patch_config  # noqa
@@ -80,3 +94,4 @@ import vllm_qaic.patch.patch_rejection_sampler  # noqa
 import vllm_qaic.patch.patch_graph_pickler  # noqa
 import vllm_qaic.patch.patch_mem_utils  # noqa
 import vllm_qaic.patch.patch_block_table  # noqa
+import vllm_qaic.patch.patch_structured_output  # noqa
