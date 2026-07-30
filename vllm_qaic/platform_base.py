@@ -460,20 +460,6 @@ class QaicPlatform(Platform):
                     vllm_config, model_config, scheduler_config, model_type
                 )
 
-        if cls.is_aot and scheduler_config.async_scheduling:
-            logger.warning(
-                "QAIC currently does not support async scheduling; "
-                "Falling back to non-async scheduling."
-            )
-            scheduler_config.async_scheduling = False
-
-        if cls.is_aot and scheduler_config.async_scheduling:
-            logger.warning(
-                "QAIC currently does not support async scheduling; "
-                "Falling back to non-async scheduling."
-            )
-            scheduler_config.async_scheduling = False
-
     @classmethod
     def is_pin_memory_available(cls) -> bool:
         logger.warning("Pin memory is not supported on Qaic.")
@@ -583,13 +569,29 @@ class QaicPlatform(Platform):
 
         Currently only Qwen2.5VL and Qwen3VL are supported.
         """
-        # For Qwen2.5VL/Qwen3VL on QAIC, min_pixels and max_pixels must match QEfficient
-        # values and cannot be overridden per request.
+        # For Qwen2.5VL/Qwen3VL on QAIC, min_pixels and max_pixels must match
+        # QEfficient values.
+        vision_config = getattr(model_config.hf_config, "vision_config", None)
+        patch_size = getattr(
+            vision_config,
+            "patch_size",
+            getattr(vision_config, "spatial_patch_size", 14),
+        )
+        merge_size = getattr(vision_config, "spatial_merge_size", 2)
+        factor = patch_size * merge_size
+        default_min_pixels = 4 * factor * factor
+        default_max_pixels = 16384 * factor * factor
+
         if model_config.mm_processor_kwargs is None:
             model_config.mm_processor_kwargs = {}
         mm_kwargs = model_config.mm_processor_kwargs
-        mm_kwargs.setdefault("max_pixels", 1280 * 28 * 28)
-        mm_kwargs.setdefault("min_pixels", 4 * 28 * 28)
+        override_mm_kwargs = override_qaic_config.get("mm_processor_kwargs") or {}
+        mm_kwargs["max_pixels"] = override_mm_kwargs.get(
+            "max_pixels", mm_kwargs.get("max_pixels", default_max_pixels)
+        )
+        mm_kwargs["min_pixels"] = override_mm_kwargs.get(
+            "min_pixels", mm_kwargs.get("min_pixels", default_min_pixels)
+        )
         override_qaic_config["mm_processor_kwargs"] = {
             k: mm_kwargs[k] for k in ("max_pixels", "min_pixels")
         }
