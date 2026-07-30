@@ -36,13 +36,24 @@ repos:
   - id: actionlint
 - repo: local
   hooks:
-  - id: mypy-local
-    name: Run mypy for local Python installation
-    entry: tools/mypy.sh 0 "3.10"
-    language: python
-    types: [python]
-    additional_dependencies: [mypy==1.11.1, types-PyYAML, types-regex, types-requests, types-setuptools]
-    stages: [pre-commit] # Run locally on every commit
+  - id: mypy-3.10 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
+    name: Run mypy for Python 3.10
+    entry: python tools/pre_commit/mypy.py "3.10"
+    <<: &mypy_common
+      language: python
+      types_or: [python, pyi]
+      require_serial: true
+      additional_dependencies: ["mypy==1.20.2", regex, types-cachetools, types-setuptools, types-PyYAML, types-requests, types-torch, pydantic]
+  - id: mypy-3.11 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
+    name: Run mypy for Python 3.11
+    entry: python tools/pre_commit/mypy.py "3.11"
+    <<: *mypy_common
+    stages: [manual] # Only run in CI
+  - id: mypy-3.12 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
+    name: Run mypy for Python 3.12
+    entry: python tools/pre_commit/mypy.py "3.12"
+    <<: *mypy_common
+    stages: [manual] # Only run in CI
   - id: signoff-commit
     name: Sign-off Commit
     entry: bash
