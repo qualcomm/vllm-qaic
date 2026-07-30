@@ -54,6 +54,11 @@ repos:
     entry: python tools/pre_commit/mypy.py "3.12"
     <<: *mypy_common
     stages: [manual] # Only run in CI
+  - id: shellcheck
+    name: Lint shell scripts
+    entry: tools/pre_commit/shellcheck.sh
+    language: script
+    types: [shell]
   - id: signoff-commit
     name: Sign-off Commit
     entry: bash
@@ -71,6 +76,11 @@ repos:
     entry: python tools/pre_commit/check_qualcomm_header.py
     language: python
     types: [python]
+  - id: check-root-lazy-imports
+    name: Check root lazy imports
+    entry: python tools/pre_commit/check_init_lazy_imports.py
+    language: python
+    types: [python]
   - id: check-filenames
     name: Check for spaces in all filenames
     entry: bash
@@ -80,3 +90,27 @@ repos:
     language: system
     always_run: true
     pass_filenames: false
+  - id: check-forbidden-imports
+    name: Check for forbidden imports
+    entry: python tools/pre_commit/check_forbidden_imports.py
+    language: python
+    types: [python]
+    additional_dependencies: [regex]
+  - id: validate-config
+    name: Validate configuration has default values and that each field has a docstring
+    entry: python tools/pre_commit/validate_config.py
+    language: python
+    additional_dependencies: [regex]
+  - id: check-boolean-context-manager
+    name: Check for boolean ops in with-statements
+    entry: python tools/pre_commit/check_boolean_context_manager.py
+    language: python
+    types: [python]
+  # Keep `suggestion` last
+  - id: suggestion
+    name: Suggestion
+    entry: bash -c 'echo "To bypass all the pre-commit hooks, add --no-verify to git commit. To skip a specific hook, prefix the commit command with SKIP=<hook-id>."'
+    language: system
+    verbose: true
+    pass_filenames: false
+  # Insert new entries above the `suggestion` entry
