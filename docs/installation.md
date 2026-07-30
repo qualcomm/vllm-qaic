@@ -181,7 +181,7 @@ pip install -r requirements/vllm_dependency_pyt.txt
 #   (no C++ compilation, no torch in wheel METADATA — uv-safe)
 VLLM_TARGET_DEVICE=empty pip install \
     --no-build-isolation --no-deps \
-    "vllm @ git+https://github.com/vllm-project/vllm.git@v0.15.0"
+    "vllm @ git+https://github.com/vllm-project/vllm.git@v0.23.0"
 
 # 3. vllm-qaic from source
 pip install --no-build-isolation ./vllm-qaic
