@@ -56,7 +56,7 @@ Please use the following recommended versions to get started quickly:
 
 | vllm-qaic version | vLLM version | Apps SDK version | Branch | Release type | Doc |
 |---|---|---|---|---|---|
-| v0.15.0.dev0 | v0.15.0 | >= 1.22.0 | [main](https://github.com/qualcomm/vllm-qaic/tree/main) | Pre-release | See [QuickStart](#installation) and [Installation Guide](docs/installation.md) for more details |
+| v0.15.0.dev0 | v0.15.0 | >= 1.22.0 | [main](https://github.com/qualcomm/vllm-qaic/tree/main)  [v0.15.0](https://github.com/qualcomm/vllm-qaic/tree/release/v0.15.0)| Pre-release | See [QuickStart](#installation) and [Installation Guide](docs/installation.md) for more details |
 | v0.23.0.dev0 | v0.23.0 | >= 1.22.0 | [v0.23.0](https://github.com/qualcomm/vllm-qaic/tree/v0.23.0) | Active Development | SpD and LoRaX not yet ported |
 
 ## Branches
