@@ -146,6 +146,26 @@ No additional hardware is required — both models run on the same device.
     | `draft_override_qaic_config.num_cores` | Compute for proposing (draft) | 4-6 for 1B models |
     | `max_num_seqs` | Batch size | Lower batch = higher acceptance rate |
 
+!!! tip "LD_PRELOAD libiomp5 for CPU-bound SpD proposers (AOT mode)"
+    For AOT mode, `ngram`/`suffix` SpD proposers run on host CPU and benefit
+    from Intel OpenMP (`libiomp5.so`) runtime tuning — on both Intel **and**
+    AMD hosts. Benchmarks on an AMD EPYC host showed meaningful throughput
+    gains for CPU-bound proposers like `ngram`, with the improvement growing
+    at higher batch sizes (actual gains are workload-dependent).
+
+    ```bash
+    # install Intel OpenMP (provides libiomp5.so) into your active venv
+    pip install intel-openmp
+
+    # manually find the path
+    IOMP_PATH=$(find "$(python -c 'import sysconfig; print(sysconfig.get_paths()["data"])')" -iname "libiomp5.so" | head -1)
+
+    # add it to LD_PRELOAD
+    export LD_PRELOAD="$IOMP_PATH:$LD_PRELOAD"
+    ```
+
+    Set `VLLM_DISABLE_LD_PRELOAD_OPT=1` to opt out of this tuning.
+
 ## SpD with Disaggregated Serving
 
 SpD can be combined with disaggregated serving — proposals are generated and verified entirely on the decode node. See [Disaggregated Serving](disaggregated_serving.md#speculative-decoding-with-disaggregated-serving).
