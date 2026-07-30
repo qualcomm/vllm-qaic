@@ -24,5 +24,7 @@ if ! [ -x "$(command -v shellcheck)" ]; then
     export PATH="$PATH:$(pwd)/shellcheck-${scversion}"
 fi
 
+# SC1091: shellcheck cannot follow sourced files (e.g. `source ./utility.sh`)
+# at lint time, producing false positives; disable it repo-wide.
 find . -path ./.git -prune -o -name "*.sh" -print0 | \
-  xargs -0 sh -c "for f in \"\$@\"; do git check-ignore -q \"\$f\" || shellcheck -s bash \"\$f\"; done" --
+  xargs -0 sh -c "for f in \"\$@\"; do git check-ignore -q \"\$f\" || shellcheck -s bash --exclude=SC1091 \"\$f\"; done" --
