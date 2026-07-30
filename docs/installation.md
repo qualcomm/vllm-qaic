@@ -177,7 +177,7 @@ pip install /opt/qti-aic/integrations/torch_qaic/py312/torch_qaic-*.whl
 # 2. vllm runtime dependencies (torch excluded — already installed above)
 pip install -r requirements/vllm_dependency_pyt.txt
 
-# 2 (cont.) vllm —  build from public GitHub tag with VLLM_TARGET_DEVICE=empty
+# 2 (cont.) vllm — build from public GitHub tag with VLLM_TARGET_DEVICE=empty
 #   (no C++ compilation, no torch in wheel METADATA — uv-safe)
 VLLM_TARGET_DEVICE=empty pip install \
     --no-build-isolation --no-deps \
