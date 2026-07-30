@@ -91,13 +91,25 @@ The following hooks run automatically on `git commit`:
 
 - `ruff-check` / `ruff-format` — Python linting and formatting (also handles
   import sorting).
-- `typos` — spell checking (config in `typos.toml`).
-- `clang-format` — C/C++/CUDA formatting for `csrc/` (config in `.clang-format`).
+- `typos` — spell checking (whitelist in `[tool.typos]` of `pyproject.toml`).
+- `clang-format` — C/C++ formatting for `csrc/` (config in `.clang-format`).
+- `markdownlint-cli2` — Markdown linting and auto-fixing (config in
+  `.markdownlint.yaml`).
 - `actionlint` — GitHub Actions workflow linting.
-- `check-qualcomm-header` — verifies the Qualcomm license header on Python files.
-- `check-filenames` — rejects filenames containing spaces.
-- `mypy-local` — static type checking of `vllm_qaic` and `examples`.
+- `mypy-3.10` — static type checking on Python 3.10. The 3.11 and 3.12 jobs
+  (`mypy-3.11`, `mypy-3.12`) run only in CI (`manual` stage).
+- `shellcheck` — shell script linting.
 - `signoff-commit` — appends the DCO `Signed-off-by` trailer at commit time.
+- `check-qualcomm-header` — verifies the Qualcomm license header on Python files.
+- `check-root-lazy-imports` — enforces lazy (TYPE_CHECKING-guarded) internal
+  imports in `vllm_qaic/__init__.py`.
+- `check-filenames` — rejects filenames containing spaces.
+- `check-forbidden-imports` — bans `pickle`/`cloudpickle`, `base64`
+  (use `pybase64`), and `import re` (use `import regex as re`).
+- `validate-config` — ensures every field of a `@config` dataclass has a
+  default value and a docstring.
+- `check-boolean-context-manager` — flags `with a() and b():`, which enters
+  only one context manager.
 
 Install and enable the hooks once after cloning:
 
@@ -116,8 +128,9 @@ Some hooks only run in CI (the `manual` stage) and are skipped on commit. Run
 them explicitly when needed:
 
 ```bash
-# Markdown linting (config in .markdownlint.yaml)
-pre-commit run markdownlint --hook-stage manual --all-files
+# Type checking on other supported Python versions
+pre-commit run mypy-3.11 --hook-stage manual --all-files
+pre-commit run mypy-3.12 --hook-stage manual --all-files
 ```
 
 ## Pull Request Process
