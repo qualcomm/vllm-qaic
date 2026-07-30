@@ -813,7 +813,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 assert sampling_params is not None
                 chunk_inputs.update(sampling_params)
                 for key in ("temperatures", "top_ks", "top_ps", "min_ps", "repetition_penalties", "presence_penalties"):
-                    chunk_inputs[key] = chunk_inputs[key][i : i + 1].reshape(1, 1)
+                    chunk_inputs[key] = chunk_inputs[key][i : i + 1]
                 chunk_inputs["random_numbers"] = chunk_inputs["random_numbers"][i : i + 1]
                 chunk_inputs["last_accepted_output_tokens"] = np.zeros(
                     (self.prefill_bsz, self.prefill_seq_len), dtype=np.int64
@@ -942,11 +942,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         if self.on_device_sampling_en:
             assert sampling_params is not None
             batch_inputs.update(sampling_params)
-            for key in ("temperatures", "top_ks", "top_ps", "min_ps", "repetition_penalties", "presence_penalties"):
-                batch_inputs[key] = np.resize(batch_inputs[key], (self.decode_bsz, 1))
-            batch_inputs["random_numbers"] = np.resize(
-                batch_inputs["random_numbers"], (self.decode_bsz, self.max_top_k_ids)
-            )
             batch_inputs["next_tokens"] = self.decode_next_tokens["next_tokens"]
             batch_inputs["last_accepted_output_tokens"] = batch_inputs["input_ids"]
 

@@ -1269,16 +1269,16 @@ class QaicModelRunnerAoT(GPUModelRunner):
 
                 req_ids = self.input_batch.req_ids
                 num_reqs = self.input_batch.num_reqs
-                temperatures = np.empty((num_reqs,), dtype=np.float32)
-                top_ks = np.empty((num_reqs,), dtype=np.int32)
-                top_ps = np.empty((num_reqs,), dtype=np.float32)
-                min_ps = np.empty((num_reqs,), dtype=np.float32)
+                temperatures = np.empty((num_reqs, 1), dtype=np.float32)
+                top_ks = np.empty((num_reqs, 1), dtype=np.int32)
+                top_ps = np.empty((num_reqs, 1), dtype=np.float32)
+                min_ps = np.empty((num_reqs, 1), dtype=np.float32)
                 for slot_index, req_id in enumerate(req_ids):
                     sampling_params = self.requests[req_id].sampling_params
-                    temperatures[slot_index] = np.float32(sampling_params.temperature)
-                    top_ks[slot_index] = np.int32(sampling_params.top_k)
-                    top_ps[slot_index] = np.float32(sampling_params.top_p)
-                    min_ps[slot_index] = np.float32(sampling_params.min_p)
+                    temperatures[slot_index, 0] = np.float32(sampling_params.temperature)
+                    top_ks[slot_index, 0] = np.int32(sampling_params.top_k)
+                    top_ps[slot_index, 0] = np.float32(sampling_params.top_p)
+                    min_ps[slot_index, 0] = np.float32(sampling_params.min_p)
 
                 top_ks = np.where(top_ks <= 0, self.model.max_top_k_ids, top_ks)
                 top_ks = np.minimum(top_ks, self.model.max_top_k_ids).astype(
@@ -1286,20 +1286,22 @@ class QaicModelRunnerAoT(GPUModelRunner):
                     copy=False,
                 )
                 if sampling_metadata.no_penalties:
-                    repetition_penalties = np.full((num_reqs,), 1.0, dtype=np.float32)
-                    presence_penalties = np.full((num_reqs,), 0.0, dtype=np.float32)
+                    repetition_penalties = np.full((num_reqs, 1), 1.0, dtype=np.float32)
+                    presence_penalties = np.full((num_reqs, 1), 0.0, dtype=np.float32)
                 else:
                     repetition_penalties = (
                         sampling_metadata.repetition_penalties.detach()
                         .cpu()
                         .numpy()
                         .astype(np.float32, copy=True)
+                        .reshape(num_reqs, 1)
                     )
                     presence_penalties = (
                         sampling_metadata.presence_penalties.detach()
                         .cpu()
                         .numpy()
                         .astype(np.float32, copy=True)
+                        .reshape(num_reqs, 1)
                     )
                 random_numbers = np.empty(
                     (num_reqs, self.model.max_top_k_ids),
@@ -1334,10 +1336,17 @@ class QaicModelRunnerAoT(GPUModelRunner):
                     "presence_penalties": presence_penalties,
                     "random_numbers": random_numbers,
                 }
-                sampling_params_decode = {
-                    key: values[: self.num_decodes]
-                    for key, values in all_sampling_params.items()
-                }
+                if self.num_decodes:
+                    sampling_params_decode = {
+                        key: np.resize(
+                            values[: self.num_decodes],
+                            (
+                                self.model.decode_bsz,
+                                self.model.max_top_k_ids if key == "random_numbers" else 1,
+                            ),
+                        )
+                        for key, values in all_sampling_params.items()
+                    }
                 sampling_params_prefill = {
                     key: values[self.num_decodes : num_reqs]
                     for key, values in all_sampling_params.items()
@@ -1764,27 +1773,27 @@ class QaicModelRunnerAoT(GPUModelRunner):
         if self.model.on_device_sampling_en:
             decode_sampling_params: dict[str, np.ndarray] = {
                 "temperatures": np.ones(
-                    (decode_bsz,),
+                    (decode_bsz, 1),
                     dtype=np.float32,
                 ),
                 "top_ks": np.ones(
-                    (decode_bsz,),
+                    (decode_bsz, 1),
                     dtype=np.int32,
                 ),
                 "top_ps": np.zeros(
-                    (decode_bsz,),
+                    (decode_bsz, 1),
                     dtype=np.float32,
                 ),
                 "min_ps": np.zeros(
-                    (decode_bsz,),
+                    (decode_bsz, 1),
                     dtype=np.float32,
                 ),
                 "repetition_penalties": np.zeros(
-                    (decode_bsz,),
+                    (decode_bsz, 1),
                     dtype=np.float32,
                 ),
                 "presence_penalties": np.zeros(
-                    (decode_bsz,),
+                    (decode_bsz, 1),
                     dtype=np.float32,
                 ),
                 "random_numbers": np.random.default_rng(0)
@@ -1832,27 +1841,27 @@ class QaicModelRunnerAoT(GPUModelRunner):
         if self.model.on_device_sampling_en:
             prefill_sampling_params: dict[str, np.ndarray] = {
                 "temperatures": np.ones(
-                    (prefill_bsz,),
+                    (prefill_bsz, 1),
                     dtype=np.float32,
                 ),
                 "top_ks": np.ones(
-                    (prefill_bsz,),
+                    (prefill_bsz, 1),
                     dtype=np.int32,
                 ),
                 "top_ps": np.zeros(
-                    (prefill_bsz,),
+                    (prefill_bsz, 1),
                     dtype=np.float32,
                 ),
                 "min_ps": np.zeros(
-                    (prefill_bsz,),
+                    (prefill_bsz, 1),
                     dtype=np.float32,
                 ),
                 "repetition_penalties": np.zeros(
-                    (prefill_bsz,),
+                    (prefill_bsz, 1),
                     dtype=np.float32,
                 ),
                 "presence_penalties": np.zeros(
-                    (prefill_bsz,),
+                    (prefill_bsz, 1),
                     dtype=np.float32,
                 ),
                 "random_numbers": np.random.default_rng(0)
