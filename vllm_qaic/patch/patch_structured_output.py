@@ -1,7 +1,11 @@
-# ---------------------------------------------------------------------------------------
-# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries. All rights reserved.
-# Confidential and Proprietary - Qualcomm Technologies, Inc. and/or its subsidiaries.
-# ---------------------------------------------------------------------------------------
+# ------------------------------------------------------------------
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause-Clear
+# ------------------------------------------------------------------
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-License-Identifier: Apache-2.0
+# Adapted from vllm/vllm/v1/structured_output/utils.py
+
 """Monkey-patch for vllm.v1.structured_output.utils.apply_grammar_bitmask.
 
 QAIC (PyT mode) is a non-CUDA device, so the upstream implementation fails
