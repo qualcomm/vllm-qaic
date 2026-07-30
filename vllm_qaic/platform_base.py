@@ -460,20 +460,6 @@ class QaicPlatform(Platform):
                     vllm_config, model_config, scheduler_config, model_type
                 )
 
-        if cls.is_aot and scheduler_config.async_scheduling:
-            logger.warning(
-                "QAIC currently does not support async scheduling; "
-                "Falling back to non-async scheduling."
-            )
-            scheduler_config.async_scheduling = False
-
-        if cls.is_aot and scheduler_config.async_scheduling:
-            logger.warning(
-                "QAIC currently does not support async scheduling; "
-                "Falling back to non-async scheduling."
-            )
-            scheduler_config.async_scheduling = False
-
     @classmethod
     def is_pin_memory_available(cls) -> bool:
         logger.warning("Pin memory is not supported on Qaic.")
