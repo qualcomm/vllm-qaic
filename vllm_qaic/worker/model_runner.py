@@ -1358,7 +1358,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
                     lora_ids=prefill_lora_ids,
                     num_prompt_tokens_prefill=num_prompt_tokens_prefill,
                     sampling_params=sampling_params_prefill,
-                    ods_output_offset=self.num_decodes,
+                    prefill_output_offset=self.num_decodes,
                 )
 
             if decode_input_ids.size > 0:
