@@ -935,13 +935,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     pending_exec_count += 1
                     pending_exec_queue.put(exec_obj_idx)
 
-            if (
-                self.config.model_type == "whisper"
-                and mm_kwargs_list
-                and (mm_kwargs := mm_kwargs_list[i])
-            ):
-                for k, v in mm_kwargs.items():
-                    self.decode_batch_inputs[k][i] = v[0]
             if self.on_device_sampling_en:
                 self.decode_next_tokens.setdefault("_prefill_sources", []).append(
                     (ods_output_offset + i, chunk_inputs["next_tokens"])
