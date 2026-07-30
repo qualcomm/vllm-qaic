@@ -612,6 +612,23 @@ class QaicWorkerPyt(QaicWorker):
 
 
 class QaicWorkerAoT(QaicWorker):
+    def _expected_num_gpu_blocks(self) -> int:
+        """Number of vLLM KV-cache blocks this role needs.
+        With NixlConnector, for PRefill we allocate 
+        2*max_num_seqs+1 physical slots in DRAM while for
+        Deocde the slots remain max_num_seqs+1
+        """
+        if self.cache_config.num_gpu_blocks_override:
+            return self.cache_config.num_gpu_blocks_override + 1
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        if (
+            kv_transfer_config is not None
+            and kv_transfer_config.kv_connector == "NixlConnector"
+            and kv_transfer_config.kv_role == "kv_producer"
+        ):
+            return 2 * self.scheduler_config.max_num_seqs + 1
+        return self.scheduler_config.max_num_seqs + 1
+
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_cpu_blocks = num_cpu_blocks
         # disable sliding window
@@ -621,15 +638,7 @@ class QaicWorkerAoT(QaicWorker):
         if not self.cache_config.enable_prefix_caching:
             self.cache_config.num_gpu_blocks = num_gpu_blocks
             # Sanity check: AOT requires exact block count; eager is flexible
-            if self.cache_config.num_gpu_blocks_override:
-                expected_num_gpu_blocks = self.cache_config.num_gpu_blocks_override + 1
-            elif (
-                self.vllm_config.kv_transfer_config is not None
-                and self.vllm_config.kv_transfer_config.kv_connector == "NixlConnector"
-            ):
-                expected_num_gpu_blocks = 2 * self.scheduler_config.max_num_seqs + 1
-            else:
-                expected_num_gpu_blocks = self.scheduler_config.max_num_seqs + 1
+            expected_num_gpu_blocks = self._expected_num_gpu_blocks()
             assert num_gpu_blocks == expected_num_gpu_blocks
             return
         else:
@@ -693,18 +702,7 @@ class QaicWorkerAoT(QaicWorker):
         pass
 
     def determine_available_memory(self) -> int:
-        if self.cache_config.num_gpu_blocks_override:
-            num_gpu_blocks = self.cache_config.num_gpu_blocks_override + 1
-        elif (
-            self.vllm_config.kv_transfer_config is not None
-            and self.vllm_config.kv_transfer_config.kv_connector == "NixlConnector"
-        ):
-            # Keep one active set plus a spare pool for in-flight NIXL sends.
-            # QAIC execution slots stay compact; MemoryPool maps each request
-            # to one of these physical slots.
-            num_gpu_blocks = 2 * self.scheduler_config.max_num_seqs + 1
-        else:
-            num_gpu_blocks = self.scheduler_config.max_num_seqs + 1
+        num_gpu_blocks = self._expected_num_gpu_blocks()
         # adapted from get_uniform_page_size
         page_sizes = set(
             layer.page_size_bytes for layer in self.get_kv_cache_spec().values()

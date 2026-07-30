@@ -17,36 +17,25 @@ from dataclasses import dataclass
 from queue import Queue
 from threading import Event
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
-from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 import numpy as np
 import torch
 import torch.distributed as dist
 from torch import nn
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
-from vllm.config import (
-    VllmConfig,
-    get_layers_from_vllm_config,
-    set_current_vllm_config,
-)
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm_qaic.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, SupportedTask
 from vllm.utils.func_utils import supports_kw
-from vllm.utils.func_utils import supports_kw
 from vllm.utils.import_utils import PlaceholderModule
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheSpec,
-    MambaSpec,
-)
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheSpec, MambaSpec
+
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
     AsyncModelRunnerOutput,
@@ -1022,12 +1011,48 @@ class QaicModelRunnerAoT(GPUModelRunner):
         if (num_decodes is not None and num_decodes > 0) or self.is_kv_consumer:
             self.model.complete_inf(self.model.decode_execObj_idx, False)  # type: ignore
 
+    def kv_connector_no_forward(
+        self, scheduler_output: SchedulerOutput, vllm_config: VllmConfig
+    ) -> ModelRunnerOutput:
+        """Override of KVConnectorModelRunnerMixin.kv_connector_no_forward.
+
+        The base mixin implementation is a @staticmethod that hardcodes a
+        call to *its own* ``KVConnectorModelRunnerMixin._get_kv_connector_output``
+        (not ours), bypassing self.prefill_bank entirely. On engine steps with
+        no scheduled work (idle steps between requests), this is the only
+        code path that discovers NIXL "finished_sending" completions for a
+        kv_producer -- if we don't route that result into
+        ``self.prefill_bank.mark_finished()`` here, the completion signal is
+        drained from the connector but never reflected in QaicPrefillBank,
+        so ``busy[physical_block]`` never clears and a later reserve() for
+        that same physical block hangs until QAIC_PREFILL_MEMPOOL_WAIT_TIMEOUT_S
+        and then hard-crashes the engine.
+        """
+        with (
+            set_forward_context(None, vllm_config),
+            self.maybe_get_kv_connector_output(
+                scheduler_output, wait_for_save=False
+            ) as kv_connector_output,
+        ):
+            pass
+
+        if self.prefill_bank is not None and kv_connector_output is not None:
+            self._merge_pending_finished_sending(kv_connector_output)
+            self.prefill_bank.mark_finished(kv_connector_output.finished_sending or ())
+
+        return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
+
     def _reserve_prefill_bank(
         self,
         physical_block_ids: np.ndarray,
         req_ids: list[str],
     ) -> None:
-        if self.prefill_bank is None or physical_block_ids.size == 0:
+        # The KV-cache-buffer remap below is needed for both kv_producer and
+        # kv_consumer under NixlConnector (both cycle through the double-
+        # buffered `2*max_num_seqs+1` block pool -- see worker.py). Only
+        # kv_producer additionally needs to wait via QaicPrefillBank
+        # (self.prefill_bank is None for kv_consumer; see _uses_prefill_bank).
+        if self._kv_connector_name != "NixlConnector" or physical_block_ids.size == 0:
             return
         if len(req_ids) != physical_block_ids.size:
             raise RuntimeError(
@@ -1038,9 +1063,10 @@ class QaicModelRunnerAoT(GPUModelRunner):
             zip(physical_block_ids, req_ids, strict=True)
         ):
             physical_block = int(physical_block_id) + 1
-            self.prefill_bank.reserve(
-                physical_block, req_id, self._drain_prefill_bank
-            )
+            if self.prefill_bank is not None:
+                self.prefill_bank.reserve(
+                    physical_block, req_id, self._drain_prefill_bank
+                )
             self.kv_caches[qpc_slot] = self._kv_caches_by_physical_block[
                 physical_block
             ]
@@ -1266,7 +1292,24 @@ class QaicModelRunnerAoT(GPUModelRunner):
             decode_block_ids: np.ndarray = (
                 self.batch_indices[: self.num_decodes]
                 if not self.is_kv_consumer
-                else self.batch_indices[:num_scheduled_tokens]
+                # `self.batch_indices` is vLLM's KV-cache *block id* (minus 1),
+                # used elsewhere to select which of the num_gpu_blocks Python
+                # buffers to bind. For kv_consumer, num_gpu_blocks is
+                # deliberately 2*max_num_seqs+1 (double-buffered against async
+                # NIXL sends -- see QaicPrefillBank), so this value cycles
+                # through a wider range than `full_batch_size`. But the QAIC
+                # hardware's own internal per-sequence batch slot (what
+                # `batch_indices` means to `self.model(..., is_prompt=False)`)
+                # is bounded by `full_batch_size`, and _kv_handoff() always
+                # writes the freshly-received remote KV into sequential
+                # slots via `np.arange(len(prefill_req_ids))` -- NOT the raw
+                # KV-cache block id. Reusing the raw block id here as the
+                # hardware slot selector is a mismatch: whenever a request's
+                # block id happens to exceed `full_batch_size - 1`, decode
+                # addresses a QAIC hardware slot that was never populated by
+                # the handoff, reading stale/uninitialized data -> garbage.
+                # Use the same sequential-position scheme as the handoff.
+                else np.arange(num_scheduled_tokens, dtype=self.batch_indices.dtype)
             )
 
             if self.max_decode_tokens > 1:
@@ -1901,10 +1944,17 @@ class QaicModelRunnerAoT(GPUModelRunner):
         return tuple(tasks)
 
     def _uses_torch_view_kv_connector(self) -> bool:
-        return self._kv_connector_name in ("NixlConnector", "MooncakeConnector")
+        return self._kv_connector_name in ("NixlConnector", "MooncakeConnector", "LMCacheConnectorV1")
 
     def _uses_prefill_bank(self) -> bool:
-        return self._kv_connector_name == "NixlConnector"
+        # QaicPrefillBank guards a physical block against being overwritten
+        # by a new QAIC prefill before NIXL has finished SENDING that
+        # block's previous contents to a remote reader -- this only applies
+        # to the kv_producer side. A kv_consumer (decode) never sends KV
+        # data anywhere in this topology, so it has nothing to wait for;
+        # the KV-cache-buffer remap it still needs is handled directly in
+        # _reserve_prefill_bank without requiring a QaicPrefillBank instance.
+        return self._kv_connector_name == "NixlConnector" and self.is_kv_producer
 
     @staticmethod
     def _parse_kv_layer_idx(layer_name: str) -> int:
@@ -1996,20 +2046,6 @@ class QaicModelRunnerAoT(GPUModelRunner):
             recurrent_binding_names,
         ) = self._collect_qpc_kv_binding_info()
 
-        mamba_layer_specs = {
-            layer_name: kv_cache_group.kv_cache_spec
-            for kv_cache_group in kv_cache_config.kv_cache_groups
-            if isinstance(kv_cache_group.kv_cache_spec, MambaSpec)
-            for layer_name in kv_cache_group.layer_names
-        }
-        print("Mamba Layer Specs: ", mamba_layer_specs)
-        mamba_layer_names = set(mamba_layer_specs)
-        print("mamba Layer Names: ",mamba_layer_names)
-        mamba_layer_indices = {
-            self._parse_kv_layer_idx(layer_name): layer_name
-            for layer_name in mamba_layer_names
-        }
-        print("Mamba Layer Indices: ", mamba_layer_indices)
         # Allocate connector-visible torch tensors, one per parsed layer index.
         dtype_size = (
             torch.tensor([], dtype=torch_dtype).element_size()
@@ -2024,64 +2060,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
 
         # Mamba/linear-attention layers: conv_state is always 3D, recurrent_state
         # is always 4D (QPC-guaranteed), so no dimension checks are needed.
-        for layer_idx, layer_name in mamba_layer_indices.items():
-            state_names = recurrent_binding_names[layer_idx]
-            conv_name = state_names["conv"]
-            recurrent_name = state_names["recurrent"]
-            conv_shape, conv_np_dtype, _ = self.model.get_io_shape_and_dtype(conv_name)
-            recurrent_shape, recurrent_np_dtype, _ = self.model.get_io_shape_and_dtype(
-                recurrent_name
-            )
-            conv_shape = tuple(conv_shape)
-            recurrent_shape = tuple(recurrent_shape)
-
-            conv_dtype = torch.from_numpy(np.empty(0, dtype=conv_np_dtype)).dtype
-            recurrent_dtype = torch.from_numpy(
-                np.empty(0, dtype=recurrent_np_dtype)
-            ).dtype
-            mamba_spec = mamba_layer_specs[layer_name]
-            raw_tensor = torch.empty(
-                num_blocks * mamba_spec.page_size_bytes, dtype=torch.int8
-            )
-
-            conv_shape_per_block = conv_shape[1:]
-            recurrent_shape_per_block = recurrent_shape[1:]
-            conv_dtype_size = torch.tensor([], dtype=conv_dtype).element_size()
-            recurrent_dtype_size = torch.tensor(
-                [], dtype=recurrent_dtype
-            ).element_size()
-            conv_state_bytes = int(np.prod(conv_shape_per_block)) * conv_dtype_size
-
-            conv_target_shape = (num_blocks, *conv_shape_per_block)
-            recurrent_target_shape = (num_blocks, *recurrent_shape_per_block)
-            conv_stride = torch.empty(conv_target_shape).stride()
-            recurrent_stride = torch.empty(recurrent_target_shape).stride()
-            conv_tensor = torch.as_strided(
-                raw_tensor.view(conv_dtype),
-                size=conv_target_shape,
-                stride=(
-                    mamba_spec.page_size_bytes // conv_dtype_size,
-                    *conv_stride[1:],
-                ),
-            )
-            recurrent_tensor = torch.as_strided(
-                raw_tensor.view(recurrent_dtype),
-                size=recurrent_target_shape,
-                stride=(
-                    mamba_spec.page_size_bytes // recurrent_dtype_size,
-                    *recurrent_stride[1:],
-                ),
-                storage_offset=conv_state_bytes // recurrent_dtype_size,
-            )
-            recurrent_layer_tensors[layer_idx] = {
-                "conv": conv_tensor,
-                "recurrent": recurrent_tensor,
-            }
-            recurrent_qpc_shapes[conv_name] = conv_shape
-            recurrent_qpc_shapes[recurrent_name] = recurrent_shape
-            kv_cache_layers[layer_name] = [conv_tensor, recurrent_tensor]
-            has_registered_layer = True
-
+        
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
             if dtype_size is None:
                 continue
@@ -2089,8 +2068,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
             flat_kv_payload = kv_cache_tensor.size // dtype_size // num_blocks // 2
 
             for layer_name in kv_cache_tensor.shared_by:
-                if layer_name in mamba_layer_names:
-                    continue
+                
                 layer_idx = self._parse_kv_layer_idx(layer_name)
                 if layer_idx not in layer_tensors:
                     layer_tensors[layer_idx] = torch.empty(
@@ -2186,6 +2164,8 @@ class QaicModelRunnerAoT(GPUModelRunner):
             KVCacheSpec: A dictionary mapping layer names to their KV cache
             format. Layers that do not need KV cache are not included.
         """
+        block_size = self.cache_config.block_size
+        kv_cache_spec: dict[str, KVCacheSpec] = {}
         n_layers = self.model_config.get_num_layers(self.parallel_config)
         for i in range(n_layers):
             layer_name = f"layer_{i}"
