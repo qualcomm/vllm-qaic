@@ -29,8 +29,15 @@ In general, contributors should develop on branches based off of `main` and pull
     git remote add upstream https://github.com/qualcomm/vllm-qaic.git
     ```
 
+1. Install and enable the pre-commit hooks (formatting, lint, license headers, and DCO sign-off):
+
+    ```bash
+    pip install -r requirements/lint.txt
+    pre-commit install
+    ```
+
 1. Make your changes, add tests, and make sure the tests still pass.
-1. Commit your changes using the [DCO](https://developercertificate.org/). You can attest to the DCO by commiting with the **-s** or **--signoff** options or manually adding the "Signed-off-by":
+1. Commit your changes using the [DCO](https://developercertificate.org/). You can attest to the DCO by committing with the **-s** or **--signoff** options or manually adding the "Signed-off-by":
 
     ```bash
     git commit -s -m "Really useful commit message"`
@@ -64,7 +71,6 @@ To maintain the security and integrity of this project, all pull requests from e
 **Continuous Improvement:** Our Semgrep ruleset evolves over time to reflect best practices and emerging security concerns.
 
 By submitting a PR, you agree to participate in this process and help us keep the project secure for everyone.
-
 
 Here are a few things you can do that will increase the likelihood of your pull request to be accepted:
 
