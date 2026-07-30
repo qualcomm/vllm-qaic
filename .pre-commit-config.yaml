@@ -21,7 +21,7 @@ repos:
   rev: v21.1.2
   hooks:
   - id: clang-format
-    types_or: [c++, c]
+    types_or: [c++]
     args: [--style=file, --verbose]
 - repo: https://github.com/igorshubovych/markdownlint-cli
   rev: v0.45.0
