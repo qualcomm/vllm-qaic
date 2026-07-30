@@ -4,7 +4,7 @@ default_install_hook_types:
 default_stages:
   - pre-commit # Run locally
   - manual # Run in CI
-exclude: '^(build|examples)/.*'
+exclude: 'build/.*'
 repos:
 - repo: https://github.com/astral-sh/ruff-pre-commit
   rev: v0.14.0
@@ -13,10 +13,10 @@ repos:
     args: [--output-format, github, --fix]
   - id: ruff-format
 - repo: https://github.com/crate-ci/typos
-  rev: v1.38.1
+  rev: v1.43.5
   hooks:
   - id: typos
-    args: [--config, typos.toml, --force-exclude]
+    args: [--force-exclude]
 - repo: https://github.com/pre-commit/mirrors-clang-format
   rev: v21.1.2
   hooks:
@@ -34,11 +34,13 @@ repos:
   - id: actionlint
 - repo: local
   hooks:
-  - id: check-qualcomm-header
-    name: Check Qualcomm headers
-    entry: python tools/pre_commit/check_qualcomm_header.py
+  - id: mypy-local
+    name: Run mypy for local Python installation
+    entry: tools/mypy.sh 0 "3.10"
     language: python
     types: [python]
+    additional_dependencies: [mypy==1.11.1, types-PyYAML, types-regex, types-requests, types-setuptools]
+    stages: [pre-commit] # Run locally on every commit
   - id: signoff-commit
     name: Sign-off Commit
     entry: bash
@@ -51,6 +53,11 @@ repos:
     language: system
     verbose: true
     stages: [commit-msg]
+  - id: check-qualcomm-header
+    name: Check Qualcomm headers
+    entry: python tools/pre_commit/check_qualcomm_header.py
+    language: python
+    types: [python]
   - id: check-filenames
     name: Check for spaces in all filenames
     entry: bash
@@ -60,10 +67,3 @@ repos:
     language: system
     always_run: true
     pass_filenames: false
-  - id: mypy-local
-    name: Run mypy for local Python installation
-    entry: tools/mypy.sh 0 "3.10"
-    language: python
-    types: [python]
-    additional_dependencies: [mypy==1.11.1, types-PyYAML, types-regex, types-requests, types-setuptools]
-    stages: [pre-commit] # Run locally on every commit
