@@ -158,11 +158,7 @@ class QAICInferenceSession:
         self.activate_done = False
         if activate:
             self.activate()
-        # Create input qbuffers and buf_dims
-        self.qbuffers = [
-            [qaicrt.QBuffer(bytes(binding.size)) for binding in self.bindings]
-            for _ in range(self.queue_len)
-        ]
+        # Create buf_dims
         self.buf_dims = [
             qaicrt.BufferDimensionsVecRef(
                 [
@@ -247,16 +243,6 @@ class QAICInferenceSession:
         for name in self.output_names:
             if name.startswith("log"):
                 self.prefill_buff_map.append((name, self.binding_index_map[name]))
-
-        for y in range(self.queue_len):
-            self.skip_buffers(
-                [x for x in self.input_names if self._is_kv_cache_name(x)],
-                y,
-            )
-            self.skip_buffers(
-                [x for x in self.output_names if x.endswith("_RetainedState")],
-                y,
-            )
 
     def _is_kv_cache_name(self, name: str) -> bool:
         if self.use_legacy_slicing_spec:
@@ -438,42 +424,6 @@ class QAICInferenceSession:
         if self.activate_done:
             self.program.deactivate()
             self.activate_done = False
-
-    def set_buffers(self, buffers: dict[str, np.ndarray], index: int = 0):
-        for buffer_name, buffer in buffers.items():
-            if buffer_name not in self.binding_index_map:
-                logger.warning("Buffer: %s not found", buffer_name)
-                continue
-            buffer_index: int = self.binding_index_map[buffer_name]
-            contiguous = np.ascontiguousarray(buffer)
-            if contiguous is not buffer:
-                logger.warning(
-                    "Non-contingous buffer used while set_buffers."
-                    " Copying data to a continguous buffer."
-                )
-                buffers[buffer_name] = contiguous
-            buffer = contiguous
-            self.qbuffers[index][buffer_index] = qaicrt.QBuffer(buffer)
-            self.buf_dims[index][buffer_index] = (
-                buffer.itemsize,
-                buffer.shape if len(buffer.shape) > 0 else (1,),
-            )
-
-    def unskip_buffers(self, skipped_buffer_names: list[str], index: int = 0) -> None:
-        if not skipped_buffer_names:
-            return
-        bindings: list[aicapi.IoBinding] = self.get_bindings(skipped_buffer_names)
-        buffers: dict[str, np.ndarray] = dict()
-        for binding in bindings:
-            aic_dtype: int = binding.type
-            np_dtype: np.dtype = aic_to_np_dtype_mapping[aic_dtype]
-            dims: list[int] = binding.dims
-            arr = np.zeros(dims, dtype=np_dtype)
-            buffers[binding.name] = arr
-        self.set_buffers(buffers, index)
-
-    def skip_buffers(self, skipped_buffer_names: list[str], index: int = 0):
-        self.set_buffers({k: np.array([]) for k in skipped_buffer_names}, index)
 
     def get_tuple_list_from_dict(self, dict_in):
         # Convert the buffer_dict to a list of tuples

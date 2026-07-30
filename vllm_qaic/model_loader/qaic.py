@@ -412,7 +412,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 self.logits_dtype
             )
         )
-        self.session.set_buffers(self.prefill_logits)
         self.batch_prefill_logits = np.empty(
             (self.decode_bsz, self.vocab_size), dtype=self.logits_dtype
         )
@@ -468,7 +467,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             self.prefill_num_logits_buffer = dict(
                 num_logits_to_keep=np.zeros((1, 1), np.int64)
             )
-            self.session.set_buffers(self.prefill_num_logits_buffer)
         else:
             self.decode_logits = dict(
                 logits=np.random.randn(self.decode_bsz, 1, self.vocab_size).astype(
@@ -1042,7 +1040,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             or encode_num_logits_buffer[output_key].shape
             != self.encode_num_logits_buffer[output_key].shape
         ):
-            self.session.set_buffers(encode_num_logits_buffer)
             self.encode_num_logits_buffer = encode_num_logits_buffer
 
         encode_exec_obj_idx = self.session.np_run(
