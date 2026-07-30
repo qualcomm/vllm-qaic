@@ -12,7 +12,6 @@ vLLM Qualcomm Cloud AI (QAIC) Plugin
 > This is not a stable release.
 >
 > **Features not yet ported:**
-> - Speculative Decoding (SpD)
 > - LoRaX adapter serving
 >
 > For production use, please switch to the `main` branch or `release/v0.15.0`.
