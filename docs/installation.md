@@ -165,16 +165,11 @@ pip install /opt/qti-aic/integrations/torch_qaic/py312/torch_qaic-*.whl
 # 2. vllm runtime dependencies (torch excluded — already installed above)
 pip install -r requirements/vllm_dependency_pyt.txt
 
-# 2 (cont.) vllm — choose based on VLLM_TARGET_DEVICE_PYT:
-
-# Option A (default): install vllm-cpu from PyPI — no C++ compilation needed
-pip install --no-deps "vllm-cpu==0.15.0"
-
-# Option B: build from public GitHub tag with VLLM_TARGET_DEVICE=empty
+# 2 (cont.) vllm — build from public GitHub tag with VLLM_TARGET_DEVICE=empty
 #   (no C++ compilation, no torch in wheel METADATA — uv-safe)
-# VLLM_TARGET_DEVICE=empty pip install \
-#     --no-build-isolation --no-deps \
-#     "vllm @ git+https://github.com/vllm-project/vllm.git@v0.15.0"
+VLLM_TARGET_DEVICE=empty pip install \
+    --no-build-isolation --no-deps \
+    "vllm @ git+https://github.com/vllm-project/vllm.git@v0.15.0"
 
 # 3. vllm-qaic from source
 pip install --no-build-isolation ./vllm-qaic
@@ -275,7 +270,7 @@ All version constants are defined in [`scripts/utility.sh`](../scripts/utility.s
 | `QEFF_BRANCH` | `main` | QEfficient branch/tag |
 | `TORCH_QAIC_VERSION` | `0.1.0` | torch_qaic wheel version |
 | `VLLM_TARGET_DEVICE_AOT` | `empty` | vLLM build target for AOT mode |
-| `VLLM_TARGET_DEVICE_PYT` | `cpu` | vLLM build target for PYT mode |
+| `VLLM_TARGET_DEVICE_PYT` | `empty` | vLLM build target for PYT mode |
 | `TRITON_CPU` | `0` | Set to `1` to enable triton-cpu backend (AOT SpD) |
 | `TRITON_CPU_COMMIT` | `e60f448f...` | Pinned triton-cpu commit hash |
 | `TRITON_CPU_SRC` | `$HOME/triton-cpu` | Clone destination for triton-cpu source |

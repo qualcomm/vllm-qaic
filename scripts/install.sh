@@ -178,17 +178,11 @@ elif [ "${MODE}" = "pyt" ]; then
 
     echo "=== Step 2: vllm deps + vllm (VLLM_TARGET_DEVICE=${VLLM_TARGET_DEVICE_PYT}) ==="
     ${PIP} install -r "${SCRIPT_DIR}/../requirements/vllm_dependency_pyt.txt"
-    if [ "${VLLM_TARGET_DEVICE_PYT}" = "cpu" ]; then
-        # PyPI vllm-cpu wheel: no C++ compilation, no CUDA deps.
-        # QAIC functionality comes from torch_qaic (Step 1b) loaded as a vllm platform plugin.
-        ${PIP} install --no-deps "vllm-cpu==${VLLM_VERSION}"
-    else
-        # VLLM_TARGET_DEVICE=empty: build from public GitHub tag, avoids C++ compilation
-        # and produces no torch Requires-Dist in METADATA so uv will not upgrade torch.
-        VLLM_TARGET_DEVICE=empty ${PIP} install \
-            --no-build-isolation --no-deps \
-            "vllm @ git+https://github.com/vllm-project/vllm.git@v${VLLM_VERSION}"
-    fi
+    # VLLM_TARGET_DEVICE=empty: build from public GitHub tag, avoids C++ compilation
+    # and produces no torch Requires-Dist in METADATA so uv will not upgrade torch.
+    VLLM_TARGET_DEVICE=${VLLM_TARGET_DEVICE_PYT} ${PIP} install \
+        --no-build-isolation --no-deps \
+        "vllm @ git+https://github.com/vllm-project/vllm.git@v${VLLM_VERSION}"
 
     echo "=== Step 3: vllm-qaic-pyt ==="
     if [ "${INSTALL_SOURCE}" = "source" ]; then
