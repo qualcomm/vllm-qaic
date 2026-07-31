@@ -7,6 +7,7 @@
 # Adapted from vllm/examples/offline_inference/basic/embed.py
 
 from vllm import LLM
+from vllm.config import PoolerConfig
 
 # Set example specific arguments
 # For cpu pooling pass 'override_qaic_config={"pooling_device":"cpu"}' and for qaic pooling an example would be: 'override_qaic_config={"pooling_device":"qaic", "pooling_method":"mean"}'
@@ -38,6 +39,7 @@ def main():
         enforce_eager=True,
         max_num_seqs=4,
         max_model_len=256,
+        pooler_config=PoolerConfig(task="embed"),
         additional_config={
             "device_group": [0],
             "override_qaic_config": {
@@ -59,6 +61,7 @@ def main():
         enforce_eager=True,
         max_num_seqs=4,
         max_model_len=256,
+        pooler_config=PoolerConfig(task="embed"),
         additional_config={
             "device_group": [0],
             "override_qaic_config": {

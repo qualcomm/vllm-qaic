@@ -678,10 +678,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
         num_scheduled_tokens_np: np.ndarray,
         kv_connector_output: KVConnectorOutput | None,
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
-        if not self.model.is_qaic_pooler and self.model.task not in (
-            "score",
-            "classify",
-        ):  # for CPU based embed pooling, use GPU model runner's _pool
+        if not self.model.is_qaic_pooler and self.model.task != "classify":  # for CPU based embed pooling, use GPU model runner's _pool
             # Force synchronous path: AsyncGPUPoolingModelRunnerOutput requires
             # CUDA streams which are not available on QAIC hardware.  The QAIC
             # async scheduling for pooling is handled at a higher level by
@@ -700,14 +697,14 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 self.use_async_scheduling = orig_async
             return result
 
-        # For QAIC based pooler OR score/classify tasks (CPU or QAIC),
+        # For QAIC based pooler OR classify task (CPU or QAIC),
         # model outputs are already pooled — wrap directly in ModelRunnerOutput.
         num_reqs_qaicpooler = self.input_batch.num_reqs
         assert num_reqs_qaicpooler == len(self.input_batch.pooling_params), (
             "Either all or none of the requests in a batch must be pooling request"
         )
         hidden_states_qaicpooler = hidden_states[:num_reqs_qaicpooler]
-        seq_lens_qaicpooler = self.seq_lens.cpu[:num_reqs_qaicpooler]
+        seq_lens_qaicpooler = self.optimistic_seq_lens_cpu[:num_reqs_qaicpooler]
 
         pooling_metadata_qaicpooler = self.input_batch.get_pooling_metadata()
         pooling_metadata_qaicpooler.build_pooling_cursor(
