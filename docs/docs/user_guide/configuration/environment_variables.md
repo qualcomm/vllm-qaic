@@ -12,6 +12,7 @@ QAIC-specific environment variables that control plugin behavior.
 | `VLLM_QAIC_MOS` | int | None | MOS (Memory Operating State) setting for the device |
 | `VLLM_QAIC_NUM_CORES` | int | None | Number of NSP cores to allocate per device (overrides `additional_config`) |
 | `VLLM_QAIC_QPC_PATH` | str | None | Path to a pre-compiled QPC directory (skips compilation) |
+| `VLLM_DISABLE_LD_PRELOAD_OPT` | bool | `0` | Set to `1` to skip the automatic `KMP_*` OpenMP tuning applied when `libiomp5.so` is on `LD_PRELOAD` (AOT mode, CPU-bound SpD proposers) |
 | `VLLM_TORCH_QAIC_BASE_PATH` | str | `/opt/qti-aic/integrations/torch_qaic` | Base path for torch_qaic wheels (PYT mode) |
 
 ## Standard Variables (QAIC-Relevant)
@@ -23,6 +24,7 @@ QAIC-specific environment variables that control plugin behavior.
 | `QAIC_DEVICE_LOG_LEVEL` | Device-level log verbosity |
 | `QAIC_DEBUG` | Enable QAIC debug logging (`0` or `1`) |
 | `VLLM_TORCH_PROFILER_DIR` | Output directory for profiling data. Enables `torch_qaic.profile.ProfileForwardWithSampling` device-level latency tracing in the QAIC model runner. |
+| `LD_PRELOAD` | If set to include `libiomp5.so`, triggers automatic OpenMP tuning for CPU-bound SpD proposers in AOT mode — see [Speculative Decoding](../features/speculative_decoding.md) |
 
 ## Usage Examples
 
