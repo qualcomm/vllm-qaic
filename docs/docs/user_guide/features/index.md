@@ -26,7 +26,7 @@ Status of vLLM features on Qualcomm Cloud AI hardware.
 | Suffix | ✅ | ❌ | |
 | Draft model | ✅ | ❌ | Separate DLM on same device |
 | **Sampling** | | | |
-| On-device sampling | ✅ | ❌ | `aic_return_pdfs` is currently not supported |
+| On-device sampling | ✅ | ❌ | |
 | **Advanced Features** | | | |
 | LoRA adapters | ✅ | ❌ | Hot-swap adapters |
 | Disaggregated serving | ✅ | ❌ | xEyPzD prefill/decode split |

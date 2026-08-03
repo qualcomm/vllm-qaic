@@ -30,6 +30,7 @@ def run() -> None:
         additional_config={
             "override_qaic_config": {
                 "aic_include_sampler": 1,
+                "aic_return_pdfs": 1,
                 "max_top_k_ids": 64,
             }
         },

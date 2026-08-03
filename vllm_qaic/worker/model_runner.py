@@ -261,6 +261,7 @@ class QaicAsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
                 sampling_metadata,
                 state.ods_next_token,
             )
+            mr.input_batch.prev_sampled_token_ids = None
         else:
             hidden_states, logits = mr._compute_hidden_states_and_logits(
                 state.hidden_states_decode,
@@ -1357,6 +1358,9 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 ods_next_token = self.model.decode_next_tokens
                 ods_next_token["next_tokens"].fill(-1)
                 ods_next_token["_prefill_sources"] = []
+                if self.model.return_pdfs:
+                    ods_next_token["probs"].fill(0)
+                    ods_next_token["_prefill_probs_sources"] = []
 
             if prefill_input_ids.size > 0:
                 hidden_states_prefill = (
@@ -1750,6 +1754,8 @@ class QaicModelRunnerAoT(GPUModelRunner):
             self.model.disagg_dummy_run()
             return
         if self.model.is_vision_encoder:
+            return
+        if self.model.return_pdfs:
             return
 
         # Decode (SpD-aware: allocate max_decode_tokens per request)

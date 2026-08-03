@@ -40,7 +40,7 @@ from vllm.model_executor.models.interfaces import SupportsLoRA
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import _CONFIG_REGISTRY
 from vllm.utils.math_utils import cdiv
-from vllm.v1.outputs import SamplerOutput
+from vllm.v1.outputs import LogprobsTensors, SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
 
@@ -153,6 +153,10 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self.num_spec_tokens = 0
         self.on_device_sampling_en = override_qaic_config.get(
             "aic_include_sampler", False
+        )
+        self.return_pdfs = bool(
+            self.on_device_sampling_en
+            and override_qaic_config.get("aic_return_pdfs", False)
         )
         if self.on_device_sampling_en:
             # Clamp QEff sampler top-k capacity to the model vocabulary size.
@@ -304,24 +308,46 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         next_token: np.ndarray | dict[str, Any] | None = None,
     ) -> SamplerOutput | None:
         if self.on_device_sampling_en:
-            if next_token is None:
-                raise ValueError("On-device sampling did not receive next_tokens output")
             if isinstance(next_token, dict):
                 tokens = next_token["next_tokens"]
                 for row, source in next_token.pop("_prefill_sources", []):
                     tokens[row, : source.shape[1], :] = source
+                probs = next_token["probs"] if self.return_pdfs else None
+                if self.return_pdfs:
+                    for row, source in next_token.pop("_prefill_probs_sources", []):
+                        probs[row, : source.shape[1], :] = source
             else:
                 tokens = next_token
+                probs = None
             tokens = np.asarray(tokens)
             if tokens.ndim == 3:
                 tokens = tokens[:, :, 0]
             elif tokens.ndim == 1:
                 tokens = tokens[:, None]
+            logprobs_tensors = None
+            if sampling_metadata.max_num_logprobs is not None and probs is not None:
+                probs_array = np.asarray(probs[: logits.shape[0]], dtype=np.float32)
+                probs_tensor = torch.from_numpy(probs_array).reshape(
+                    -1, probs_array.shape[-1]
+                )
+                raw_logprobs = torch.log(probs_tensor)
+                if sampling_metadata.max_num_logprobs == -1:
+                    logprobs_tensors = LogprobsTensors(
+                        torch.empty(0), raw_logprobs, torch.empty(0)
+                    )
+                else:
+                    logprobs_tensors = self.sampler.gather_logprobs(
+                        raw_logprobs,
+                        sampling_metadata.max_num_logprobs,
+                        token_ids=torch.from_numpy(
+                            tokens[: logits.shape[0]].astype(np.int64, copy=False)
+                        ).reshape(-1),
+                    )
             return SamplerOutput(
                 torch.from_numpy(
                     tokens[: logits.shape[0]].astype(np.int64, copy=False)
                 ),
-                None,
+                logprobs_tensors,
             )
 
         next_tokens = self.sampler(logits, sampling_metadata)
@@ -452,6 +478,11 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             self.decode_next_tokens = {
                 "next_tokens": np.zeros((self.decode_bsz, 1, 1), dtype=np.int64)
             }
+            if self.return_pdfs:
+                self.decode_next_tokens["probs"] = np.zeros(
+                    (self.decode_bsz, 1, self.vocab_size),
+                    dtype=np.float32,
+                )
         else:
             self.prefill_logits = dict(
                 logits=np.random.randn(self.prefill_bsz, 1, self.vocab_size).astype(
@@ -767,9 +798,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         # perform prefill (only prefill_bsz=1 is supported)
         pending_exec_count = 0  # in-flight executions in current batch
 
-        # Buffer for next tokens
-        next_tokens = np.zeros((self.prefill_bsz, 1, 1), dtype=np.int64)
-
         idx_start = 0
         for i, idx_end in enumerate(prefill_cum_sum):
             # extract indices of specific request
@@ -810,15 +838,17 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             if mm_kwargs_list and (mm_kwargs := mm_kwargs_list[i]):
                 chunk_inputs.update(mm_kwargs)
             if self.on_device_sampling_en:
-                assert sampling_params is not None
                 chunk_inputs.update(sampling_params)
-                for key in ("temperatures", "top_ks", "top_ps", "min_ps", "repetition_penalties", "presence_penalties"):
+                for key in (
+                    "temperatures",
+                    "top_ks",
+                    "top_ps",
+                    "min_ps",
+                    "repetition_penalties",
+                    "presence_penalties",
+                ):
                     chunk_inputs[key] = chunk_inputs[key][i : i + 1]
                 chunk_inputs["random_numbers"] = chunk_inputs["random_numbers"][i : i + 1]
-                chunk_inputs["last_accepted_output_tokens"] = np.zeros(
-                    (self.prefill_bsz, self.prefill_seq_len), dtype=np.int64
-                )
-                chunk_inputs["next_tokens"] = next_tokens
             # chunk the request
             n_chunks: int = iids.shape[-1] // self.prefill_seq_len
 
@@ -832,6 +862,18 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 chunk_inputs["input_ids"] = iids[lower_idx:upper_idx].reshape(
                     1, self.prefill_seq_len
                 )
+                if self.on_device_sampling_en:
+                    next_tokens = np.zeros((self.prefill_bsz, 1, 1), dtype=np.int64)
+                    chunk_inputs["next_tokens"] = next_tokens
+                    if self.return_pdfs:
+                        probs = np.zeros(
+                            (self.prefill_bsz, 1, self.vocab_size),
+                            dtype=np.float32,
+                        )
+                        chunk_inputs["probs"] = probs
+                    chunk_inputs["last_accepted_output_tokens"] = chunk_inputs[
+                        "input_ids"
+                    ]
                 # Reconstruct mm_token_type_ids from input_ids: positions where
                 # input_ids == image_token_id get value 1, all others get 0.
                 # This tells the decoder which tokens are image embeddings.
@@ -885,7 +927,19 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                         self.decode_next_tokens.setdefault("_prefill_sources", []).append(
                             (prefill_output_offset + i, next_tokens.copy())
                         )
+                        if self.return_pdfs:
+                            self.decode_next_tokens.setdefault(
+                                "_prefill_probs_sources", []
+                            ).append((prefill_output_offset + i, probs.copy()))
                 else:
+                    if self.on_device_sampling_en and self.decode_next_tokens is not None:
+                        self.decode_next_tokens.setdefault("_prefill_sources", []).append(
+                            (prefill_output_offset + i, next_tokens)
+                        )
+                        if self.return_pdfs:
+                            self.decode_next_tokens.setdefault(
+                                "_prefill_probs_sources", []
+                            ).append((prefill_output_offset + i, probs))
                     time.sleep(0.01)
                     pending_exec_count += 1
                     pending_exec_queue.put(exec_obj_idx)
@@ -940,9 +994,10 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         if self.is_spec_decode_target_model:
             batch_inputs.update(self.decode_num_logits_buffer_by_k[current_k])
         if self.on_device_sampling_en:
-            assert sampling_params is not None
             batch_inputs.update(sampling_params)
             batch_inputs["next_tokens"] = self.decode_next_tokens["next_tokens"]
+            if self.return_pdfs:
+                batch_inputs["probs"] = self.decode_next_tokens["probs"]
             batch_inputs["last_accepted_output_tokens"] = batch_inputs["input_ids"]
 
         if self.comp_ctx_lengths_decode is not None:
@@ -1639,6 +1694,9 @@ def load_qaic_model(
 
     if qaic_compile_config.include_sampler is not None:
         model.on_device_sampling_en = bool(qaic_compile_config.include_sampler)
+        model.return_pdfs = bool(
+            model.on_device_sampling_en and qaic_compile_config.return_pdfs
+        )
         if qaic_compile_config.max_top_k_ids is not None:
             model.max_top_k_ids = min(
                 int(qaic_compile_config.max_top_k_ids),

@@ -84,6 +84,7 @@ All `qaic-compile` arguments can be passed as input arguments. The table below l
 | `softmax` | — | Set `True` to apply softmax to pooled outputs (`qaic` pooling only) |
 | `prefill_only` | `None` | Disaggregated serving mode: `True` = compile prefill QPC only, `False` = decode QPC only, `None` = single QPC for both |
 | `aic_include_sampler` | `False` | Enable on-device sampling (ODS). Sampling runs on the accelerator instead of the host and is a compile-time toggle. |
+| `aic_return_pdfs` | `False` | Return ODS probability distributions for vLLM logprobs. Only meaningful when `aic_include_sampler` is enabled. |
 | `max_top_k_ids` | `512` | Maximum top-k candidate count supported by the compiled ODS binding. Only meaningful when `aic_include_sampler` is enabled. |
 
 ### `draft_override_qaic_config` Fields
