@@ -548,7 +548,44 @@ class QaicQwen2_5_VLProcessingInfo(
             image_grid_thw_lookup=self.image_grid_thw_lookup,
         )
 
-class QaicQwen2_5_VLMultiModalProcessor(Qwen2_5_VLMultiModalProcessor):
+
+class _QaicQwenVLMergedEmbedsFieldsMixin:
+    """Convert `image_grid_thw` from 3-D to 2-D for Qwen-VL models.
+    
+    In `qaic_disagg`, `_merge_embeds` adds a leading batch dim to
+    `image_grid_thw` ([N, 3] -> [1, N, 3]) and calls `_get_mm_fields_config`
+    directly, so `prod(-1)` is 2-D and `flat_from_sizes` raises "size_per_item
+    should be a 1-D tensor".
+
+    This mixin wraps `_get_mm_fields_config` to squeeze `ndim==3`
+    `image_grid_thw` back to `ndim==2`. No-op for normal pixel-value
+    requests, whose grids are already 2-D.
+    """
+
+    def _get_mm_fields_config(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        squeezed = None
+        for key in ("image_grid_thw", "video_grid_thw"):
+            grid = hf_inputs.get(key) if hasattr(hf_inputs, "get") else None
+            if (
+                _TRANSFORMERS_NEW_IMAGE_PROCESSOR
+                and grid is not None
+                and getattr(grid, "ndim", None) == 3
+            ):
+                if squeezed is None:
+                    squeezed = dict(hf_inputs)
+                squeezed[key] = grid.squeeze(0)
+        if squeezed is not None:
+            hf_inputs = BatchFeature(squeezed)
+        return super()._get_mm_fields_config(hf_inputs, hf_processor_mm_kwargs)
+
+
+class QaicQwen2_5_VLMultiModalProcessor(
+    _QaicQwenVLMergedEmbedsFieldsMixin, Qwen2_5_VLMultiModalProcessor
+):
     def get_data_parser(self) -> MultiModalDataParser:
         return QaicQwen2VLMultiModalDataParser(
             self.get_hf_config().vision_config.spatial_merge_size,
@@ -595,7 +632,9 @@ class QaicQwen3VLProcessingInfo(
         )
 
 
-class QaicQwen3VLMultiModalProcessor(Qwen3VLMultiModalProcessor):
+class QaicQwen3VLMultiModalProcessor(
+    _QaicQwenVLMergedEmbedsFieldsMixin, Qwen3VLMultiModalProcessor
+):
     def get_data_parser(self) -> MultiModalDataParser:
         return QaicQwen2VLMultiModalDataParser(
             self.get_hf_config().vision_config.spatial_merge_size,
