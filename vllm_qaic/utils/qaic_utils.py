@@ -2,6 +2,9 @@
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 # ------------------------------------------------------------------
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-License-Identifier: Apache-2.0
+# Adapted from vllm/vllm/v1/structured_output/utils.py
 
 """Shared QAIC utilities used across vLLM"""
 
