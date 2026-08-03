@@ -312,24 +312,25 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 tokens = next_token["next_tokens"]
                 for row, source in next_token.pop("_prefill_sources", []):
                     tokens[row, : source.shape[1], :] = source
-                probs = next_token["probs"] if self.return_pdfs else None
                 if self.return_pdfs:
+                    probs = next_token["probs"]
                     for row, source in next_token.pop("_prefill_probs_sources", []):
                         probs[row, : source.shape[1], :] = source
+                else:
+                    probs = None
             else:
                 tokens = next_token
                 probs = None
-            tokens = np.asarray(tokens)
-            if tokens.ndim == 3:
-                tokens = tokens[:, :, 0]
-            elif tokens.ndim == 1:
-                tokens = tokens[:, None]
+            tokens_tensor = torch.as_tensor(tokens, dtype=torch.int64)
+            if tokens_tensor.ndim == 3:
+                tokens_tensor = tokens_tensor[:, :, 0]
+            elif tokens_tensor.ndim == 1:
+                tokens_tensor = tokens_tensor[:, None]
             logprobs_tensors = None
             if sampling_metadata.max_num_logprobs is not None and probs is not None:
-                probs_array = np.asarray(probs[: logits.shape[0]], dtype=np.float32)
-                probs_tensor = torch.from_numpy(probs_array).reshape(
-                    -1, probs_array.shape[-1]
-                )
+                probs_tensor = torch.as_tensor(
+                    probs[: logits.shape[0]], dtype=torch.float32
+                ).reshape(-1, probs.shape[-1])
                 raw_logprobs = torch.log(probs_tensor)
                 if sampling_metadata.max_num_logprobs == -1:
                     logprobs_tensors = LogprobsTensors(
@@ -339,14 +340,10 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     logprobs_tensors = self.sampler.gather_logprobs(
                         raw_logprobs,
                         sampling_metadata.max_num_logprobs,
-                        token_ids=torch.from_numpy(
-                            tokens[: logits.shape[0]].astype(np.int64, copy=False)
-                        ).reshape(-1),
+                        token_ids=tokens_tensor[: logits.shape[0]].reshape(-1),
                     )
             return SamplerOutput(
-                torch.from_numpy(
-                    tokens[: logits.shape[0]].astype(np.int64, copy=False)
-                ),
+                tokens_tensor[: logits.shape[0]],
                 logprobs_tensors,
             )
 
