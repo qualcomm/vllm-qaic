@@ -16,7 +16,7 @@ Guidelines for contributing to the vLLM QAIC plugin.
 
 **Copyright notice for new Qualcomm-authored files:**
 
-```
+```text
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 ```
@@ -83,6 +83,56 @@ pip install -e . --no-build-isolation
 - Type annotations where practical
 - Docstrings for public APIs
 
+### Pre-commit hooks
+
+Formatting and lint checks are enforced with
+[pre-commit](https://pre-commit.com/), aligned with the upstream vLLM project.
+The following hooks run automatically on `git commit`:
+
+- `ruff-check` / `ruff-format` — Python linting and formatting (also handles
+  import sorting).
+- `typos` — spell checking (whitelist in `[tool.typos]` of `pyproject.toml`).
+- `clang-format` — C/C++ formatting for `csrc/` (config in `.clang-format`).
+- `markdownlint-cli2` — Markdown linting and auto-fixing (config in
+  `.markdownlint.yaml`).
+- `actionlint` — GitHub Actions workflow linting.
+- `mypy-3.10` — static type checking on Python 3.10. The 3.11 and 3.12 jobs
+  (`mypy-3.11`, `mypy-3.12`) run only in CI (`manual` stage).
+- `shellcheck` — shell script linting.
+- `signoff-commit` — appends the DCO `Signed-off-by` trailer at commit time.
+- `check-qualcomm-header` — verifies the Qualcomm license header on Python files.
+- `check-root-lazy-imports` — enforces lazy (TYPE_CHECKING-guarded) internal
+  imports in `vllm_qaic/__init__.py`.
+- `check-filenames` — rejects filenames containing spaces.
+- `check-forbidden-imports` — bans `pickle`/`cloudpickle`, `base64`
+  (use `pybase64`), and `import re` (use `import regex as re`).
+- `validate-config` — ensures every field of a `@config` dataclass has a
+  default value and a docstring.
+- `check-boolean-context-manager` — flags `with a() and b():`, which enters
+  only one context manager.
+
+Install and enable the hooks once after cloning:
+
+```bash
+pip install -r requirements/lint.txt
+pre-commit install
+```
+
+To run all commit-stage checks against the entire repository manually:
+
+```bash
+pre-commit run --all-files
+```
+
+Some hooks only run in CI (the `manual` stage) and are skipped on commit. Run
+them explicitly when needed:
+
+```bash
+# Type checking on other supported Python versions
+pre-commit run mypy-3.11 --hook-stage manual --all-files
+pre-commit run mypy-3.12 --hook-stage manual --all-files
+```
+
 ## Pull Request Process
 
 1. Fork the repository and clone your fork
@@ -97,6 +147,7 @@ pip install -e . --no-build-isolation
 ## Bug Fix Requirements
 
 To qualify as a bug fix:
+
 - Must not change stated/understood functionality or purpose
 - The original implementation must have had error(s) addressed by the change
 - Non-algorithmic, approximately 10 conventional lines or less

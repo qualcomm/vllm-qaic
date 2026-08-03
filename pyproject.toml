@@ -42,11 +42,10 @@ where = ["."]
 include = ["vllm_qaic*"]
 namespaces = false  # to disable scanning PEP 420 namespaces (true by default)
 
-[tool.yapfignore]
-ignore_patterns = [
-    "build/**",
-    "examples/**",
-]
+[tool.ruff.lint.per-file-ignores]
+# Enforce G004 (no f-strings in logging) 
+"test/*" = ["G004"]
+"setup.py" = ["G004"]
 
 [tool.ruff.lint]
 select = [
@@ -76,10 +75,11 @@ ignore = [
     "UP032",
 ]
 
-[tool.ruff.lint.per-file-ignores]
-# Enforce G004 (no f-strings in logging) 
-"test/*" = ["G004"]
-"setup.py" = ["G004"]
+[tool.yapfignore]
+ignore_patterns = [
+    "build/**",
+    "examples/**",
+]
 
 [tool.isort]
 skip_glob = [
@@ -88,21 +88,75 @@ skip_glob = [
 use_parentheses = true
 skip_gitignore = true
 
-[tool.pymarkdown]
-plugins.md013.enabled = false # line-length
-plugins.md004.style = "sublist" # ul-style
-plugins.md041.enabled = false # first-line-h1
-plugins.md007.indent = 4 # ul-indent
-plugins.md007.start_indented = true # ul-indent
-plugins.md033.enabled = false # inline-html
-plugins.md046.enabled = false # code-block-style
-plugins.md024.allow_different_nesting = true # no-duplicate-headers
-
 [tool.mypy]
 ignore_missing_imports = true
 explicit_package_bases = true
 check_untyped_defs = true
 follow_imports = "silent"
+
+[tool.typos.files]
+# these files may be written in non english words
+extend-exclude = ["build/*", ".git/*"]
+ignore-hidden = false
+
+[tool.typos.default]
+extend-ignore-identifiers-re = [".*[Uu][Ee][0-9][Mm][0-9].*"]
+
+[tool.typos.default.extend-identifiers]
+bbc5b7ede = "bbc5b7ede"
+NOOPs = "NOOPs"
+nin_shortcut = "nin_shortcut"
+cudaDevAttrMaxSharedMemoryPerBlockOptin = "cudaDevAttrMaxSharedMemoryPerBlockOptin"
+sharedMemPerBlockOptin = "sharedMemPerBlockOptin"
+
+depthwise_seperable_out_channel = "depthwise_seperable_out_channel"
+pard_token = "pard_token"
+ptd_token_id = "ptd_token_id"
+ser_de = "ser_de"
+shared_memory_per_block_optin = "shared_memory_per_block_optin"
+FoPE = "FoPE"
+k_ot = "k_ot"
+view_seperator = "view_seperator"
+inverse_std_variences = "inverse_std_variences"
+
+# Proper noun (contributor surname), not a typo for "Signal".
+Singal = "Singal"
+
+[tool.typos.default.extend-words]
+iy = "iy"
+indx = "indx"
+# intel cpu features
+tme = "tme"
+dout = "dout"
+Pn = "Pn"
+arange = "arange"
+# `thw` is a valid tensor axis order (Temporal, Height, Width) used by
+# vision-language models (e.g. `image_grid_thw` in Qwen-VL), not a typo.
+thw = "thw"
+subtile = "subtile"
+HSA = "HSA"
+setp = "setp"
+CPY = "CPY"
+thr = "thr"
+Thr = "Thr"
+PARD = "PARD"
+pard = "pard"
+AKS = "AKS"
+ba = "ba"
+fo = "fo"
+nd = "nd"
+eles = "eles"
+datas = "datas"
+ser = "ser"
+ure = "ure"
+VALU = "VALU"
+# Walsh-Hadamard Transform
+wht = "wht"
+WHT = "WHT"
+# Huawei Compute Architecture for Neural Networks
+CANN = "CANN"
+# `vor` appears in HVX intrinsic names (e.g. `Q6_V_vor_VV`), not a typo for "for".
+vor = "vor"
 
 [tool.uv]
 ## Never install torch, so that no dependencies can override it.

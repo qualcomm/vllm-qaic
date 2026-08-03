@@ -1,0 +1,13 @@
+MD007: # ul-indent
+  indent: 4
+MD013: false # line-length
+MD024: # no-duplicate-heading
+  siblings_only: true
+MD031: # blanks-around-fences
+  list_items: false
+MD033: false # no-inline-html
+MD041: false # first-line-heading
+MD046: false # code-block-style
+MD052: false # reference-links-images
+MD059: false # descriptive-link-text
+MD060: false # table-column-style

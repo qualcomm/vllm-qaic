@@ -1,0 +1,116 @@
+default_install_hook_types:
+  - pre-commit
+  - commit-msg
+default_stages:
+  - pre-commit # Run locally
+  - manual # Run in CI
+exclude: 'build/.*'
+repos:
+- repo: https://github.com/astral-sh/ruff-pre-commit
+  rev: v0.14.0
+  hooks:
+  - id: ruff-check
+    args: [--output-format, github, --fix]
+  - id: ruff-format
+- repo: https://github.com/crate-ci/typos
+  rev: v1.43.5
+  hooks:
+  - id: typos
+    args: [--force-exclude]
+- repo: https://github.com/pre-commit/mirrors-clang-format
+  rev: v21.1.2
+  hooks:
+  - id: clang-format
+    types_or: [c++]
+    args: [--style=file, --verbose]
+- repo: https://github.com/DavidAnson/markdownlint-cli2
+  rev: v0.21.0
+  hooks:
+  - id: markdownlint-cli2
+    language_version: lts
+    args: [--fix]
+    exclude: ^CLAUDE\.md$
+- repo: https://github.com/rhysd/actionlint
+  rev: v1.7.7
+  hooks:
+  - id: actionlint
+- repo: local
+  hooks:
+  - id: mypy-3.10 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
+    name: Run mypy for Python 3.10
+    entry: python tools/pre_commit/mypy.py "3.10"
+    <<: &mypy_common
+      language: python
+      types_or: [python, pyi]
+      require_serial: true
+      additional_dependencies: ["mypy==1.20.2", regex, types-cachetools, types-setuptools, types-PyYAML, types-requests, types-torch, pydantic]
+  - id: mypy-3.11 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
+    name: Run mypy for Python 3.11
+    entry: python tools/pre_commit/mypy.py "3.11"
+    <<: *mypy_common
+    stages: [manual] # Only run in CI
+  - id: mypy-3.12 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
+    name: Run mypy for Python 3.12
+    entry: python tools/pre_commit/mypy.py "3.12"
+    <<: *mypy_common
+    stages: [manual] # Only run in CI
+  - id: shellcheck
+    name: Lint shell scripts
+    entry: tools/pre_commit/shellcheck.sh
+    language: script
+    types: [shell]
+  - id: signoff-commit
+    name: Sign-off Commit
+    entry: bash
+    args:
+      - -c
+      - |
+        if ! grep -q "^Signed-off-by: $(git config user.name) <$(git config user.email)>" "$(git rev-parse --git-path COMMIT_EDITMSG)"; then
+          printf "\nSigned-off-by: $(git config user.name) <$(git config user.email)>\n" >> "$(git rev-parse --git-path COMMIT_EDITMSG)"
+        fi
+    language: system
+    verbose: true
+    stages: [commit-msg]
+  - id: check-qualcomm-header
+    name: Check Qualcomm headers
+    entry: python tools/pre_commit/check_qualcomm_header.py
+    language: python
+    types: [python]
+  - id: check-root-lazy-imports
+    name: Check root lazy imports
+    entry: python tools/pre_commit/check_init_lazy_imports.py
+    language: python
+    types: [python]
+  - id: check-filenames
+    name: Check for spaces in all filenames
+    entry: bash
+    args:
+      - -c
+      - 'git ls-files | grep " " && echo "Filenames should not contain spaces!" && exit 1 || exit 0'
+    language: system
+    always_run: true
+    pass_filenames: false
+  - id: check-forbidden-imports
+    name: Check for forbidden imports
+    entry: python tools/pre_commit/check_forbidden_imports.py
+    language: python
+    types: [python]
+    additional_dependencies: [regex]
+  - id: validate-config
+    name: Validate configuration has default values and that each field has a docstring
+    entry: python tools/pre_commit/validate_config.py
+    language: python
+    additional_dependencies: [regex]
+  - id: check-boolean-context-manager
+    name: Check for boolean ops in with-statements
+    entry: python tools/pre_commit/check_boolean_context_manager.py
+    language: python
+    types: [python]
+  # Keep `suggestion` last
+  - id: suggestion
+    name: Suggestion
+    entry: bash -c 'echo "To bypass all the pre-commit hooks, add --no-verify to git commit. To skip a specific hook, prefix the commit command with SKIP=<hook-id>."'
+    language: system
+    verbose: true
+    pass_filenames: false
+  # Insert new entries above the `suggestion` entry
