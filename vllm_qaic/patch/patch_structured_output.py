@@ -8,23 +8,19 @@
 
 """Monkey-patch for vllm.v1.structured_output.utils.apply_grammar_bitmask.
 
-QAIC (PyT mode) is a non-CUDA device, so the upstream implementation fails
-two ways when applying the xgrammar bitmask:
+On QAIC, the upstream function builds the xgrammar index tensor with
+pin_memory=True (no CUDA allocator -> crash) and passes a torch.Tensor to the
+CPU xgrammar kernel, which only accepts a python Sequence[int]. This breaks
+guided/structured decoding.
 
-  1. It builds the index tensor with ``pin_memory=True``. Pinned host memory
-     requires a CUDA allocator, which QAIC does not have, raising
-     "Need to provide pin_memory allocator to use pin memory".
+Replace apply_grammar_bitmask with a version that gates the pinned tensor path
+on is_pin_memory_available() and passes a plain list of indices on QAIC.
 
-  2. It passes that tensor as ``indices`` to
-     ``xgr.apply_token_bitmask_inplace``. On a non-CUDA device xgrammar
-     dispatches to the CPU kernel (``apply_token_bitmask_inplace_cpu``),
-     which only accepts a python ``Sequence[int]``, not a torch.Tensor.
-
-How:
-    Replace ``apply_grammar_bitmask`` with a QAIC-safe version that gates the
-    pinned-tensor path on ``is_pin_memory_available()`` (False on QAIC) and
-    passes the plain python list of indices otherwise. Behaviour is identical
-    to upstream on CUDA.
+The AoT model runner overrides ``sample_tokens`` and calls the QAIC-safe
+``qaic_apply_grammar_bitmask`` directly, so it needs no patch. PyT inherits
+upstream ``GPUModelRunner.sample_tokens``, whose by-name-imported
+``apply_grammar_bitmask`` is only reachable via this monkeypatch, which
+rebinds it to the same QAIC-safe function.
 """
 
 from vllm.v1.structured_output import utils as _so_utils

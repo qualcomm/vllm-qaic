@@ -182,14 +182,15 @@ def qaic_apply_grammar_bitmask(
     input_batch: "InputBatch",
     logits: torch.Tensor,
 ) -> None:
-    """Reimplementation of vllm.v1.structured_output.utils.apply_grammar_bitmask.
+    """QAIC-safe reimplementation of apply_grammar_bitmask.
 
-    The upstream implementation always builds the xgrammar `indices` as a
-    pinned-memory torch.Tensor. On QAIC that
-    fails two ways: pinned memory has no allocator, and the CPU xgrammar
-    kernel (`apply_token_bitmask_inplace_cpu`) only accepts a python
-    Sequence[int], not a tensor. This wrapper gates the tensor/pin path on
-    `is_pin_memory_available()` and passes a plain list of indices otherwise.
+    On QAIC, the upstream function builds the xgrammar index tensor with
+    pin_memory=True (no CUDA allocator -> crash) and passes a torch.Tensor to the
+    CPU xgrammar kernel, which only accepts a python Sequence[int]. This breaks
+    guided/structured decoding.
+
+    Replace apply_grammar_bitmask with a version that gates the pinned tensor path
+    on is_pin_memory_available() and passes a plain list of indices on QAIC.
     """
     # Serialization of np.ndarray is much more efficient than a tensor,
     # so we receive it in that format.
