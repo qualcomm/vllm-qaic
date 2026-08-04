@@ -20,6 +20,7 @@ class QaicPlatform(QaicPlatformBase):
         cls.device_type = "qaic"
         # Adapt the patch here.
         from vllm_qaic import patch  # noqa: F401
+
         if not cls.is_aot:
             logger.info("Patching triton for qaic import for non-AoT")
             import vllm_qaic.patch.patch_qaic_triton_import  # noqa
