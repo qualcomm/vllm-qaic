@@ -9,19 +9,19 @@ This guide covers installing `vllm-qaic` in both **AOT** (Ahead-of-Time compiled
 - [Prerequisites](#prerequisites)
 - [Mode Overview](#mode-overview)
 - [Install using `install.sh` (recommended)](#install-using-installsh-recommended)
-  - [AOT mode](#aot-mode--installsh)
-  - [PYT mode](#pyt-mode--installsh)
+    - [AOT mode](#aot-mode--installsh)
+    - [PYT mode](#pyt-mode--installsh)
 - [Manual Installation](#manual-installation)
-  - [AOT mode](#aot-mode--manual)
-  - [PYT mode](#pyt-mode--manual)
+    - [AOT mode](#aot-mode--manual)
+    - [PYT mode](#pyt-mode--manual)
 - [Docker-based Installation](#docker-based-installation)
-  - [Build targets](#build-targets)
-  - [Build commands](#build-commands)
-  - [Entrypoint script (dev only)](#entrypoint-script-dev-only)
+    - [Build targets](#build-targets)
+    - [Build commands](#build-commands)
+    - [Entrypoint script (dev only)](#entrypoint-script-dev-only)
 - [Wheel-based Installation](#wheel-based-installation)
-  - [Build wheels](#step-1--build-wheels)
-  - [Install from wheel using `install.sh`](#step-2a--install-from-wheel-using-installsh)
-  - [Install from wheel manually](#step-2b--install-from-wheel-manually)
+    - [Build wheels](#step-1--build-wheels)
+    - [Install from wheel using `install.sh`](#step-2a--install-from-wheel-using-installsh)
+    - [Install from wheel manually](#step-2b--install-from-wheel-manually)
 - [Verification](#verification)
 - [Version Reference](#version-reference)
 
@@ -38,6 +38,7 @@ This guide covers installing `vllm-qaic` in both **AOT** (Ahead-of-Time compiled
 | QAIC Apps SDK | >= 1.22.0 (PYT mode requires `--install-torch-qaic` flag) |
 
 Install the QAIC SDK before proceeding:
+
 - [SDK installation guide](https://quic.github.io/cloud-ai-sdk-pages/latest/Getting-Started/Installation/index.html)
 - For **PYT mode**: run the Apps SDK installer with `--install-torch-qaic` to build `torch_qaic` wheels into `/opt/qti-aic/integrations/torch_qaic/py312/`
 

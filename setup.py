@@ -46,19 +46,39 @@ def _make_hexagon_ext(sources, device_arch, extra_compile_args, extra_link_args)
     Replicates HexagonKernelExtension.__init__ using only stdlib + setuptools.
     Used when QAIC_DEVICE_ARCH is set (Docker build envs without live devices).
     """
-    hexagon_tools = os.environ.get("HEXAGON_TOOLS_DIR", "/opt/qti-aic/dev/hexagon_tools")
-    jit_inc = os.environ.get("QAIC_PLATFORM_JIT_INCLUDE_DIR", "/opt/qti-aic/dev/inc/jit")
+    hexagon_tools = os.environ.get(
+        "HEXAGON_TOOLS_DIR", "/opt/qti-aic/dev/hexagon_tools"
+    )
+    jit_inc = os.environ.get(
+        "QAIC_PLATFORM_JIT_INCLUDE_DIR", "/opt/qti-aic/dev/inc/jit"
+    )
     hex_inc = os.environ.get("QAIC_HEXAGON_INCLUDE_DIR", "/opt/qti-aic/dev/inc/jit")
     arch_ver = "v81" if device_arch == "v81" else "v68"
     compile_flags = [
         "-nostdinc++",
-        "-Wall", "-Wextra", "-Werror", "-Wglobal-constructors", "-Wno-pass-failed",
-        "-Wnon-virtual-dtor", "-Wno-unused-variable", "-Wno-tautological-compare",
-        "-Wno-unknown-pragmas", "-Wno-c99-designator", "-Wno-psabi",
-        "-ffreestanding", "-std=c++17", "-fno-exceptions", "-fvisibility=default",
-        "-B", osp.join(hexagon_tools, "target"),
-        f"-m{arch_ver}", f"-mhvx={arch_ver}", "-mhmx", "-mhvx-ieee-fp",
-        "-mllvm", "-hexagon-commgep=false",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-Wglobal-constructors",
+        "-Wno-pass-failed",
+        "-Wnon-virtual-dtor",
+        "-Wno-unused-variable",
+        "-Wno-tautological-compare",
+        "-Wno-unknown-pragmas",
+        "-Wno-c99-designator",
+        "-Wno-psabi",
+        "-ffreestanding",
+        "-std=c++17",
+        "-fno-exceptions",
+        "-fvisibility=default",
+        "-B",
+        osp.join(hexagon_tools, "target"),
+        f"-m{arch_ver}",
+        f"-mhvx={arch_ver}",
+        "-mhmx",
+        "-mhvx-ieee-fp",
+        "-mllvm",
+        "-hexagon-commgep=false",
     ] + extra_compile_args
     link_flags = ["-nostdlib++", "-nostdlib", "-fPIC", "-shared"] + extra_link_args
     ext = Extension(
@@ -104,19 +124,32 @@ def get_qaic_extensions() -> list[Extension]:
     if device_arch:
         # Verify SDK headers are present before attempting compile.
         # csrc/ headers may require a newer SDK than the current BASE_IMAGE provides.
-        jit_inc = os.environ.get("QAIC_PLATFORM_JIT_INCLUDE_DIR", "/opt/qti-aic/dev/inc/jit")
+        jit_inc = os.environ.get(
+            "QAIC_PLATFORM_JIT_INCLUDE_DIR", "/opt/qti-aic/dev/inc/jit"
+        )
         required_headers = ["QAicHexagonMath.h", "QAicHexagonUtils.h"]
         missing = [h for h in required_headers if not osp.exists(osp.join(jit_inc, h))]
         if missing:
-            print(f"WARNING: Skipping Hexagon C++ extension build — missing SDK headers: {missing}")
+            print(
+                "WARNING: Skipping Hexagon C++ extension build — "
+                f"missing SDK headers: {missing}"
+            )
             print(f"  Expected in: {jit_inc}")
-            print(f"  These headers require a newer SDK. Upgrade BASE_IMAGE to enable.")
+            print("  These headers require a newer SDK. Upgrade BASE_IMAGE to enable.")
             return []
         print(f"Device arch: {device_arch} (from QAIC_DEVICE_ARCH env)")
         print(f"QAIC extension sources: {qaic_sources}")
-        return [_make_hexagon_ext(qaic_sources, device_arch, extra_compile_args, extra_link_args)]
+        return [
+            _make_hexagon_ext(
+                qaic_sources, device_arch, extra_compile_args, extra_link_args
+            )
+        ]
 
-    from torch_qaic.custom_ops.build_utils import _get_device_arch, HexagonKernelExtension
+    from torch_qaic.custom_ops.build_utils import (
+        _get_device_arch,
+        HexagonKernelExtension,
+    )
+
     device_arch = _get_device_arch()
     print(f"Device arch: {device_arch}")
     print(f"QAIC extension sources: {qaic_sources}")
@@ -159,6 +192,7 @@ def get_qaic_build_ext():
             def build_extension(self, ext):
                 if hasattr(ext, "HEXAGON_COMPILER"):
                     import os
+
                     cmd = [ext.HEXAGON_COMPILER]
                     cmd.extend(f"-I{d}" for d in ext.include_dirs)
                     cmd.extend(ext.extra_compile_args)
