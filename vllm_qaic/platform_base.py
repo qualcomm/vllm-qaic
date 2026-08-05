@@ -48,8 +48,7 @@ DYNAMIC_RESOLUTION_MODELS = [
 class QaicPlatform(Platform):
     _enum = PlatformEnum.OOT
     primary_attn_backend_cls = (
-        "vllm_qaic.attention.backends"
-        ".qaic_attn.QAicTorchAttentionBackend"
+        "vllm_qaic.attention.backends.qaic_attn.QAicTorchAttentionBackend"
     )
     device_name: str = "qaic"
     # Set device type to cpu if it's AOT.
@@ -416,11 +415,11 @@ class QaicPlatform(Platform):
             )
             assert (
                 not vllm_config.speculative_config
-                or vllm_config.speculative_config.method in ["ngram", "draft_model"]
+                or vllm_config.speculative_config.method
+                in ["ngram", "draft_model", "suffix"]
             ), (
-                "PLD and DLM based SPD Types are supported with Disaggregated "
-                "serving, other SPD types such as Turbo is not yet supported "
-                "with Disaggregated serving for QAIC backend"
+                "Only ngram, suffix, and draft_model based SPD types are "
+                "supported with Disaggregated serving for QAIC backend"
             )
             assert not (
                 vllm_config.kv_transfer_config.kv_role != "kv_producer"
