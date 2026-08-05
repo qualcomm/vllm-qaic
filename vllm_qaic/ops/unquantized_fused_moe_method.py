@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import torch
 import torch.nn.functional as F
 
@@ -14,9 +16,24 @@ from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
 
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
+        SharedExperts,
+    )
+
 
 class QAicUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     """QAIC OOT implementation for unquantized fused MoE."""
+
+    @property
+    def is_monolithic(self) -> bool:
+        return False
+
+    def maybe_make_prepare_finalize(
+        self,
+        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    ):
+        return None
 
     def forward_oot(
         self,
@@ -24,11 +41,13 @@ class QAicUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        shared_experts: SharedExperts | None = None,
+        shared_experts_input: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Compute unquantized MoE on QAIC by batching tokens per expert."""
         num_tokens = x.shape[0]
         top_k = topk_ids.shape[1]
-        activation = layer.activation
+        activation = getattr(layer.activation, "value", layer.activation)
         is_no_mul = activation.endswith("_no_mul")
 
         token_idx = (
