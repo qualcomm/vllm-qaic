@@ -301,16 +301,25 @@ class QaicPlatform(Platform):
                 cache_config.block_size = 16
             else:
                 if cache_config.enable_prefix_caching:
-                    cache_config.enable_prefix_caching = False
                     cache_config.mamba_block_size = (
                         model_config.max_model_len
                     )  # reset to "no-op" default
                     cache_config.mamba_cache_mode = "none"  # reset to disabled
-                    logger.warning_once(
-                        "Prefix caching is not yet supported on v1 Engine. "
-                        "Will automatically disable it."
+                    cache_config.block_size = (
+                        scheduler_config.long_prefill_token_threshold
                     )
-                cache_config.block_size = model_config.max_model_len  # ctx_len
+                elif model_config.is_multimodal_model and model_config.is_encoder_decoder:
+                    cache_config.block_size = 100000
+                else:
+                    cache_config.block_size = model_config.max_model_len  # ctx_len
+
+        # disable async scheduling since Qaic does not yet support it
+        if scheduler_config.async_scheduling:
+            logger.warning(
+                "QAIC currently does not support async scheduling; "
+                "Falling back to non-async scheduling."
+            )
+            scheduler_config.async_scheduling = False
 
         if cls.is_aot:
             if model_config.hf_config.model_type == "whisper":
@@ -539,6 +548,9 @@ class QaicPlatform(Platform):
                 scheduler_config.max_num_seqs
                 * scheduler_config.long_prefill_token_threshold
             )
+            cache_config = vllm_config.cache_config
+            if cache_config and cache_config.enable_prefix_caching:
+                cache_config.block_size = scheduler_config.long_prefill_token_threshold
             if "override_qaic_config" not in vllm_config.additional_config:
                 additional_config["override_qaic_config"] = {}
             additional_config["override_qaic_config"].update(
