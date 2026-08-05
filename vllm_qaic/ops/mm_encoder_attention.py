@@ -37,6 +37,8 @@ from vllm.model_executor.layers.attention.mm_encoder_attention import (
     MMEncoderAttention,
 )
 
+from vllm_qaic.ops._triton_flags import triton_op_enabled
+
 
 def _batched_sdpa(
     q: torch.Tensor,
@@ -262,14 +264,33 @@ class QAicMMEncoderAttention(MMEncoderAttention):
             key = torch.repeat_interleave(key, num_repeat, dim=2)
             value = torch.repeat_interleave(value, num_repeat, dim=2)
 
-        output = _qaic_sdpa(
-            q=query,
-            k=key,
-            v=value,
-            scale=self.scale,
-            cu_seqlens=cu_seqlens,
-            enable_gqa=self.num_heads > self.num_kv_heads,
-        )
+        if triton_op_enabled("MM_ENCODER_ATTENTION"):
+            # Dispatch to vLLM's Triton ViT prefill kernel (context_attention_fwd)
+            # via the registered custom op, mirroring upstream _forward_triton.
+            # The wrapper builds a uniform cu_seqlens when None and derives the
+            # kv group count itself, so the GQA repeat above is harmless.
+            from vllm.v1.attention.ops.vit_attn_wrappers import (
+                vit_triton_attn_wrapper,
+            )
+
+            output = vit_triton_attn_wrapper(
+                q=query,
+                k=key,
+                v=value,
+                batch_size=bsz,
+                scale=self.scale,
+                cu_seqlens=cu_seqlens,
+                max_seqlen=max_seqlen,
+            )
+        else:
+            output = _qaic_sdpa(
+                q=query,
+                k=key,
+                v=value,
+                scale=self.scale,
+                cu_seqlens=cu_seqlens,
+                enable_gqa=self.num_heads > self.num_kv_heads,
+            )
         if is_reshaped:
             output = output.reshape(bsz, q_len, -1)
         return output

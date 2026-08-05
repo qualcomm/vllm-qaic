@@ -139,6 +139,13 @@ class QaicPlatform(Platform):
         return torch_qaic.qaic.get_device_info(device_id).per_core_hvx_thread_count
 
     @classmethod
+    def num_compute_units(cls, device_id: int = 0) -> int:
+        # matmul_persistent (batch_invariant Triton GEMM) sizes its persistent
+        # launch grid by this; map it to the NSP core count. Without this,
+        # matmul_persistent raises NotImplementedError on QAIC.
+        return cls.get_num_cores(device_id)
+
+    @classmethod
     def check_if_supports_dtype(cls, dtype: torch.dtype):
         # for eager mode
         return dtype in [torch.float16, torch.float32]
