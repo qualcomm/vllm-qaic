@@ -303,15 +303,13 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 comp_ctx_lengths_prefill.append(
                     self.session.allowed_shapes[i][ccl_idx][1][0]
                 )
-            elif (
+            if (
                 self.session.allowed_shapes[i][input_idx][1][1] == 1
                 or self.num_logits_to_keep
             ):
                 comp_ctx_lengths_decode.append(
                     self.session.allowed_shapes[i][ccl_idx][1][0]
                 )
-            else:
-                raise ValueError("QPC not compiled for required seq_len")
 
         comp_ctx_lengths_prefill.sort()
         comp_ctx_lengths_decode.sort()
@@ -320,7 +318,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 comp_ctx_len: np.empty(comp_ctx_len, dtype=np.int64)
                 for comp_ctx_len in comp_ctx_lengths_prefill + comp_ctx_lengths_decode
             }
-        return comp_ctx_lengths_prefill, comp_ctx_lengths_decode
+        return comp_ctx_lengths_prefill or None, comp_ctx_lengths_decode or None
 
     def _decode_ks_from_session(self) -> list[int]:
         """Derive which K values are compiled in this QPC from session.allowed_shapes.
