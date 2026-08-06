@@ -33,7 +33,6 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, SupportedTask
 from vllm.utils.import_utils import PlaceholderModule
-from vllm_qaic.utils.qaic_utils import qaic_apply_grammar_bitmask
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
@@ -251,7 +250,7 @@ class QaicAsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         )
         # Apply structured output bitmasks if present.
         if self._grammar_output is not None:
-            qaic_apply_grammar_bitmask(
+            apply_grammar_bitmask(
                 state.scheduler_output, self._grammar_output, mr.input_batch, logits
             )
 
@@ -1398,7 +1397,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
 
         # Apply structured output bitmasks if present.
         if grammar_output is not None:
-            qaic_apply_grammar_bitmask(
+            apply_grammar_bitmask(
                 scheduler_output, grammar_output, self.input_batch, logits
             )
 
