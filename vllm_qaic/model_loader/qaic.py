@@ -30,7 +30,7 @@ from vllm.model_executor.layers.pooler.seqwise import (
     pooler_for_classify,
     pooler_for_embed,
 )
-from vllm.model_executor.layers.pooler.special import DispatchPooler
+from vllm.model_executor.layers.pooler.special import BgeM3Pooler, DispatchPooler
 from vllm.model_executor.layers.pooler.tokwise import (
     AllPool,
     pooler_for_token_classify,
@@ -93,28 +93,27 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self.task = None
         if vllm_config.model_config.runner_type == "pooling":
             self.is_pooling_model = True
+            _token_classify_pooler = pooler_for_token_classify(
+                pooler_config,
+                pooling=AllPool(),
+                classifier=classifier,
+            )
+            _embed_pooler = pooler_for_embed(pooler_config)
             self._pooler = DispatchPooler(
                 {
                     "token_embed": pooler_for_token_embed(pooler_config),
-                    "embed": pooler_for_embed(pooler_config),
-                    "token_classify": pooler_for_token_classify(
-                        pooler_config,
-                        pooling=AllPool(),
-                        classifier=classifier,
-                    ),
+                    "embed": _embed_pooler,
+                    "token_classify": _token_classify_pooler,
                     "classify": pooler_for_classify(
                         pooler_config,
                         pooling=pooling,
                         act_fn=None,  # softmax not applied; raw logits returned
                     ),
-                    # TODO: "score" removed: not a valid PoolingTask in upstream vllm 0.23.0
-                    # (DispatchPooler validates keys; "score" was added in the Qualcomm fork)
-                    # "score": pooler_for_classify(
-                    #     pooler_config,
-                    #     pooling=pooling,
-                    #     classifier=classifier,
-                    #     act_fn=None,  # sigmoid not applied; raw logits returned
-                    # ),
+                    # new task added in upstream vllm
+                    "embed&token_classify": BgeM3Pooler(
+                        token_classify_pooler=_token_classify_pooler,
+                        embed_pooler=_embed_pooler,
+                    ),
                 }
             )
             self.hidden_dimension = model_config.get_hidden_size()
@@ -126,7 +125,9 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 self.is_qaic_pooler = True
                 self.normalize = bool(override_qaic_config.get("normalize", False))
                 self.softmax = bool(override_qaic_config.get("softmax", False))
-            self.task: str | None = override_qaic_config.get("task", None)
+            # upstream vllm v0.23 removed "score" as a PoolingTask; cross-encoder scoring maps to "classify" instead.
+            _raw_task: str | None = override_qaic_config.get("task", None)
+            self.task: str | None = "classify" if _raw_task == "score" else _raw_task
 
         # TODO: Add new variables for turbo
 
@@ -142,7 +143,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             assert "prefill_seq_len" in override_qaic_config, (
                 "Prefill seq_len missing in override_qaic_config"
             )
-            self.prefill_seq_len = int(override_qaic_config["prefill_seq_len"])
+            self.prefill_seq_len = override_qaic_config["prefill_seq_len"] if isinstance(override_qaic_config["prefill_seq_len"], (list, tuple)) else int(override_qaic_config["prefill_seq_len"])
 
         self.ctx_len = model_config.max_model_len
         self.decode_bsz = vllm_config.scheduler_config.max_num_seqs
@@ -303,15 +304,13 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 comp_ctx_lengths_prefill.append(
                     self.session.allowed_shapes[i][ccl_idx][1][0]
                 )
-            elif (
+            if (
                 self.session.allowed_shapes[i][input_idx][1][1] == 1
                 or self.num_logits_to_keep
             ):
                 comp_ctx_lengths_decode.append(
                     self.session.allowed_shapes[i][ccl_idx][1][0]
                 )
-            else:
-                raise ValueError("QPC not compiled for required seq_len")
 
         comp_ctx_lengths_prefill.sort()
         comp_ctx_lengths_decode.sort()
@@ -320,7 +319,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 comp_ctx_len: np.empty(comp_ctx_len, dtype=np.int64)
                 for comp_ctx_len in comp_ctx_lengths_prefill + comp_ctx_lengths_decode
             }
-        return comp_ctx_lengths_prefill, comp_ctx_lengths_decode
+        return comp_ctx_lengths_prefill or None, comp_ctx_lengths_decode or None
 
     def _decode_ks_from_session(self) -> list[int]:
         """Derive which K values are compiled in this QPC from session.allowed_shapes.
@@ -498,8 +497,10 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
 
     def get_allowed_seqlens(self):
         allowed_seqlens = []
+        # Use the binding index of "input_ids"
+        input_ids_idx = self.session.binding_index_map.get("input_ids", 1)
         for allowed_shape in self.session.allowed_shapes:
-            allowed_seqlens.append(allowed_shape[1][1][1])
+            allowed_seqlens.append(allowed_shape[input_ids_idx][1][1])
         return allowed_seqlens
 
     @property
@@ -1745,6 +1746,9 @@ def get_hf_model(
         del args["continuous_batching"]
         del args["qaic_config"]
         del args["kv_offload"]
+        # pooling_method is only needed for task="embed" (sequence-level
+        # reduction: mean/cls/etc.). classify/token_embed/token_classify/
+        # embed&token_classify tasks don't require a pooling_method.
         if override_qaic_config and (
             "pooling_device" in override_qaic_config
             and override_qaic_config["pooling_device"] == "qaic"

@@ -335,9 +335,9 @@ class QaicPlatform(Platform):
                     # TODO: long_prefill_token_threshold should not be set when
                     # chunked prefill is disabled
                     logger.warning_once(
-                        "Chunked prefill is disabled; chunk size=%d will be used"
+                        "Chunked prefill is disabled; chunk size=%s will be used"
                         " as prefill_seq_len.",
-                        __prefill_seq_len,
+                        str(__prefill_seq_len),
                     )
                 if "override_qaic_config" not in additional_config:
                     additional_config["override_qaic_config"] = {}
@@ -351,7 +351,7 @@ class QaicPlatform(Platform):
                 # gives the scheduler the correct per-step budget AND sizes the buffers
                 # large enough to never overflow after decode expansion.
                 scheduler_config.max_num_batched_tokens = min(
-                    scheduler_config.max_num_seqs * __prefill_seq_len,
+                    scheduler_config.max_num_seqs * (max(__prefill_seq_len) if isinstance(__prefill_seq_len, (list, tuple)) else __prefill_seq_len),
                     scheduler_config.max_num_batched_tokens,
                 )
             # Reset max_num_scheduled_tokens so that

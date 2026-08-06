@@ -7,6 +7,7 @@
 # Adapted from vllm/examples/offline_inference/basic/classify.py
 
 from vllm import LLM
+from vllm.config import PoolerConfig
 
 # Classification example for QAIC.
 # llm.classify(prompts) runs a sequence-classification model and returns a
@@ -47,8 +48,9 @@ def main():
         enforce_eager=True,
         max_num_seqs=4,
         max_model_len=512,
+        pooler_config=PoolerConfig(task="classify"),
         additional_config={
-            "device_group": [5],
+            "device_group": [0],
             "override_qaic_config": {"pooling_device": "cpu", "task": "classify"},
         },
     )
@@ -62,8 +64,9 @@ def main():
         enforce_eager=True,
         max_num_seqs=4,
         max_model_len=512,
+        pooler_config=PoolerConfig(task="classify"),
         additional_config={
-            "device_group": [6],
+            "device_group": [0],
             "override_qaic_config": {"pooling_device": "qaic", "task": "classify"},
         },
     )
