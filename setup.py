@@ -119,33 +119,9 @@ def _is_qaic() -> bool:
 
 
 def get_qaic_sdk_version():
-    """Get the QAIC sdk version from qaicrt.
-
-    Runs in a subprocess so that a SIGABRT from qaicrt (e.g. when the user
-    lacks qaic group membership) does not abort the build process itself.
+    """Get the QAIC sdk version.
     """
-    import platform
-
-    script = (
-        "import sys, platform; "
-        f"sys.path.insert(0, '/opt/qti-aic/dev/lib/{platform.machine()}'); "
-        "from qaicrt import Util as qaic_util; "
-        "_, _, _, patch, _ = qaic_util().getAicVersion(); "
-        "print('.'.join(patch.split('.')[:2]))"
-    )
-    try:
-        import subprocess
-
-        result = subprocess.run(
-            [sys.executable, "-c", script],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        version = result.stdout.strip()
-        return version if version else "1.22"
-    except Exception:
-        return "1.22"
+    return "1.22"
 
 
 def get_requirements(filename=None) -> list[str]:

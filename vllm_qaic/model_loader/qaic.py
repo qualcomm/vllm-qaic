@@ -84,6 +84,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         super().__init__()
         model_config = vllm_config.model_config
         config = model_config.hf_config
+        additional_config = vllm_config.additional_config or {}
+        override_qaic_config = additional_config.get("override_qaic_config") or {}
 
         pooler_config = vllm_config.model_config.pooler_config
         self._pooler = None
@@ -118,9 +120,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             self.is_qaic_pooler = False
             self.normalize = False
             self.softmax = False
-            override_qaic_config = (vllm_config.additional_config or {}).get(
-                "override_qaic_config"
-            ) or {}
             if override_qaic_config.get("pooling_device", None) == "qaic":
                 self.is_qaic_pooler = True
                 self.normalize = bool(override_qaic_config.get("normalize", False))
@@ -138,9 +137,10 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             # For whisper, the prefill sequence length is fixed to 1.
             self.prefill_seq_len = 1
         else:
-            self.prefill_seq_len = (
-                vllm_config.scheduler_config.long_prefill_token_threshold
+            assert "prefill_seq_len" in override_qaic_config, (
+                "Prefill seq_len missing in override_qaic_config"
             )
+            self.prefill_seq_len = int(override_qaic_config["prefill_seq_len"])
 
         self.ctx_len = model_config.max_model_len
         self.decode_bsz = vllm_config.scheduler_config.max_num_seqs
@@ -383,6 +383,13 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             use_async_scheduling=self.use_async_scheduling,
         )
         self.logits_ndim = self.session.get_logits_ndim()
+        # Resolve the logits output dtype directly from the QPC binding so the
+        # host-side logits buffers match exactly (e.g. float16 for mxfp6/mxint8
+        # models, float32 for full-precision ones). Falls back to float32.
+        _logits_info = self.get_io_shape_and_dtype("logits", is_input=False)
+        self.logits_dtype = (
+            np.dtype(_logits_info[1]) if _logits_info is not None else np.float32
+        )
 
         e = time.perf_counter() - s
         logger.info("Successfully loaded QPC in %s secs", e)
@@ -400,12 +407,12 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self.prefill_num_logits_buffer = None
         self.prefill_logits = dict(
             logits=np.random.randn(self.prefill_bsz, 1, self.vocab_size).astype(
-                np.float32
+                self.logits_dtype
             )
         )
         self.session.set_buffers(self.prefill_logits)
         self.batch_prefill_logits = np.empty(
-            (self.decode_bsz, self.vocab_size), dtype=np.float32
+            (self.decode_bsz, self.vocab_size), dtype=self.logits_dtype
         )
         self.decode_num_logits_buffer = None
         if self.num_logits_to_keep is not None:
@@ -519,7 +526,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         kv_caches: list[list[np.ndarray]],
     ):
         for _, bidx in enumerate(batch_indices):
-            if kv_caches[bidx] and len(kv_caches[bidx]) > 0:
+            if kv_caches[bidx] is not None and len(kv_caches[bidx]) > 0:
                 assert len(self.kv_cache_info) == len(kv_caches[bidx]), (
                     f"KV buffer count mismatch: "
                     f"expected {len(self.kv_cache_info)} buffers, "
@@ -814,14 +821,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     pending_exec_count += 1
                     pending_exec_queue.put(exec_obj_idx)
 
-            if (
-                self.config.model_type == "whisper"
-                and mm_kwargs_list
-                and (mm_kwargs := mm_kwargs_list[i])
-            ):
-                for k, v in mm_kwargs.items():
-                    self.decode_batch_inputs[k][i] = v[0]
-
         return
 
     def _run_decode(
@@ -903,22 +902,21 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         )
         output_key = "logits" if self.task in ("score", "classify") else "output"
 
-        # Build output buffer.
-        if self.is_qaic_pooler:
+        # Build output buffer - two cases based on output_key.
+        if output_key == "logits":
             encode_num_logits_buffer: dict = {
-                "output": np.empty((self.decode_bsz, self.hidden_dimension), np.float32)
-            }
-        elif output_key == "logits":
-            encode_num_logits_buffer = {
                 "logits": np.empty(
                     (self.decode_bsz, getattr(self.config, "num_labels", 1)), np.float32
                 )
             }
         else:
+            output_shape = (
+                (self.decode_bsz, self.hidden_dimension)
+                if self.is_qaic_pooler
+                else (self.decode_bsz, encode_seq_len, self.hidden_dimension)
+            )
             encode_num_logits_buffer = {
-                "output": np.empty(
-                    (self.decode_bsz, encode_seq_len, self.hidden_dimension), np.float32
-                ),
+                "output": np.empty(output_shape, np.float32),
                 **{
                     name: np.empty((self.decode_bsz, self.hidden_dimension), np.float32)
                     for name in self.session.output_names
@@ -971,7 +969,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         output_array = output[output_key][: len(prefill_cum_sum)]
         output_tensor = torch.tensor(output_array)
 
-        if not self.is_qaic_pooler and not output_key == "logits":
+        if not self.is_qaic_pooler and output_key != "logits":
             hidden_states = torch.cat(
                 [
                     output_tensor[i, : prompt_lens[i]]
@@ -1183,6 +1181,11 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             # added to decode_batch_inputs before this dict was replaced.
             if getattr(self, "default_mm_kwargs", None):
                 self.decode_batch_inputs.update(self.default_mm_kwargs)
+            # Keep decode_batch_inputs_by_k in sync: _run_decode reads from this
+            # map, so it must point at the rebuilt dict that carries the correct
+            # (MRoPE-aware) position_ids / batch_index / mm-kwargs shapes.
+            for _k in self.decode_batch_inputs_by_k:
+                self.decode_batch_inputs_by_k[_k] = self.decode_batch_inputs
         # TODO: Clean up
         # self._input_map_chg_needed = "decoder_input_ids" in self.session.input_names
         # # This is a hack for mapping names to qpc input,
@@ -1226,7 +1229,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                             (self.prefill_bsz, 1, self.vocab_size)
                             if self.logits_ndim == 3
                             else (self.prefill_bsz, self.vocab_size),
-                            dtype=np.float32,
+                            dtype=self.logits_dtype,
                         ),
                     }
                     if self.lora_mode:
@@ -1267,15 +1270,17 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     else (self.decode_bsz, self.vocab_size)
                 )
                 self.session.create_output_buffers(
-                    input_kv_buffers, decode_logits_shape, np.float32
+                    input_kv_buffers, decode_logits_shape, self.logits_dtype
                 )
-                # Pre-allocate logits buffer into decode_batch_inputs once so that
-                # _run_decode can reuse it instead of allocating on every decode step.
-                self.session.create_output_buffers(
-                    self.decode_batch_inputs,
-                    decode_logits_shape,
-                    np.float32,
-                )
+                # Pre-allocate logits buffer into every decode_batch_inputs_by_k
+                # entry so _run_decode can reuse it for all K values. The decode
+                # QPC logits binding is float16, so the buffer must match.
+                for _k_buf in self.decode_batch_inputs_by_k.values():
+                    self.session.create_output_buffers(
+                        _k_buf,
+                        decode_logits_shape,
+                        self.logits_dtype,
+                    )
                 # CCL: seed comp_ctx_lengths buffer for the dummy run; _run_decode
                 # overwrites it per step with the selected bucket buffer.
                 if self.comp_ctx_lengths_decode is not None:
@@ -1283,7 +1288,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                         self.comp_ctx_lengths_decode[-1], dtype=np.int64
                     )
                 _ = self.session.set_data_for_kv_handoff(
-                    input_kv_buffers,
+                    KvCache_buff,
                     [("batch_index", bidx), ("ctx_start", 0)],
                     self.decode_execObj_idx,
                     self.session.decode_buff_map,
@@ -1347,11 +1352,13 @@ def load_qaic_model(
         assert override_qaic_config.get("pooling_device"), (
             "pooling_device must be provided in override_qaic_config for pooling task"
         )
-        if override_qaic_config.get("pooling_device", None) == "qaic":
-            if override_qaic_config.get("task") not in ("score", "classify"):
-                assert override_qaic_config.get("pooling_method"), (
-                    "pooling_method must be provided in override_qaic_config for qaic pooling task"
-                )
+        if override_qaic_config.get(
+            "pooling_device", None
+        ) == "qaic" and override_qaic_config.get("task") not in ("score", "classify"):
+            assert override_qaic_config.get("pooling_method"), (
+                "pooling_method must be provided in override_qaic_config for qaic"
+                "pooling task"
+            )
 
     # if provided qpc is valid
     if qpc_path and not check_qpc_exists(qpc_path):
@@ -1663,8 +1670,8 @@ def get_hf_model(
         QEFFAutoModel,
         QEFFAutoModelForCausalLM,
         QEFFAutoModelForImageTextToText,
-        QEFFAutoModelForSpeechSeq2Seq,
         QEFFAutoModelForSequenceClassification,
+        QEFFAutoModelForSpeechSeq2Seq,
     )
     from QEfficient.peft.lora import QEffAutoLoraModelForCausalLM
 
@@ -1732,10 +1739,7 @@ def get_hf_model(
             del args["qaic_config"]
     if model_config.runner_type == "pooling" and not model_config.is_multimodal_model:
         _task = (override_qaic_config or {}).get("task", None)
-        if _task in ("score", "classify"):
-            model_type = "seq_classify"
-        else:
-            model_type = "encode"
+        model_type = "seq_classify" if _task in ("score", "classify") else "encode"
         del args["continuous_batching"]
         del args["qaic_config"]
         del args["kv_offload"]
@@ -1840,6 +1844,7 @@ def _get_qaic_compile_config(
         mxint8_en = True
     # Number of kv cache blocks should be same as num_gpu_blocks, if CPL==blk_size
     kv_cache_batch_size = vllm_config.cache_config.num_cpu_blocks
+    additional_config = vllm_config.additional_config or {}
     prefill_only = None
     # prefill_only options
     if vllm_config.kv_transfer_config:
@@ -1847,12 +1852,17 @@ def _get_qaic_compile_config(
         if kv_role in ["kv_producer", "kv_consumer"]:
             prefill_only = kv_role == "kv_producer"
 
-    _device_group = (vllm_config.additional_config or {}).get("device_group")
+    _device_group = additional_config.get("device_group")
+
+    # update default settings with user overrides from additional_config
+    override_qaic_config: dict[str, Any] | None = (
+        vllm_config.additional_config or {}
+    ).get("override_qaic_config")
 
     # Prepare default config
     cfg: dict[str, Any] = {
         "qpc_path": None,
-        "prefill_seq_len": vllm_config.scheduler_config.long_prefill_token_threshold,
+        "prefill_seq_len": 128,
         "ctx_len": vllm_config.model_config.max_model_len,
         "batch_size": 1,
         "full_batch_size": vllm_config.scheduler_config.max_num_seqs,
@@ -1868,10 +1878,6 @@ def _get_qaic_compile_config(
         "prefill_only": prefill_only,
         "compile_only": False,
     }
-    # update default settings with user overrides from additional_config
-    override_qaic_config: dict[str, Any] | None = (
-        vllm_config.additional_config or {}
-    ).get("override_qaic_config")
     cfg.update(_clean_config(override_qaic_config, vllm_config))
     # update through environment variable
     cfg.update(_clean_config(QAIC_DEVICE_CONFIG[speculative_model_type]))
@@ -2002,9 +2008,13 @@ def _get_qaic_compile_config(
                 "Please set `max_num_seqs` (decode batch size) to 1."
             )
             del cfg["full_batch_size"]
-    qaic_config: dict[str, Any] | None = None
+    qaic_config: dict[str, Any] | None = (override_qaic_config or {}).pop(
+        "qaic_config", None
+    )
     if speculative_model_type in ("target", "turbo"):
-        qaic_config = dict(speculative_model_type=speculative_model_type)
+        if qaic_config is None:
+            qaic_config = {}
+        qaic_config["speculative_model_type"] = speculative_model_type
     # On Device Sampling
     if cfg.get("aic_include_sampler") is not None:
         if qaic_config is None:
@@ -2058,6 +2068,9 @@ def _get_qaic_compile_config(
         assert qpc_idx is not None
         qpc_path = qpc_path.split(":")[qpc_idx]
     stages = int(cfg.pop("stages", 1))
+    # pretrained_extra_args is a from_pretrained argument handled in get_hf_model;
+    # it must not be forwarded to qeff_model.compile() or qaic-compile.
+    cfg.pop("pretrained_extra_args", None)
     # "mdp_num_partitions" is needed for new MDP parititoner in QEFF
     if stages != 1 and "mdp_load_partition_config" not in cfg:
         cfg["mdp_num_partitions"] = stages

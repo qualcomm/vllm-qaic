@@ -51,10 +51,16 @@ class QaicDraftModelProposer:
             draft_vllm_config.speculative_config.num_speculative_tokens
         )
         self.decode_bsz = draft_vllm_config.scheduler_config.max_num_seqs
-        self.prefill_seq_len = (
-            draft_vllm_config.scheduler_config.long_prefill_token_threshold
-        )
-        self.max_model_len = draft_vllm_config.model_config.max_model_len
+        _override_qaic_config = {}
+        if "draft_override_qaic_config" in draft_vllm_config.additional_config:
+            _override_qaic_config = draft_vllm_config.additional_config.get(
+                "draft_override_qaic_config", None
+            )
+        elif "override_qaic_config" in draft_vllm_config.additional_config:
+            _override_qaic_config = draft_vllm_config.additional_config.get(
+                "override_qaic_config", None
+            )
+        self.prefill_seq_len = _override_qaic_config.get("prefill_seq_len", 128)
 
     def load_model(self) -> None:
         logger.info(
