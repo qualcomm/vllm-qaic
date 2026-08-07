@@ -9,15 +9,19 @@ This guide covers installing `vllm-qaic` in both **AOT** (Ahead-of-Time compiled
 - [Prerequisites](#prerequisites)
 - [Mode Overview](#mode-overview)
 - [Install using `install.sh` (recommended)](#install-using-installsh-recommended)
-  - [AOT mode](#aot-mode--installsh)
-  - [PYT mode](#pyt-mode--installsh)
+    - [AOT mode](#aot-mode--installsh)
+    - [PYT mode](#pyt-mode--installsh)
 - [Manual Installation](#manual-installation)
-  - [AOT mode](#aot-mode--manual)
-  - [PYT mode](#pyt-mode--manual)
+    - [AOT mode](#aot-mode--manual)
+    - [PYT mode](#pyt-mode--manual)
+- [Docker-based Installation](#docker-based-installation)
+    - [Build targets](#build-targets)
+    - [Build commands](#build-commands)
+    - [Entrypoint script (dev only)](#entrypoint-script-dev-only)
 - [Wheel-based Installation](#wheel-based-installation)
-  - [Build wheels](#step-1--build-wheels)
-  - [Install from wheel using `install.sh`](#step-2a--install-from-wheel-using-installsh)
-  - [Install from wheel manually](#step-2b--install-from-wheel-manually)
+    - [Build wheels](#step-1--build-wheels)
+    - [Install from wheel using `install.sh`](#step-2a--install-from-wheel-using-installsh)
+    - [Install from wheel manually](#step-2b--install-from-wheel-manually)
 - [Verification](#verification)
 - [Version Reference](#version-reference)
 
@@ -34,6 +38,7 @@ This guide covers installing `vllm-qaic` in both **AOT** (Ahead-of-Time compiled
 | QAIC Apps SDK | >= 1.22.0 (PYT mode requires `--install-torch-qaic` flag) |
 
 Install the QAIC SDK before proceeding:
+
 - [SDK installation guide](https://quic.github.io/cloud-ai-sdk-pages/latest/Getting-Started/Installation/index.html)
 - For **PYT mode**: run the Apps SDK installer with `--install-torch-qaic` to build `torch_qaic` wheels into `/opt/qti-aic/integrations/torch_qaic/py312/`
 
@@ -60,7 +65,7 @@ source .venv/bin/activate
 | | AOT (Ahead-of-Time) | PYT (Eager / PyTorch) |
 |---|---|---|
 | Inference engine | QEfficient + QAIC compiler | torch_qaic |
-| torch version | `2.7.0+cpu` | `2.10.0+cpu` |
+| torch version | `2.7.0+cpu` | `2.11.0+cpu` |
 | `torch_qaic` required | No (must **not** be present) | Yes |
 | vllm-qaic wheel tag | `*aot*` | `*pyt*` |
 
@@ -163,9 +168,9 @@ pip install "setuptools>=77.0.3,<80.0.0" setuptools-scm wheel "cmake>=3.26"
 #    and will error if a CUDA torch is present when it imports.
 python -m pip install \
     --index-url https://download.pytorch.org/whl/cpu \
-    "torch==2.10.0+cpu" \
-    "torchvision==0.25.0+cpu" \
-    "torchaudio==2.10.0+cpu"
+    "torch==2.11.0+cpu" \
+    "torchvision==0.26.0+cpu" \
+    "torchaudio==2.11.0+cpu"
 
 # 1b. torch_qaic AFTER torch is confirmed CPU-only
 #     Replace py312 with your Python version (py310, py311, py312)
@@ -189,13 +194,79 @@ pip install --no-build-isolation ./vllm-qaic
 
 ---
 
+## Docker-based Installation
+
+`docker/Dockerfile.aot` and `docker/Dockerfile.pyt` each build vllm-qaic inside a container, layered on a shared `aot-base`/`pyt-base` stage (system packages, uv venv, torch, vllm deps + vllm). Both Dockerfiles expose the same four BuildKit targets on top of that base.
+
+### Build targets
+
+| Target | vllm-qaic source | Install mode | Use case |
+|---|---|---|---|
+| `release` | Published git ref (`VLLM_QAIC_GIT_REF` tag/branch) | Non-editable | Self-contained image, reproducible from ARG pins alone — no build context needed for vllm-qaic itself |
+| `ci` | Build-context checkout (default), or `VLLM_QAIC_PR`/`VLLM_QAIC_BRANCH` | Non-editable | Test a specific PR/branch/checkout without touching a dev environment |
+| `dev` | Build-context checkout (always) | Editable (`pip install -e`) | Interactive iteration — source is bind-mounted at `/src/vllm-qaic` and kept in the image |
+| `wheel` | Build-context checkout | N/A — builds and exports a wheel, no install | Produce a distributable `vllm_qaic-*.whl` via BuildKit's local exporter (see [Wheel-based Installation](#wheel-based-installation)) |
+
+`release`/`ci` both install non-editably and differ only in *where* vllm-qaic's source comes from. `dev` is the only target with an editable install and the only one that ships source directories (`/src/vllm-qaic`, plus `/src/qefficient` for AOT) and a `sudo`+`entrypoint.sh` layer for interactive use — `release`/`ci` are meant to run as immutable images under whatever user the orchestrator picks, not as UID-mapped interactive containers.
+
+`PYTHON_VERSION` (default `3.12`; also `3.10`/`3.11`) is threaded through every target via `aot-base`/`pyt-base`, provisioned with `uv python install` rather than apt so non-default versions work regardless of the base image's own Python.
+
+### Build commands
+
+```bash
+# Release (default pins)
+docker build --target release -f docker/Dockerfile.aot -t vllm-qaic-aot:1.22 .
+docker build --target release -f docker/Dockerfile.pyt -t vllm-qaic-pyt:1.22 .
+
+# Release (override version / device arch)
+docker build --target release -f docker/Dockerfile.aot \
+  --build-arg VLLM_QAIC_GIT_REF=v1.23 --build-arg QEFF_BRANCH=release/v1.23.0 \
+  -t vllm-qaic-aot:1.23 .
+docker build --target release -f docker/Dockerfile.pyt \
+  --build-arg QAIC_DEVICE_ARCH=v81 -t vllm-qaic-pyt:1.22-v81 .
+
+# CI (current checkout)
+docker build --target ci -f docker/Dockerfile.aot -t vllm-qaic-aot:ci .
+docker build --target ci -f docker/Dockerfile.pyt -t vllm-qaic-pyt:ci .
+
+# CI (specific PR or branch)
+docker build --target ci -f docker/Dockerfile.aot --build-arg VLLM_QAIC_PR=42 -t vllm-qaic-aot:ci-pr-42 .
+docker build --target ci -f docker/Dockerfile.pyt --build-arg VLLM_QAIC_BRANCH=feature/my-branch -t vllm-qaic-pyt:ci-branch .
+
+# Dev (editable install; AOT also supports overriding the QEfficient ref)
+docker build --target dev -f docker/Dockerfile.aot -t vllm-qaic-aot:dev .
+docker build --target dev -f docker/Dockerfile.aot --build-arg QEFF_PR=456 -t vllm-qaic-aot:dev .
+docker build --target dev -f docker/Dockerfile.pyt -t vllm-qaic-pyt:dev .
+```
+
+The `BASE_IMAGE` used by any target must have the QAIC Platform and Apps SDKs installed (`/opt/qti-aic/` present) so vllm-qaic can load at runtime; override with `--build-arg BASE_IMAGE=...`.
+
+### Entrypoint script (dev only)
+
+`dev` images use `docker/entrypoint.sh` to map the container process to the host's UID/GID on `docker run`, so bind-mounted source stays host-owned and the QAIC device is accessible without running as root:
+
+```bash
+docker run -it --rm \
+  -e USER_UID=$(id -u) -e USER_GID=$(id -g) \
+  -e QAIC_GID=$(getent group qaic | cut -d: -f3) \
+  --device /dev/accel/ -v $(pwd):/src/vllm-qaic \
+  vllm-qaic-pyt:dev
+```
+
+- If `USER_UID`/`USER_GID` are unset, the entrypoint is a no-op passthrough (`exec "$@"`) and the command runs as root.
+- Otherwise it creates/reuses a matching-GID/UID user, grants it passwordless sudo, joins it to a group literally named `qaic` at `QAIC_GID` (created if missing) so it can access `/dev/accel`, `chown`s its home directory, then execs the container command as that user via `runuser`.
+- `--device /dev/accel/` and `QAIC_GID` are independent requirements — passing one without the other leaves the container either without device nodes at all, or with device nodes it lacks permission to open. Both are needed for `torch_qaic`/QEfficient to enumerate live devices.
+- To add other setup logic (extra packages, env vars) that should run once per container start rather than at build time, extend `docker/entrypoint.sh` before its final `exec runuser -u "${USERNAME}" -- "$@"` line — anything after that line only runs as root and is skipped once the exec replaces the shell.
+
+---
+
 ## Wheel-based Installation
 
 Use this path when distributing a pre-built `vllm-qaic` wheel (e.g., from the QAIC SDK or a CI artifact) instead of building from source.
 
 ### Step 1 — Build wheels
 
-Run `build_wheels.sh` from within an activated Python 3.12 environment:
+Wheels are always built inside a docker container — run `build_wheels.sh` from the repo root with `docker buildx` available (no venv activation needed; the script invokes each Dockerfile's `wheel` BuildKit target and exports the result via BuildKit's local exporter, no bind mount or container run required):
 
 ```bash
 # Build both AOT and PYT wheels into ./dist/
@@ -253,7 +324,7 @@ After installation, verify the environment is clean:
 # Check torch is CPU-only (no CUDA suffix)
 python -c "import torch; print(torch.__version__)"
 # AOT expected: 2.7.0+cpu
-# PYT expected: 2.10.0+cpu
+# PYT expected: 2.11.0+cpu
 
 # Verify vllm-qaic loads and registers the QAIC platform plugin
 python -c "import vllm_qaic; print('vllm_qaic OK')"
@@ -276,9 +347,9 @@ All version constants are defined in [`scripts/utility.sh`](../scripts/utility.s
 |---|---|---|
 | `VLLM_VERSION` | `0.15.0` | vLLM release tag |
 | `TORCH_VERSION_AOT` | `2.7.0+cpu` | CPU torch for AOT (matches QEfficient exact pin) |
-| `TORCH_VERSION_PYT` | `2.10.0+cpu` | CPU torch for PYT |
-| `TORCHVISION_VERSION_PYT` | `0.25.0+cpu` | torchvision for PYT (keep in sync with torch) |
-| `TORCHAUDIO_VERSION_PYT` | `2.10.0+cpu` | torchaudio for PYT (keep in sync with torch) |
+| `TORCH_VERSION_PYT` | `2.11.0+cpu` | CPU torch for PYT |
+| `TORCHVISION_VERSION_PYT` | `0.26.0+cpu` | torchvision for PYT (keep in sync with torch) |
+| `TORCHAUDIO_VERSION_PYT` | `2.11.0+cpu` | torchaudio for PYT (keep in sync with torch) |
 | `QEFF_BRANCH` | `main` | QEfficient branch/tag |
 | `TORCH_QAIC_VERSION` | `0.1.0` | torch_qaic wheel version |
 | `VLLM_TARGET_DEVICE_AOT` | `empty` | vLLM build target for AOT mode |
