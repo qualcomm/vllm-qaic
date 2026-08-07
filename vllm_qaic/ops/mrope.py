@@ -36,6 +36,15 @@ class QAicMRotaryEmbedding(MRotaryEmbedding):
         self._match_cos_sin_cache_dtype(query)
 
         # ------------------------------------------------------------------
+        # Interleaved rotation style (is_neox_style=False): the QAIC
+        # mrotary_embedding kernel and its eager fallback only support
+        # neox-style (first-half / second-half split). Fall back to the
+        # parent's pure-PyTorch implementation which handles both styles.
+        # ------------------------------------------------------------------
+        if not self.is_neox_style:
+            return self.forward_native(positions, query, key, offsets)
+
+        # ------------------------------------------------------------------
         # Interleaved 3D positions: use the original path.
         # Compute cos/sin on CPU (apply_interleaved_rope assembles them from
         # the 3 T/H/W rows), then apply RoPE head-by-head via
