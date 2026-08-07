@@ -12,6 +12,8 @@ from vllm.model_executor.layers.rotary_embedding.mrope import (
     apply_interleaved_rope,
 )
 
+from vllm_qaic.ops._triton_flags import triton_op_enabled
+
 
 class QAicMRotaryEmbedding(MRotaryEmbedding):
     def forward_oot(
@@ -34,6 +36,36 @@ class QAicMRotaryEmbedding(MRotaryEmbedding):
         assert key is not None
 
         self._match_cos_sin_cache_dtype(query)
+
+        # ------------------------------------------------------------------
+        # Triton fast path (opt-in): all 2D T/H/W positions dispatch to vLLM's
+        # triton_mrope kernel, matching MRotaryEmbedding.forward_cuda.
+        # triton_mrope receives self.mrope_interleaved and branches on it
+        # in-kernel (is_interleaved: tl.constexpr), so this covers both
+        # interleaved (e.g. Qwen3-VL, mrope_section=[24,20,20]) and
+        # non-interleaved section layouts. Flag off -> the NSP branches below.
+        # The 1D text-only branch below keeps its eager-fallback path
+        # (triton_mrope requires 2D positions).
+        # ------------------------------------------------------------------
+        if positions.ndim == 2 and triton_op_enabled("MROTARY_EMBEDDING"):
+            from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
+
+            assert self.mrope_section
+            cos_sin = self.cos_sin_cache[positions]  # [3, num_tokens, rotary_dim]
+            cos, sin = cos_sin.chunk(2, dim=-1)  # each [3, num_tokens, half]
+            query_shape = query.shape
+            key_shape = key.shape
+            q, k = triton_mrope(
+                query,
+                key,
+                cos,
+                sin,
+                self.mrope_section,
+                self.head_size,
+                self.rotary_dim,
+                self.mrope_interleaved,
+            )
+            return q.reshape(query_shape), k.reshape(key_shape)
 
         # ------------------------------------------------------------------
         # Interleaved 3D positions: use the original path.
