@@ -618,13 +618,40 @@ class QaicWorkerAoT(QaicWorker):
         self.cache_config.sliding_window = None
 
         assert num_cpu_blocks == 0
+        if self.model_config.enforce_eager:
+            # adapted from gpu_worker.py
+            self.cache_config.num_gpu_blocks = num_gpu_blocks
+            return
+
         if not self.cache_config.enable_prefix_caching:
             self.cache_config.num_gpu_blocks = num_gpu_blocks
             # Sanity check: AOT requires exact block count; eager is flexible
-            assert num_gpu_blocks == self.scheduler_config.max_num_seqs + 1
+            assert (
+                self.model_config.enforce_eager
+                or num_gpu_blocks == self.scheduler_config.max_num_seqs + 1
+            )
             return
-        else:
-            raise NotImplementedError("prefix caching is not supported on QAIC in V1")
+        elif (
+            not self.model_config.enforce_eager
+            and self.cache_config.enable_prefix_caching
+        ):
+            if self.cache_config.num_gpu_blocks_override:
+                self.cache_config.num_gpu_blocks = (
+                    self.scheduler_config.max_num_seqs
+                    * self.cache_config.num_gpu_blocks_override
+                    + 1
+                )
+            else:
+                # For prefix caching, we need to calculate the number of GPU blocks
+                # based on the max model length and block size.
+                self.cache_config.num_gpu_blocks = (
+                    self.scheduler_config.max_num_seqs
+                    * (
+                        self.model_config.max_model_len
+                        // self.scheduler_config.long_prefill_token_threshold
+                    )
+                    + 1
+                )
 
     def init_device(self):
         """Initialize qaic device
@@ -684,11 +711,24 @@ class QaicWorkerAoT(QaicWorker):
         pass
 
     def determine_available_memory(self) -> int:
-        num_gpu_blocks = (
-            self.cache_config.num_gpu_blocks_override
-            if self.cache_config.num_gpu_blocks_override
-            else self.scheduler_config.max_num_seqs
-        ) + 1
+        if self.vllm_config.cache_config.enable_prefix_caching:
+            if self.cache_config.num_gpu_blocks_override:
+                num_gpu_blocks = (
+                    self.scheduler_config.max_num_seqs
+                    * self.cache_config.num_gpu_blocks_override
+                    + 1
+                )
+            else:
+                num_gpu_blocks = (
+                    self.scheduler_config.max_num_seqs
+                    * (
+                        self.vllm_config.model_config.max_model_len
+                        // self.scheduler_config.long_prefill_token_threshold
+                    )
+                    + 1
+                )
+        else:
+            num_gpu_blocks = self.scheduler_config.max_num_seqs + 1
         # adapted from get_uniform_page_size
         page_sizes = set(
             layer.page_size_bytes for layer in self.get_kv_cache_spec().values()
