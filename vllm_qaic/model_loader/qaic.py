@@ -40,7 +40,7 @@ from vllm.model_executor.models.interfaces import SupportsLoRA
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import _CONFIG_REGISTRY
 from vllm.utils.math_utils import cdiv
-from vllm.v1.outputs import SamplerOutput
+from vllm.v1.outputs import LogprobsTensors, SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
 
@@ -152,6 +152,19 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self.lora_mode = bool(vllm_config.lora_config)
         self.last_decode = False
         self.num_spec_tokens = 0
+        self.on_device_sampling_en = override_qaic_config.get(
+            "aic_include_sampler", False
+        )
+        self.return_pdfs = bool(
+            self.on_device_sampling_en
+            and override_qaic_config.get("aic_return_pdfs", False)
+        )
+        if self.on_device_sampling_en:
+            # Clamp QEff sampler top-k capacity to the model vocabulary size.
+            self.max_top_k_ids = min(
+                int(override_qaic_config.get("max_top_k_ids", 512)),
+                self.vocab_size,
+            )
         self.max_decode_tokens = 1
         if vllm_config.speculative_config:
             self.num_spec_tokens = vllm_config.speculative_config.num_speculative_tokens
@@ -212,7 +225,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         batch_indices: np.ndarray,
         is_prompt: bool,
         lora_ids: np.ndarray | None = None,
-        sampling_params: dict[str, list[float] | list[int]] | None = None,
+        sampling_params: dict[str, np.ndarray] | None = None,
         kv_caches: list[list[np.ndarray]] | None = None,
         callback: Callable | None = None,
         mm_kwargs_list: list[dict] | None = None,
@@ -220,6 +233,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         prefill_cum_sum: np.ndarray | None = None,
         logits: np.ndarray | None = None,
         num_prompt_tokens_prefill: np.ndarray | None = None,
+        prefill_output_offset: int = 0,
     ) -> Queue | None:
         if self.is_pooling_model and not self.is_multimodal_model:
             output = self._run_encode(prefill_cum_sum, input_ids, positions)
@@ -259,6 +273,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                         logits,
                         lora_ids,
                         mm_kwargs_list,
+                        sampling_params,
+                        prefill_output_offset,
                     )
                     return pending_prefill_exec_queue
                 else:
@@ -267,7 +283,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                         positions,
                         batch_indices,
                         logits,
-                        lora_ids,
+                        lora_ids=lora_ids,
+                        sampling_params=sampling_params,
                     )
         return None
 
@@ -289,7 +306,48 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
+        next_token: np.ndarray | dict[str, Any] | None = None,
     ) -> SamplerOutput | None:
+        if self.on_device_sampling_en:
+            if isinstance(next_token, dict):
+                tokens = next_token["next_tokens"]
+                for row, source in next_token.pop("_prefill_sources", []):
+                    tokens[row, : source.shape[1], :] = source
+                if self.return_pdfs:
+                    probs = next_token["probs"]
+                    for row, source in next_token.pop("_prefill_probs_sources", []):
+                        probs[row, : source.shape[1], :] = source
+                else:
+                    probs = None
+            else:
+                tokens = next_token
+                probs = None
+            tokens_tensor = torch.as_tensor(tokens, dtype=torch.int64)
+            if tokens_tensor.ndim == 3:
+                tokens_tensor = tokens_tensor[:, :, 0]
+            elif tokens_tensor.ndim == 1:
+                tokens_tensor = tokens_tensor[:, None]
+            logprobs_tensors = None
+            if sampling_metadata.max_num_logprobs is not None and probs is not None:
+                probs_tensor = torch.as_tensor(
+                    probs[: logits.shape[0]], dtype=torch.float32
+                ).reshape(-1, probs.shape[-1])
+                raw_logprobs = torch.log(probs_tensor)
+                if sampling_metadata.max_num_logprobs == -1:
+                    logprobs_tensors = LogprobsTensors(
+                        torch.empty(0), raw_logprobs, torch.empty(0)
+                    )
+                else:
+                    logprobs_tensors = self.sampler.gather_logprobs(
+                        raw_logprobs,
+                        sampling_metadata.max_num_logprobs,
+                        token_ids=tokens_tensor[: logits.shape[0]].reshape(-1),
+                    )
+            return SamplerOutput(
+                tokens_tensor[: logits.shape[0]],
+                logprobs_tensors,
+            )
+
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
@@ -383,11 +441,17 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             cluster_id=cluster_id,
             use_async_scheduling=self.use_async_scheduling,
         )
-        self.logits_ndim = self.session.get_logits_ndim()
+
+        # ODS QPCs do not expose logits; use a dummy 3D shape for bookkeeping.
+        self.logits_ndim = (
+            3 if self.on_device_sampling_en else self.session.get_logits_ndim()
+        )
         # Resolve the logits output dtype directly from the QPC binding so the
         # host-side logits buffers match exactly (e.g. float16 for mxfp6/mxint8
         # models, float32 for full-precision ones). Falls back to float32.
-        _logits_info = self.get_io_shape_and_dtype("logits", is_input=False)
+        _logits_info = None
+        if not self.on_device_sampling_en:
+            _logits_info = self.get_io_shape_and_dtype("logits", is_input=False)
         self.logits_dtype = (
             np.dtype(_logits_info[1]) if _logits_info is not None else np.float32
         )
@@ -406,15 +470,26 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             self.get_comp_ctx_lengths()
         )
         self.prefill_num_logits_buffer = None
-        self.prefill_logits = dict(
-            logits=np.random.randn(self.prefill_bsz, 1, self.vocab_size).astype(
-                self.logits_dtype
+        if self.on_device_sampling_en:
+            self.decode_next_tokens = {
+                "next_tokens": np.zeros((self.decode_bsz, 1, 1), dtype=np.int64)
+            }
+            if self.return_pdfs:
+                self.decode_next_tokens["probs"] = np.zeros(
+                    (self.decode_bsz, 1, self.vocab_size),
+                    dtype=np.float32,
+                )
+        else:
+            self.prefill_logits = dict(
+                logits=np.random.randn(self.prefill_bsz, 1, self.vocab_size).astype(
+                    self.logits_dtype
+                )
             )
-        )
-        self.session.set_buffers(self.prefill_logits)
-        self.batch_prefill_logits = np.empty(
-            (self.decode_bsz, self.vocab_size), dtype=self.logits_dtype
-        )
+            self.session.set_buffers(self.prefill_logits)
+            self.batch_prefill_logits = np.empty(
+                (self.decode_bsz, self.vocab_size), dtype=self.logits_dtype
+            )
+            self.decode_next_tokens = None
         self.decode_num_logits_buffer = None
         if self.num_logits_to_keep is not None:
             self.is_spec_decode_target_model = True
@@ -453,7 +528,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 self.decode_logits_by_k[_k] = dict(
                     logits=np.random.randn(
                         self.decode_bsz, _mdt, self.vocab_size
-                    ).astype(np.float32)
+                    ).astype(self.logits_dtype)
                 )
                 self.decode_num_logits_buffer_by_k[_k] = dict(
                     num_logits_to_keep=np.zeros((_mdt, 1), np.int64)
@@ -471,7 +546,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         else:
             self.decode_logits = dict(
                 logits=np.random.randn(self.decode_bsz, 1, self.vocab_size).astype(
-                    np.float32
+                    self.logits_dtype
                 )
             )
         # CCL state for prefill: dict keyed by prefill exec-object slot id, value
@@ -712,12 +787,15 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         batch_indices: np.ndarray,
         prefill_cum_sum: np.ndarray,
         pending_exec_queue: Queue,
-        logits: np.ndarray,
+        logits: np.ndarray | None,
         lora_ids: np.ndarray | None = None,
         mm_kwargs_list: list[dict] | None = None,
+        sampling_params: dict[str, np.ndarray] | None = None,
+        prefill_output_offset: int = 0,
     ) -> np.ndarray:
         # perform prefill (only prefill_bsz=1 is supported)
         pending_exec_count = 0  # in-flight executions in current batch
+
         idx_start = 0
         for i, idx_end in enumerate(prefill_cum_sum):
             # extract indices of specific request
@@ -757,10 +835,22 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 chunk_inputs["lora_ids"] = lora_index
             if mm_kwargs_list and (mm_kwargs := mm_kwargs_list[i]):
                 chunk_inputs.update(mm_kwargs)
+            if self.on_device_sampling_en:
+                chunk_inputs.update(sampling_params)
+                for key in (
+                    "temperatures",
+                    "top_ks",
+                    "top_ps",
+                    "min_ps",
+                    "repetition_penalties",
+                    "presence_penalties",
+                ):
+                    chunk_inputs[key] = chunk_inputs[key][i : i + 1]
+                chunk_inputs["random_numbers"] = chunk_inputs["random_numbers"][i : i + 1]
             # chunk the request
             n_chunks: int = iids.shape[-1] // self.prefill_seq_len
 
-            if logits is not None:
+            if logits is not None and not self.on_device_sampling_en:
                 chunk_inputs["logits"] = logits[i : i + 1]
 
             prefill_ccl_id = 0
@@ -770,6 +860,18 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 chunk_inputs["input_ids"] = iids[lower_idx:upper_idx].reshape(
                     1, self.prefill_seq_len
                 )
+                if self.on_device_sampling_en:
+                    next_tokens = np.zeros((self.prefill_bsz, 1, 1), dtype=np.int64)
+                    chunk_inputs["next_tokens"] = next_tokens
+                    if self.return_pdfs:
+                        probs = np.zeros(
+                            (self.prefill_bsz, 1, self.vocab_size),
+                            dtype=np.float32,
+                        )
+                        chunk_inputs["probs"] = probs
+                    chunk_inputs["last_accepted_output_tokens"] = chunk_inputs[
+                        "input_ids"
+                    ]
                 # Reconstruct mm_token_type_ids from input_ids: positions where
                 # input_ids == image_token_id get value 1, all others get 0.
                 # This tells the decoder which tokens are image embeddings.
@@ -819,7 +921,23 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 logger.debug("Ran prefill on %s", exec_obj_idx)
                 if not self.use_async_scheduling:
                     self.session.complete_inf(exec_obj_idx, True)
+                    if self.on_device_sampling_en and self.decode_next_tokens is not None:
+                        self.decode_next_tokens.setdefault("_prefill_sources", []).append(
+                            (prefill_output_offset + i, next_tokens.copy())
+                        )
+                        if self.return_pdfs:
+                            self.decode_next_tokens.setdefault(
+                                "_prefill_probs_sources", []
+                            ).append((prefill_output_offset + i, probs.copy()))
                 else:
+                    if self.on_device_sampling_en and self.decode_next_tokens is not None:
+                        self.decode_next_tokens.setdefault("_prefill_sources", []).append(
+                            (prefill_output_offset + i, next_tokens)
+                        )
+                        if self.return_pdfs:
+                            self.decode_next_tokens.setdefault(
+                                "_prefill_probs_sources", []
+                            ).append((prefill_output_offset + i, probs))
                     time.sleep(0.01)
                     pending_exec_count += 1
                     pending_exec_queue.put(exec_obj_idx)
@@ -831,8 +949,9 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         input_ids: np.ndarray,
         positions: np.ndarray,
         batch_indices: np.ndarray,
-        logits: np.ndarray,
+        logits: np.ndarray | None,
         lora_ids: np.ndarray | None = None,
+        sampling_params: dict[str, np.ndarray] | None = None,
         callback: Callable | None = None,
     ) -> None:
         # Use the per-step K set by QaicModelRunner.  Falls back to max K so
@@ -843,6 +962,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         num_decodes = num_tokens // mdt  # number of decode requests
         batch_inputs = self.decode_batch_inputs_by_k[current_k]
         batch_inputs["input_ids"][:num_decodes] = input_ids.reshape(num_decodes, mdt)
+
         if self.uses_mrope:
             # positions shape: (4, num_decodes * mdt) -> (4, num_decodes, mdt)
             batch_inputs["position_ids"][:, :num_decodes] = positions.reshape(
@@ -852,7 +972,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             batch_inputs["position_ids"][:num_decodes] = positions.reshape(
                 num_decodes, mdt
             )
-        batch_inputs["logits"] = logits
+        if logits is not None and not self.on_device_sampling_en:
+            batch_inputs["logits"] = logits
         if num_decodes < self.decode_bsz:
             batch_inputs["input_ids"][num_decodes:] = -1
             batch_inputs["position_ids"][..., num_decodes:, :] = -1
@@ -861,7 +982,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             batch_inputs["batch_index"][:num_decodes, 0] = batch_indices
             if num_decodes < self.decode_bsz:
                 batch_inputs["batch_index"][num_decodes:] = -1
-
         if lora_ids is not None:
             batch_inputs["lora_ids"][:num_decodes] = lora_ids.reshape(num_decodes, 1)
             if num_decodes < self.decode_bsz:
@@ -871,6 +991,12 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         # so the hardware knows how many token positions to compute logits for.
         if self.is_spec_decode_target_model:
             batch_inputs.update(self.decode_num_logits_buffer_by_k[current_k])
+        if self.on_device_sampling_en:
+            batch_inputs.update(sampling_params)
+            batch_inputs["next_tokens"] = self.decode_next_tokens["next_tokens"]
+            if self.return_pdfs:
+                batch_inputs["probs"] = self.decode_next_tokens["probs"]
+            batch_inputs["last_accepted_output_tokens"] = batch_inputs["input_ids"]
 
         if self.comp_ctx_lengths_decode is not None:
             assert self.list_of_comp_ctx_lengths is not None
@@ -1564,6 +1690,16 @@ def load_qaic_model(
         # need better solution in future
         raise QaicCompilationComplete()
 
+    if qaic_compile_config.include_sampler is not None:
+        model.on_device_sampling_en = bool(qaic_compile_config.include_sampler)
+        model.return_pdfs = bool(
+            model.on_device_sampling_en and qaic_compile_config.return_pdfs
+        )
+        if qaic_compile_config.max_top_k_ids is not None:
+            model.max_top_k_ids = min(
+                int(qaic_compile_config.max_top_k_ids),
+                model.vocab_size,
+            )
     # Load the weights from the cached or downloaded files.
     # model_config.qpc in None
     model.load_model(
