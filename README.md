@@ -8,12 +8,7 @@ vLLM Qualcomm Cloud AI (QAIC) Plugin
 </p>
 
 > **This branch is under active development — plugin rebase to vLLM v0.23.0.**
->
 > This is not a stable release.
->
-> **Features not yet ported:**
-> - LoRaX adapter serving
->
 > For production use, please switch to the `main` branch or `release/v0.15.0`.
 
 ---
