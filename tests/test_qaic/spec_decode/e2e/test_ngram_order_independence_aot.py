@@ -8,7 +8,7 @@ Ported from vllm_0_15_0's tests/test_qaic/spec_decode/e2e/test_ngram_integration
 ::test_ngram_data_consistency_order_independence (commit 2502833607's
 post-commit state). Uses the exact same dataset slice, prompt count, and SpD
 config as
-tests/test_qaic/disaggregated_serving/test_spd_disagg.py::TestNgramDisagg
+tests/e2e/disaggregated_serving/test_qaic_disagg_spd.py::TestNgramDisagg
 .test_ngram_data_consistency, so a non-disagg AOT run can be directly
 compared against that disagg test's known-failing hardware runs, to
 determine whether shuffled-prompt-order divergence is disagg-specific or a
@@ -51,7 +51,7 @@ pytestmark = pytest.mark.skipif(
 MODEL = "meta-llama/Llama-3.1-8B-Instruct"
 
 # Same dataset/prompt-count/SpD config as
-# tests/test_qaic/disaggregated_serving/test_spd_disagg.py::TestNgramDisagg
+# tests/e2e/disaggregated_serving/test_qaic_disagg_spd.py::TestNgramDisagg
 # .test_ngram_data_consistency.
 _ORDER_INDEPENDENCE_DATASET = (
     Path(__file__).parent.parent.parent
@@ -60,7 +60,7 @@ _ORDER_INDEPENDENCE_DATASET = (
 )
 _ORDER_INDEPENDENCE_NUM_PROMPTS = 5
 _ORDER_INDEPENDENCE_NUM_SPEC_TOKENS = 3
-_ORDER_INDEPENDENCE_MAX_NUM_SEQS = 2  # DEFAULT_DECODE_BSZ in test_spd_disagg.py
+_ORDER_INDEPENDENCE_MAX_NUM_SEQS = 2  # DEFAULT_DECODE_BSZ in test_qaic_disagg_spd.py
 _ORDER_INDEPENDENCE_MAX_TOKENS = 50
 
 
@@ -89,7 +89,7 @@ def _qaic_visible_devices(device_group):
 def test_ngram_data_consistency_order_independence():
     """Same prompts in different order should produce the same per-prompt
     output. Non-disagg counterpart to
-    tests/test_qaic/disaggregated_serving/test_spd_disagg.py::TestNgramDisagg
+    tests/e2e/disaggregated_serving/test_qaic_disagg_spd.py::TestNgramDisagg
     .test_ngram_data_consistency, which reproducibly failed this invariant on
     hardware. Used to determine whether that failure is disagg-specific or a
     general property of ngram SpD outside disagg.

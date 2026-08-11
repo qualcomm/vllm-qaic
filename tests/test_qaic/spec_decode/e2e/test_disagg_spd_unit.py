@@ -23,7 +23,7 @@ NOTE: these tests do NOT cover the decode-dummy-run "Bug 3" fix (merging
 num_logits_to_keep into the decode batch inputs and sizing the logits output
 buffer by max_decode_tokens). That path only runs on QAIC hardware during
 decode-server startup and is validated by the e2e suite
-(tests/test_qaic/disaggregated_serving/test_spd_disagg.py), not here.
+(tests/e2e/disaggregated_serving/test_qaic_disagg_spd.py), not here.
 """
 
 import importlib.util
