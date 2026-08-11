@@ -13,7 +13,7 @@ VLLM_QAIC_VERSION="1.22"
 # === AOT stack ===
 TORCH_VERSION_AOT="2.7.0+cpu"   # CPU-only torch for AOT; qefficient pins to exactly 2.7.0+cpu
 TORCHVISION_VERSION_AOT="0.22.0+cpu"  # torchvision for AOT; needed by transformers (gemma3n → timm)
-QEFF_BRANCH="release/v1.22.0"               # or tag e.g. "v0.3.2"
+QEFF_BRANCH="${QEFF_BRANCH:-release/v1.22.0}"               # or tag e.g. "v0.3.2"
 # TRANSFORMERS_VERSION_AOT="4.55.3"  # optional: uncomment to pin if qefficient's version conflicts
 VLLM_TARGET_DEVICE_AOT="${VLLM_TARGET_DEVICE_AOT:-empty}"
 TRITON_CPU="${TRITON_CPU:-0}"                          # set to 1 to enable
