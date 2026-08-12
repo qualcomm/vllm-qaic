@@ -17,7 +17,7 @@ general property of ngram SpD outside disagg.
 HARDWARE DEPENDENT: not run as part of the non-hardware verification gate for
 this port. Requires tests/test_qaic/dataset/<dataset>.pkl, which does not yet
 exist in vllm-qaic -- copy it from vllm_0_15_0's tests/test_qaic/dataset/
-before running (see docs/qaic/disagg_spd_port.md).
+before running.
 
 Split into its own file (not appended to test_ngram_suffix_integration.py)
 because that file is PYT-eager-mode-only (module-level

@@ -29,12 +29,6 @@ CHECK_IMPORTS = {
             "Avoid using pickle or cloudpickle or add this file to "
             "tools/pre_commit/check_forbidden_imports.py."
         ),
-        allowed_files={
-            # Load a pre-baked, repo-local numpy dataset (not untrusted
-            # input) for disagg+SpD test fixtures ported from vllm_0_15_0.
-            "tests/test_qaic/disaggregated_serving/utils.py",
-            "tests/test_qaic/spec_decode/e2e/test_ngram_order_independence_aot.py",
-        },
     ),
     "base64": ForbiddenImport(
         pattern=r"^\s*(?:import\s+base64(?:$|\s|,)|from\s+base64\s+import)",

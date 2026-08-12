@@ -501,13 +501,19 @@ class QaicModelRunnerAoT(GPUModelRunner):
         ]
         self.num_decode_tokens = 0
         self.max_decode_tokens = 1 + self.num_spec_tokens
-        # Variable-K decode specializations: for ngram/suffix we compile two
-        # kernels (K=0 and K=max_k) and select the cheapest one each step.
+        # Variable-K decode specializations select the cheapest kernel each step.
         _method = self.speculative_config.method if self.speculative_config else None
+        _kv_transfer_config = vllm_config.kv_transfer_config
+        _is_disagg_consumer = (
+            _kv_transfer_config is not None
+            and _kv_transfer_config.kv_role == "kv_consumer"
+        )
+        _uses_variable_k = _method in ("ngram", "suffix") or (
+            _method == "draft_model" and _is_disagg_consumer
+        )
         self.decode_ks: list[int] = (
             [0, self.num_spec_tokens]
-            if _method in ("ngram", "suffix", "draft_model")
-            and self.max_decode_tokens > 1
+            if _uses_variable_k and self.max_decode_tokens > 1
             else [self.num_spec_tokens]
         )
         # active_k is updated each step; defaults to max K until first dispatch.
@@ -709,7 +715,9 @@ class QaicModelRunnerAoT(GPUModelRunner):
         num_scheduled_tokens_np: np.ndarray,
         kv_connector_output: KVConnectorOutput | None,
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
-        if not self.model.is_qaic_pooler and self.model.task != "classify":  # for CPU based embed pooling, use GPU model runner's _pool
+        if (
+            not self.model.is_qaic_pooler and self.model.task != "classify"
+        ):  # for CPU based embed pooling, use GPU model runner's _pool
             # Force synchronous path: AsyncGPUPoolingModelRunnerOutput requires
             # CUDA streams which are not available on QAIC hardware.  The QAIC
             # async scheduling for pooling is handled at a higher level by
@@ -795,23 +803,9 @@ class QaicModelRunnerAoT(GPUModelRunner):
             ]
             # Pad decode requests to active_k+1 tokens (1 for K=0 fallback,
             # max_decode_tokens for the full SpD kernel).
-            #
-            # On the kv_consumer, a request on its first step (the last prompt
-            # token, handed off from the producer) is classified "prefill" by
-            # reorder_batch_to_split_decodes_and_prefills (num_computed <
-            # num_prompt) yet is still executed through the decode QPC. Those
-            # tail requests must be padded too, otherwise the decode compute
-            # input is a heterogeneous mix of mdt-token and 1-token rows, which
-            # breaks _run_decode's uniform (num_reqs, mdt) reshape (suffix
-            # crash) and misassociates logits to requests depending on batch
-            # order (ngram order-dependence). A padded first-step request is
-            # structurally identical to a mid-generation decode request with 0
-            # proposals: 1 real token + (mdt-1) -1 pads, masked back to one
-            # logit via signal_num_scheduled_tokens above. num_scheduled == 1 on
-            # the first consumer step is guaranteed by the KV connector
-            # (get_num_new_matched_tokens returns num_prompt_tokens - 1), so the
-            # real token always fits in one mdt row. See
-            # docs/qaic/disagg_spd_port.md.
+            # KV consumers classify the first transferred token as prefill but
+            # execute it through decode; pad it like a zero-proposal request so
+            # every row has the uniform shape expected by the decode QPC.
             num_pad_reqs = num_reqs if self.is_kv_consumer else self.num_decodes
             num_scheduled_tokens[:num_pad_reqs] = self.active_k + 1
             total_num_scheduled_tokens = np.sum(num_scheduled_tokens)
