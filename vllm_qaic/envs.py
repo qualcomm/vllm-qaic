@@ -34,6 +34,10 @@ if TYPE_CHECKING:
     # Repurpose vLLM's SWIGLUSTEP Triton kernel (swiglustep_and_mul_triton) as
     # plain SiluAndMul (limit=+inf); routes the SwiGLU MLP activation to Triton.
     VLLM_QAIC_TRITON_SILU_AND_MUL: bool = False
+    # Route the unquantized fused-MoE forward to vLLM's hand-written Triton
+    # fused-MoE kernel (fused_experts -> fused_moe_kernel) instead of the QAIC
+    # per-expert NSP loop.
+    VLLM_QAIC_TRITON_FUSED_MOE: bool = False
     # Route the unquantized linear/GEMM family (QKV/Column/Row/MergedColumn
     # ParallelLinear, ParallelLMHead, LogitsProcessor matmul) to vLLM's
     # batch-invariant Triton GEMM (linear_batch_invariant) via patch_linear.
@@ -71,6 +75,8 @@ qaic_environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_QAIC_TRITON_SILU_AND_MUL": lambda: os.getenv(
         "VLLM_QAIC_TRITON_SILU_AND_MUL", "0"
     )
+    == "1",
+    "VLLM_QAIC_TRITON_FUSED_MOE": lambda: os.getenv("VLLM_QAIC_TRITON_FUSED_MOE", "0")
     == "1",
     "VLLM_QAIC_TRITON_LINEAR": lambda: os.getenv("VLLM_QAIC_TRITON_LINEAR", "0") == "1",
 }

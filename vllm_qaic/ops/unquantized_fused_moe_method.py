@@ -14,6 +14,8 @@ from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
 
+from vllm_qaic.ops._triton_flags import triton_op_enabled
+
 
 class QAicUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     """QAIC OOT implementation for unquantized fused MoE."""
@@ -26,6 +28,46 @@ class QAicUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         topk_ids: torch.Tensor,
     ) -> torch.Tensor:
         """Compute unquantized MoE on QAIC by batching tokens per expert."""
+        # Triton fast path (opt-in): dispatch to vLLM's hand-written Triton
+        # fused-MoE kernel (fused_moe_kernel, reached via fused_experts ->
+        # torch.ops.vllm.fused_experts -> fused_experts_impl). This replaces the
+        # per-expert argsort/index_put NSP loop below with the fused grouped-GEMM
+        # + fused activation kernel. fused_experts takes the full stacked expert
+        # weights (layer.w13_weight / layer.w2_weight), the router topk tensors,
+        # and applies the gated activation internally (apply_moe_activation), so
+        # the routing/activation branching below is handled entirely in-kernel.
+        # Biases (has_bias) are threaded through via biased_moe_quant_config; the
+        # activation string is parsed to the MoEActivation enum. Flag off -> the
+        # QAIC NSP per-expert loop below, bit-for-bit.
+        if triton_op_enabled("FUSED_MOE"):
+            from vllm.model_executor.layers.fused_moe.activation import (
+                MoEActivation,
+            )
+            from vllm.model_executor.layers.fused_moe.config import (
+                biased_moe_quant_config,
+            )
+            from vllm.model_executor.layers.fused_moe.fused_moe import (
+                fused_experts,
+            )
+
+            quant_config = (
+                biased_moe_quant_config(layer.w13_bias, layer.w2_bias)
+                if self.moe.has_bias
+                else None
+            )
+            return fused_experts(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation=MoEActivation.from_str(layer.activation),
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                global_num_experts=layer.global_num_experts,
+                expert_map=layer.expert_map,
+                quant_config=quant_config,
+            )
+
         num_tokens = x.shape[0]
         top_k = topk_ids.shape[1]
         activation = layer.activation
