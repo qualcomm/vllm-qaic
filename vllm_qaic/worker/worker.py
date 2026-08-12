@@ -23,6 +23,7 @@ from vllm.distributed import (
     ensure_model_parallel_initialized,
     init_distributed_environment,
 )
+from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
 from vllm.distributed.kv_transfer import (
     ensure_kv_transfer_initialized,
     ensure_kv_transfer_shutdown,
@@ -751,6 +752,7 @@ class QaicWorkerAoT(QaicWorker):
             1,
             1,
         )
+        ensure_ec_transfer_initialized(vllm_config)
 
     def execute_model(
         self,
