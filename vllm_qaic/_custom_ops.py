@@ -332,3 +332,103 @@ def regular_topk(
         use_bias,
         _scoring_func_id(scoring_func),
     )
+
+
+# ---------------------------------------------------------------------------
+# Block-scaled FP8 GEMM
+# ---------------------------------------------------------------------------
+
+# Must match the QAIC_FP8_DTYPE_* defines in
+# csrc/fp8_block_scaled_mm/kernel.cpp.
+FP8_DTYPE_ID_E4M3FN = 0
+FP8_DTYPE_ID_E4M3FNUZ = 1
+
+_FP8_DTYPE_IDS = {
+    torch.float8_e4m3fn: FP8_DTYPE_ID_E4M3FN,
+    torch.float8_e4m3fnuz: FP8_DTYPE_ID_E4M3FNUZ,
+}
+
+
+def fp8_dtype_id(dtype: torch.dtype) -> int:
+    """Map an fp8 torch dtype to the kernel's dtype-id parameter."""
+    try:
+        return _FP8_DTYPE_IDS[dtype]
+    except KeyError:
+        raise ValueError(
+            f"Unsupported fp8 dtype for the QAIC kernel: {dtype}"
+        ) from None
+
+
+@torch.library.custom_op(
+    "qaic::fp8_block_scaled_mm", mutates_args=(), device_types="qaic"
+)
+def fp8_block_scaled_mm(
+    A: Tensor,
+    B: Tensor,
+    As: Tensor,
+    Bs: Tensor,
+    block_n: int,
+    block_k: int,
+    fp8_dtype: int,
+) -> Tensor:
+    """Fused block-scaled FP8 GEMM: ``(As # A) @ (Bs # B).T`` in one pass.
+
+    ``#`` is block dequantization.  The kernel forms each K block's raw
+    fp8 x fp8 dot product, scales it once by ``As[m, kb] * Bs[n / block_n, kb]``
+    (the scale is constant along K within a block, so it hoists out of the inner
+    sum), and accumulates the scaled contributions in fp32 -- which makes the
+    result exact with respect to the fp8 operands.
+
+    Prefer ``vllm_qaic.ops.fp8_block_scaled_mm.fp8_block_scaled_mm()``, which
+    checks eligibility and normalises the scale grids before dispatching here.
+
+    Args:
+        A: Activation, ``[M, K]`` fp8, contiguous.
+        B: Weight, ``[N, K]`` fp8, contiguous (not pre-transposed).
+        As: Activation scales, ``[M, K // block_k]`` fp32, contiguous.
+        Bs: Weight scales, ``[cdiv(N, block_n), K // block_k]`` fp32, contiguous.
+        block_n: Weight scale block extent along N.
+        block_k: Scale block extent along K.  Must be a multiple of 128, and
+            must divide K.
+        fp8_dtype: Kernel dtype id -- ``FP8_DTYPE_ID_E4M3FN`` or
+            ``FP8_DTYPE_ID_E4M3FNUZ``.
+
+    Returns:
+        ``[M, N]`` fp32.  The caller adds bias and casts to the output dtype.
+    """
+    m, k = A.shape
+    n = B.shape[0]
+    out = torch.empty((m, n), dtype=torch.float32, device=A.device)
+
+    # Tensors first, then scalars -- the dispatcher rejects any scalar that
+    # precedes a tensor. Order matches the kernel's documented pointer array.
+    kernel = _kernel("multinsp_multithreaded_fp8_block_scaled_mm")
+    kernel[_NSP_COUNT, _THREAD_COUNT](
+        A,
+        B,
+        As,
+        Bs,
+        out,
+        m,
+        n,
+        k,
+        block_n,
+        block_k,
+        fp8_dtype,
+    )
+    return out
+
+
+@fp8_block_scaled_mm.register_fake
+def _fp8_block_scaled_mm_fake(
+    A: Tensor,
+    B: Tensor,
+    As: Tensor,
+    Bs: Tensor,
+    block_n: int,
+    block_k: int,
+    fp8_dtype: int,
+) -> Tensor:
+    # Unlike the router ops, this one sits inside a linear layer that vLLM
+    # compiles, so tracing needs a meta implementation.
+    return A.new_empty((A.shape[0], B.shape[0]), dtype=torch.float32)
