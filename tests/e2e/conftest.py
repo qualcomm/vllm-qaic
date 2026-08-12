@@ -185,6 +185,18 @@ def _closest_marker_for_node(request, node, name):
     return None
 
 
+def _marker_kwargs(marker):
+    """Normalize a `qaic_test_config` marker to a flat kwargs dict for the
+    active mode. A single positional dict (`{"aot": {...}, "eager": {...}}`)
+    selects per-mode overrides; plain kwargs apply to both modes."""
+    if marker is None:
+        return {}
+    if marker.args:
+        mode = "aot" if current_platform.is_aot_inference() else "eager"
+        return marker.args[0][mode]
+    return marker.kwargs
+
+
 def _resolve_qaic_test_config_value(request, pytestconfig, key, default=None):
     """Resolve a QAIC run-config value: closest `qaic_test_config` marker kwarg
     first (falling back to the first test in the class/module if resolving
@@ -192,8 +204,9 @@ def _resolve_qaic_test_config_value(request, pytestconfig, key, default=None):
     `default`. Plain function (not a fixture) so it has no fixed scope and is
     callable against function-, class-, and module-scoped `request` objects."""
     marker = _closest_marker_for_node(request, request.node, "qaic_test_config")
-    if marker is not None and key in marker.kwargs:
-        return marker.kwargs[key]
+    kwargs = _marker_kwargs(marker)
+    if key in kwargs:
+        return kwargs[key]
     cli_value = pytestconfig.getoption(key, default=None)
     if cli_value is not None:
         return cli_value
@@ -546,7 +559,7 @@ def pytest_collection_modifyitems(session, config, items):
     )
     for item in items:
         marker = item.get_closest_marker("qaic_test_config")
-        kwargs = marker.kwargs if marker is not None else {}
+        kwargs = _marker_kwargs(marker)
         num_device_groups = kwargs.get("num_device_groups", 1)
         device_group_size = kwargs.get("device_group_size", 1)
         required = num_device_groups * device_group_size
