@@ -272,6 +272,15 @@ class QaicQwen2VLMultiModalDataParser(Qwen2VLMultiModalDataParser):
                 if num_frames == 0:
                     return super()._parse_image_data(data)
 
+                # Single-image encode output keeps the encoder batch dim
+                # ([1, V, hidden]); multi-image arrives flattened ([sum(V),
+                # hidden]). Flatten to 2-D so all items share the same rank,
+                # else MultiModalFlatField._reduce_data crashes when batching
+                # a 3-D item with 2-D items.
+                if image_embeds.ndim == 3:
+                    image_embeds = image_embeds.reshape(-1, image_embeds.shape[-1])
+                    data["image_embeds"] = image_embeds
+
                 # Determine vision size
                 # based on whether embeds are batched per frame or flattened.
                 if image_embeds.shape[0] == num_frames:
