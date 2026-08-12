@@ -13,7 +13,7 @@ and are therefore not exercised by the single-process correctness tests
   2. KV connector registration is idempotent
   3. _determine_active_k returns K=0 on the first kv_consumer step
      (num_decodes == 0)
-  4. decode_ks initialization includes "draft_model" in the [0, K] condition
+  4. decode_ks initialization limits draft_model's [0, K] path to consumers
 
 Tests 1 requires qaic_disagg, test 2 requires vllm_qaic, tests 3 require
 torch/vllm (each skipped if its dependency is absent). Test 4 reads the source
@@ -206,38 +206,57 @@ def test_determine_active_k_returns_zero_when_no_proposals():
 
 
 # ---------------------------------------------------------------------------
-# 4. decode_ks condition includes "draft_model"
+# 4. decode_ks condition is consumer-specific for "draft_model"
 # ---------------------------------------------------------------------------
 
 
-def test_decode_ks_condition_includes_draft_model():
-    """The decode_ks initialization in QaicModelRunnerAoT.__init__ must list
-    "draft_model" alongside "ngram" and "suffix" so that draft-model SpD QPCs
-    are compiled with [0, K] specializations.
-
-    Before the fix only ("ngram", "suffix") were listed; "draft_model" was
-    absent, so the runner used [K] (single spec) with no K=0 fallback, which
-    caused the kv_consumer first-step crash described in test 3 above.
-
-    Read the source file directly so this test passes without torch installed.
-    """
+def test_decode_ks_condition_is_consumer_specific_for_draft_model():
+    """Only disaggregated draft-model consumers receive the K=0 specialization."""
     src_path = _VLLM_QAIC_REPO_ROOT / "vllm_qaic" / "worker" / "model_runner.py"
     assert src_path.exists(), f"Source file not found: {src_path}"
 
     src = src_path.read_text()
-    # The assignment spans multiple lines; the method-tuple check is on a single
-    # line that contains both "ngram" and "suffix".
-    decode_ks_line = next(
-        (line for line in src.splitlines() if '"ngram"' in line and '"suffix"' in line),
-        None,
-    )
-    assert decode_ks_line is not None, (
-        "Could not find the decode_ks method-tuple check line (containing "
-        "'ngram' and 'suffix') in model_runner.py; has the code been refactored?"
-    )
-    assert "draft_model" in decode_ks_line, (
-        f"'draft_model' is missing from the decode_ks method-tuple check:\n"
-        f"  {decode_ks_line.strip()}\n"
-        "Without it, draft-model SpD QPCs are not compiled with a K=0 "
-        "specialization and the kv_consumer first step crashes."
-    )
+    assert '_method in ("ngram", "suffix")' in src
+    assert '_method == "draft_model" and _is_disagg_consumer' in src
+    assert '_method in ("ngram", "suffix", "draft_model")' not in src
+
+
+def test_decode_batch_inputs_are_reused_across_lifecycle_paths():
+    """The helper is called during construction, not as a dummy-only variant."""
+    src_path = _VLLM_QAIC_REPO_ROOT / "vllm_qaic" / "model_loader" / "qaic.py"
+    src = src_path.read_text()
+
+    assert "def _make_decode_batch_input_for_k(self, k: int) -> dict:" in src
+    assert "dummy=True" not in src
+    assert '"input_ids": np.zeros((self.decode_bsz, mdt), dtype=np.int64)' in src
+    assert '"position_ids": np.full((self.decode_bsz, mdt), -1, dtype=np.int64)' in src
+    assert '"batch_index": np.arange(self.decode_bsz' in src
+    assert "self.decode_logits_by_k: dict[int, dict] = {}" in src
+    assert "self.decode_num_logits_buffer_by_k: dict[int, dict] = {}" in src
+
+
+def test_compile_only_target_defers_completion_for_draft_model():
+    """The target compile path can return so the draft QPC is compiled next."""
+    src_path = _VLLM_QAIC_REPO_ROOT / "vllm_qaic" / "model_loader" / "qaic.py"
+    src = src_path.read_text()
+
+    assert "raise_on_compile_complete: bool = True" in src
+    assert "if raise_on_compile_complete:" in src
+    assert "model.disagg_serving_en = False" in src
+    assert "return model.eval()" in src
+
+
+def test_decode_k_mismatch_diagnostics_cover_extra_missing_and_equal_lists():
+    """The source contains both mismatch warnings and a quiet equal-list path."""
+    src_path = _VLLM_QAIC_REPO_ROOT / "vllm_qaic" / "model_loader" / "qaic.py"
+    src = src_path.read_text()
+
+    assert "def _warn_on_decode_k_mismatch(" in src
+    assert "extra_qpc_ks = sorted(available - configured)" in src
+    assert "missing_qpc_ks = sorted(configured - available)" in src
+    assert src.count("logger.warning(") >= 2
+    assert '"QPC contains extra decode specializations for K=%s; vLLM "' in src
+    assert '"QPC is missing decode specializations for configured K=%s; "' in src
+    assert "configured_decode_ks = list(self.decode_ks)" in src
+    assert "session_decode_ks = self._decode_ks_from_session()" in src
+    assert "self._warn_on_decode_k_mismatch(" in src

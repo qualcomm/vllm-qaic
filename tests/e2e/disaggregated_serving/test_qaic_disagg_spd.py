@@ -22,12 +22,11 @@ kv_store_size marker kwargs. Also switched from the old pickled-OpenOrca
 dataset (required HF_TOKEN) to the ShareGPT-based get_prompts/query_server
 already used by test_qaic_disagg.py in this directory.
 
-HARDWARE DEPENDENT: requires live QAIC devices; not run as part of the
-non-hardware verification gate. See docs/qaic/disagg_spd_port.md and
-docs/qaic/disagg_spd_hardware_e2e_findings.md for prior hardware run results
-(under the old file locations) -- ngram/suffix pass generation but fail
-data_consistency due to a known QAIC compiler row-independence bug;
-draft_model passes after the Parts A-D fixes documented there.
+HARDWARE DEPENDENT: requires live QAIC devices and is not part of the
+non-hardware verification gate. Prior hardware runs found that ngram/suffix
+pass generation but can fail data_consistency due to a QAIC compiler
+row-independence issue; draft_model passes after the corresponding runtime
+fixes.
 
 Run examples:
     pytest tests/e2e/disaggregated_serving/test_qaic_disagg_spd.py -v \

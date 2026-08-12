@@ -71,11 +71,6 @@ class QaicPlatform(Platform):
 
     @classmethod
     def import_kernels(cls) -> None:
-        # QAIC has no CUDA kernels. Skip all kernel imports — importing vllm._C
-        # on non-CUDA hardware triggers a C++ bad_alloc/terminate (SIGABRT), which
-        # Python's except ImportError cannot catch. vllm._moe_C is also skipped
-        # since QAIC uses its own on-chip operators, not CUDA MoE kernels.
-        # TODO: import Hexagon/QAIC-specific .so here when available.
         pass
 
     @classmethod
@@ -350,7 +345,12 @@ class QaicPlatform(Platform):
                 # gives the scheduler the correct per-step budget AND sizes the buffers
                 # large enough to never overflow after decode expansion.
                 scheduler_config.max_num_batched_tokens = min(
-                    scheduler_config.max_num_seqs * (max(__prefill_seq_len) if isinstance(__prefill_seq_len, (list, tuple)) else __prefill_seq_len),
+                    scheduler_config.max_num_seqs
+                    * (
+                        max(__prefill_seq_len)
+                        if isinstance(__prefill_seq_len, (list, tuple))
+                        else __prefill_seq_len
+                    ),
                     scheduler_config.max_num_batched_tokens,
                 )
             # Reset max_num_scheduled_tokens so that
