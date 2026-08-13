@@ -61,7 +61,7 @@ def main() -> None:
             },
         },
         speculative_config={
-            "method": "draft_model",
+            "method": "draft_model",  # for DFlash use "dflash" and point model to a DFlash DLM checkpoint
             "model": "meta-llama/Llama-3.2-1B-Instruct",
             "num_speculative_tokens": 3,
         },
