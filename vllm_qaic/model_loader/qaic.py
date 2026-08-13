@@ -1285,6 +1285,7 @@ def load_qaic_model(
     speculative_model_type: str | None = None,
     raise_on_compile_complete: bool = True,
 ) -> nn.Module:
+    original_speculative_config = vllm_config.speculative_config
     # Draft model must compile with max_decode_tokens=1. Clear speculative_config
     # so QaicCausalLM doesn't inherit num_spec_tokens from the target config.
     if speculative_model_type == "draft":
@@ -1318,7 +1319,11 @@ def load_qaic_model(
             f"{speculative_model_type}!!\n"
         )
 
-    qaic_compile_config = _get_qaic_compile_config(vllm_config, speculative_model_type)
+    qaic_compile_config = _get_qaic_compile_config(
+        vllm_config,
+        speculative_model_type,
+        speculative_config=original_speculative_config,
+    )
     qpc_path: str | None = qaic_compile_config.qpc_path
 
     # set lora max adapters
@@ -1823,6 +1828,7 @@ def verify_adaptername_to_id_consistency(
 def _get_qaic_compile_config(
     vllm_config: VllmConfig,
     speculative_model_type: str = "default",
+    speculative_config: Any | None = None,
 ) -> QaicCompileConfig:
     mxfp6_en, mxint8_en = False, False
     # mxfp6
@@ -1905,9 +1911,13 @@ def _get_qaic_compile_config(
                 _hw_num_cores = min(_hw_num_cores, _nsp_info[1].nspTotal)
         cfg["num_cores"] = _hw_num_cores
         # Applicable for draft-target spd scheme
-        if (
-            vllm_config.speculative_config
-            and "draft" in vllm_config.speculative_config.method
+        effective_speculative_config = (
+            speculative_config
+            if speculative_config is not None
+            else vllm_config.speculative_config
+        )
+        if effective_speculative_config and "draft" in (
+            effective_speculative_config.method
         ):
             other_cfg: dict[str, Any] = {"device_group": cfg["device_group"]}
             draft_override: dict[str, Any] | None = (
