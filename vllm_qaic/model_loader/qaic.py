@@ -19,6 +19,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from peft import PeftConfig
+from transformers import PretrainedConfig
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
@@ -156,10 +157,17 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         if vllm_config.speculative_config:
             self.num_spec_tokens = vllm_config.speculative_config.num_speculative_tokens
             self.max_decode_tokens += self.num_spec_tokens
+            # DFlash emits block_size logits/step (not 1+K).
+            if vllm_config.speculative_config.method == "dflash":
+                self.max_decode_tokens = self.num_spec_tokens
 
         self.num_logits_to_keep: int | None = None
         self.decode_logits: dict[str, np.ndarray] | None = None
         self.is_spec_decode_target_model = False
+
+        # DFlash TLM hidden-state capture buffers (set by QaicModelRunner).
+        self._dflash_decode_hidden_buf: np.ndarray | None = None
+        self._dflash_hidden_state_chunks: list[np.ndarray] | None = None
 
         # Variable-K decode specializations: compile with [0, K] for ngram/suffix
         # and dispatch to the smallest kernel that covers actual proposals each step.
@@ -173,6 +181,9 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             if _method in ("ngram", "suffix") and self.num_spec_tokens > 0
             else [self.num_spec_tokens]
         )
+        # DFlash TLM compiles with K-1 spec tokens (bonus token in slot 0).
+        if _method == "dflash" and self.num_spec_tokens > 0:
+            self.decode_ks = [self.num_spec_tokens - 1]
         # active_k is updated per step by QaicModelRunner; defaults to max K.
         self.active_k: int = self.decode_ks[-1]
 
@@ -394,6 +405,18 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
 
         e = time.perf_counter() - s
         logger.info("Successfully loaded QPC in %s secs", e)
+
+        # DFlash TLM: bind a scratch hidden_states output on every run (required
+        # by the QPC even outside DFlash steps, e.g. the warm-up dummy run).
+        _hs_info = self.get_io_shape_and_dtype("hidden_states", is_input=False)
+        self._dflash_prefill_hidden_scratch: np.ndarray | None = None
+        if _hs_info is not None and not isinstance(
+            self.prefill_seq_len, (list, tuple)
+        ):
+            _hidden_size = self.config.get_text_config().hidden_size
+            self._dflash_prefill_hidden_scratch = np.zeros(
+                (1, self.prefill_seq_len, _hidden_size), dtype=_hs_info[1]
+            )
 
         if self.is_multimodal_model:
             self._load_multimodal()
@@ -703,6 +726,16 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
 
         return
 
+    def num_prefill_chunks(self, prefill_cum_sum: np.ndarray) -> int:
+        """Total TLM prefill chunks (ceil per request) for sizing DFlash hidden buffers."""
+        tok_start = 0
+        total = 0
+        for tok_end in prefill_cum_sum:
+            n = int(tok_end) - tok_start
+            total += -(-n // self.prefill_seq_len)
+            tok_start = int(tok_end)
+        return total
+
     def _run_prefill(
         self,
         input_ids: np.ndarray,
@@ -717,6 +750,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         # perform prefill (only prefill_bsz=1 is supported)
         pending_exec_count = 0  # in-flight executions in current batch
         idx_start = 0
+        # DFlash: global chunk counter into the per-chunk hidden-state buffers.
+        _dflash_chunk_idx = 0
         for i, idx_end in enumerate(prefill_cum_sum):
             # extract indices of specific request
             iids = input_ids[idx_start:idx_end]
@@ -806,6 +841,15 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     # SpD target QPC: prefill keeps 1 logit (last token position).
                     chunk_inputs["num_logits_to_keep"] = np.array([[1]], dtype=np.int64)
 
+                # DFlash: bind per-chunk hidden-states output buffers for the DLM.
+                if self._dflash_hidden_state_chunks is not None:
+                    chunk_inputs["hidden_states"] = self._dflash_hidden_state_chunks[
+                        _dflash_chunk_idx
+                    ]
+                    _dflash_chunk_idx += 1
+                elif self._dflash_prefill_hidden_scratch is not None:
+                    chunk_inputs["hidden_states"] = self._dflash_prefill_hidden_scratch
+
                 if pending_exec_count == self.session.prefill_num_execObj:
                     logger.debug(
                         "All execObjs allocated; waiting for pending execObj completion."
@@ -851,6 +895,9 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 num_decodes, mdt
             )
         batch_inputs["logits"] = logits
+        # DFlash: capture TLM decode hidden states for the DLM.
+        if self._dflash_decode_hidden_buf is not None:
+            batch_inputs["hidden_states"] = self._dflash_decode_hidden_buf
         if num_decodes < self.decode_bsz:
             batch_inputs["input_ids"][num_decodes:] = -1
             batch_inputs["position_ids"][..., num_decodes:, :] = -1
@@ -1303,15 +1350,71 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             logger.debug("finished dummy run")
 
 
+def _derive_dflash_config(spec_config) -> None:
+    """Derive and stash DFlash cross-checkpoint config on TLM/DLM hf_configs. Idempotent."""
+    tlm_hf = spec_config.target_model_config.hf_config
+    dlm_hf = spec_config.draft_model_config.hf_config
+    if getattr(tlm_hf, "_dflash_target_layer_ids", None) is not None:
+        return
+    dflash_cfg = getattr(dlm_hf, "dflash_config", None)
+    if dflash_cfg is None and hasattr(dlm_hf, "to_dict"):
+        dflash_cfg = dlm_hf.to_dict().get("dflash_config")
+    if dflash_cfg is not None and hasattr(dflash_cfg, "to_dict"):
+        dflash_cfg = dflash_cfg.to_dict()
+    if not isinstance(dflash_cfg, dict):
+        raise ValueError(
+            "DFlash DLM config missing 'dflash_config' section; check the DLM "
+            f"checkpoint at '{spec_config.draft_model_config.model}'."
+        )
+    block_size = getattr(dlm_hf, "block_size", None) or dflash_cfg.get("block_size")
+    target_layer_ids = dflash_cfg.get("target_layer_ids")
+    mask_token_id = dflash_cfg.get("mask_token_id")
+    if block_size is None or target_layer_ids is None or mask_token_id is None:
+        raise ValueError(
+            "DFlash requires block_size, target_layer_ids and mask_token_id from "
+            f"the DLM config; got keys={list(dflash_cfg)}."
+        )
+    if spec_config.num_speculative_tokens != block_size:
+        raise ValueError(
+            f"DFlash requires num_speculative_tokens == DLM block_size, got "
+            f"{spec_config.num_speculative_tokens} and {block_size}."
+        )
+    # TLM captures hidden states after the layer fires, so ids are +1.
+    tlm_hf._dflash_target_layer_ids = [i + 1 for i in target_layer_ids]
+    tlm_hf._dflash_block_size = block_size
+    tlm_hf._dflash_raw_target_layer_ids = list(target_layer_ids)
+    dlm_hf._dflash_block_size = block_size
+    dlm_hf._dflash_mask_token_id = mask_token_id
+    # Cross-checkpoint repos: TLM fetches fc/hidden_norm from DLM; DLM fetches lm_head/embed from TLM.
+    tlm_hf._dflash_dlm_repo = spec_config.draft_model_config.model
+    dlm_hf._dflash_tlm_repo = spec_config.target_model_config.model
+
+
 def load_qaic_model(
     vllm_config: VllmConfig, speculative_model_type: str | None = None
 ) -> nn.Module:
+    # DFlash: derive cross-checkpoint config before the draft build clears speculative_config.
+    if (
+        vllm_config.speculative_config is not None
+        and vllm_config.speculative_config.method == "dflash"
+    ):
+        _derive_dflash_config(vllm_config.speculative_config)
+
     # Draft model must compile with max_decode_tokens=1. Clear speculative_config
     # so QaicCausalLM doesn't inherit num_spec_tokens from the target config.
     if speculative_model_type == "draft":
         from copy import copy
 
         vllm_config = copy(vllm_config)
+        # DFlash DLM: stash draft marker + block_size before spec-config is cleared.
+        if (
+            vllm_config.speculative_config is not None
+            and vllm_config.speculative_config.method == "dflash"
+        ):
+            vllm_config.model_config.hf_config._dflash_is_draft = True
+            vllm_config.model_config.hf_config._dflash_block_size_override = (
+                vllm_config.speculative_config.num_speculative_tokens
+            )
         vllm_config.speculative_config = None
 
     # Create a model instance
@@ -1684,6 +1787,26 @@ def get_hf_model(
         "seq_classify": QEFFAutoModelForSequenceClassification,
     }
     hf_config = model_config.hf_config
+    # DFlash DLM: unwrap vLLM's EAGLEConfig wrapper so QEfficient sees the native checkpoint config.
+    _eagle_inner = getattr(hf_config, "model", None)
+    if (
+        hf_config.model_type == "eagle"
+        and isinstance(_eagle_inner, PretrainedConfig)
+        and getattr(_eagle_inner, "model_type", None) != "eagle"
+    ):
+        for _attr in (
+            "_dflash_block_size",
+            "_dflash_mask_token_id",
+            "_dflash_tlm_repo",
+            "_dflash_is_draft",
+            "_dflash_block_size_override",
+        ):
+            if hasattr(hf_config, _attr):
+                setattr(_eagle_inner, _attr, getattr(hf_config, _attr))
+        # Keep architectures so QEfficient dispatches on DFlashDraftModel.
+        if getattr(hf_config, "architectures", None):
+            _eagle_inner.architectures = hf_config.architectures
+        hf_config = _eagle_inner
     if hf_config.model_type in _CONFIG_REGISTRY or not is_json_serializable(hf_config):
         # If vllm uses a custom model config class,
         # convert it back to the transformers config class
@@ -1950,18 +2073,36 @@ def _get_qaic_compile_config(
     if cfg["mos"] == -1:
         del cfg["mos"]
     num_logits_to_keep = None
-    if speculative_model_type in ("target", "turbo"):
+    # DFlash DLM (draft build): keyed off stashed marker; compiles prefill-only with prefill_seq_len=block_size.
+    _dflash_is_draft = getattr(
+        vllm_config.model_config.hf_config, "_dflash_is_draft", False
+    )
+    if _dflash_is_draft:
+        block_size = int(
+            vllm_config.model_config.hf_config._dflash_block_size_override
+        )
+        cfg["prefill_only"] = True
+        cfg["prefill_seq_len"] = block_size
+        cfg["dflash_block_size"] = block_size
+        cfg.pop("num_speculative_tokens", None)
+    elif speculative_model_type in ("target", "turbo"):
         spec_cfg = vllm_config.speculative_config
         K = spec_cfg.num_speculative_tokens if spec_cfg else None
         # For ngram/suffix, compile two decode specializations: K=0 (fallback,
         # no proposals) and K=max (full SpD).  The K=0 kernel is used on steps
         # where the proposer finds no matches, avoiding the wasted 5-token
         # forward pass.  For draft_model the single K is sufficient.
-        if spec_cfg and spec_cfg.method in ("ngram", "suffix") and K:
+        if spec_cfg and spec_cfg.method == "dflash" and K:
+            # DFlash TLM: bonus token in slot 0, so K-1 spec tokens; keep all block_size logits.
+            cfg["num_speculative_tokens"] = K - 1
+            cfg["dflash_block_size"] = K
+            num_logits_to_keep = K
+        elif spec_cfg and spec_cfg.method in ("ngram", "suffix") and K:
             cfg["num_speculative_tokens"] = [0, K]
+            num_logits_to_keep = K + 1
         else:
             cfg["num_speculative_tokens"] = K
-        num_logits_to_keep = K + 1 if K is not None else None
+            num_logits_to_keep = K + 1 if K is not None else None
     else:
         del cfg["num_speculative_tokens"]
     qpc_idx = None
@@ -2018,6 +2159,18 @@ def _get_qaic_compile_config(
         if qaic_config is None:
             qaic_config = {}
         qaic_config["speculative_model_type"] = speculative_model_type
+    # DFlash cross-checkpoint injection for QEfficient DFlash transforms.
+    _model_hf = vllm_config.model_config.hf_config
+    if _dflash_is_draft:
+        if qaic_config is None:
+            qaic_config = {}
+        qaic_config["dflash_dlm"] = True
+        qaic_config["dflash_tlm_repo"] = _model_hf._dflash_tlm_repo
+    elif getattr(_model_hf, "_dflash_target_layer_ids", None) is not None:
+        if qaic_config is None:
+            qaic_config = {}
+        qaic_config["target_layer_ids"] = _model_hf._dflash_target_layer_ids
+        qaic_config["dflash_dlm_repo"] = _model_hf._dflash_dlm_repo
     # On Device Sampling
     if cfg.get("aic_include_sampler") is not None:
         if qaic_config is None:
