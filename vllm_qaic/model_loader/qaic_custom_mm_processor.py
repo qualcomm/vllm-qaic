@@ -93,7 +93,13 @@ logger = init_logger(__name__)
 # transformers v5.5.4 replaced image_processor.min_pixels / .max_pixels class
 # attributes with a size dict keyed by 'shortest_edge' / 'longest_edge'.
 _TRANSFORMERS_NEW_IMAGE_PROCESSOR = _Version(_transformers_version) == _Version("5.5.4")
-
+_gemma4_get_placeholder_str = Gemma4ForConditionalGeneration.get_placeholder_str
+# Gemma4 with vllm v0.23 wabts image modality instead of image_embeds
+Gemma4ForConditionalGeneration.get_placeholder_str = classmethod(
+    lambda cls, modality, i: _gemma4_get_placeholder_str(
+        "image" if modality == "image_embeds" else modality, i
+    )
+)
 
 class QaicGemma3MultiModalProcessor(Gemma3MultiModalProcessor):
     def _call_hf_processor(
