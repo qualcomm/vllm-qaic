@@ -454,13 +454,20 @@ class QaicModelRunnerAoT(GPUModelRunner):
             )
         if (
             self.speculative_config
-            and self.speculative_config.uses_draft_model()
+            and (
+                self.speculative_config.uses_draft_model()
+                or self.speculative_config.use_dflash()
+            )
             and not self.is_kv_producer
         ):
-            # The parent's __init__ creates a GPU DraftModelProposer; override with
-            # the QAIC-specific proposer. Model weights are loaded in load_model().
+            # The parent's __init__ creates a GPU proposer (DraftModelProposer or
+            # DFlashProposer); override with the QAIC-specific one. Model weights
+            # are loaded in load_model() (DFlash also sets tlm_prefill_seq_len there).
             from vllm.config.utils import replace as config_replace  # noqa: PLC0415
 
+            from vllm_qaic.spec_decode.dflash_draft_model import (  # noqa: PLC0415
+                QaicDFlashProposer,
+            )
             from vllm_qaic.spec_decode.qaic_draft_model import (  # noqa: PLC0415
                 QaicDraftModelProposer,
             )
@@ -486,37 +493,11 @@ class QaicModelRunnerAoT(GPUModelRunner):
                         "override_qaic_config": _draft_override,
                     },
                 )
-            self.drafter = QaicDraftModelProposer(draft_vllm_config)
-        elif (
-            self.speculative_config
-            and self.speculative_config.use_dflash()
-            and not self.is_kv_producer
-        ):
-            # The parent's __init__ creates a GPU DFlashProposer; override with the QAIC DLM proposer.
-            from vllm.config.utils import replace as config_replace  # noqa: PLC0415
-
-            from vllm_qaic.spec_decode.dflash_draft_model import (  # noqa: PLC0415
-                QaicDFlashProposer,
+            self.drafter = (
+                QaicDraftModelProposer(draft_vllm_config)
+                if spec_cfg.uses_draft_model()
+                else QaicDFlashProposer(draft_vllm_config)
             )
-
-            spec_cfg = self.speculative_config
-            draft_vllm_config = config_replace(
-                self.vllm_config,
-                model_config=spec_cfg.draft_model_config,
-                quant_config=None,
-            )
-            _draft_override = (self.vllm_config.additional_config or {}).get(
-                "draft_override_qaic_config"
-            )
-            if _draft_override is not None:
-                draft_vllm_config = config_replace(
-                    draft_vllm_config,
-                    additional_config={
-                        **(draft_vllm_config.additional_config or {}),
-                        "override_qaic_config": _draft_override,
-                    },
-                )
-            self.drafter = QaicDFlashProposer(draft_vllm_config)
         # Extract configuration params
         self.num_kv_heads = self.model_config.get_num_kv_heads(self.parallel_config)
         self.head_size = self.model_config.get_head_size()
