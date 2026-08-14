@@ -415,7 +415,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             self.prefill_seq_len, (list, tuple)
         ):
             _hidden_size = self.config.get_text_config().hidden_size
-            self._dflash_prefill_hidden_scratch = np.zeros(
+            self._dflash_prefill_hidden_scratch = np.zeros(  # nosemgrep: trailofbits.python.numpy-in-pytorch-modules.numpy-in-pytorch-modules
                 (1, self.prefill_seq_len, _hidden_size), dtype=_hs_info[1]
             )
 
