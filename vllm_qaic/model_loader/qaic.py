@@ -135,7 +135,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
 
         self.config = config
         self.vocab_size = config.get_text_config().vocab_size
-        # `long_prefill_token_threshold` will define prefill chunk length.
+        # `override_qaic_config["prefill_seq_len"]` defines the prefill chunk length.
         # Compiler profiles may supply multiple shapes; use their largest length
         # so chunking and padding operate on one scalar sequence length.
         self.prefill_seq_len: int
