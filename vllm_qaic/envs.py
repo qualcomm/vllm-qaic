@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     VLLM_QAIC_TRITON_RMS_NORM: bool = False
     VLLM_QAIC_TRITON_MM_ENCODER_ATTENTION: bool = False
     VLLM_QAIC_TRITON_MROTARY_EMBEDDING: bool = False
+    VLLM_QAIC_TRITON_ROPE: bool = False
     # Repurpose vLLM's SWIGLUSTEP Triton kernel (swiglustep_and_mul_triton) as
     # plain SiluAndMul (limit=+inf); routes the SwiGLU MLP activation to Triton.
     VLLM_QAIC_TRITON_SILU_AND_MUL: bool = False
@@ -72,6 +73,7 @@ qaic_environment_variables: dict[str, Callable[[], Any]] = {
         "VLLM_QAIC_TRITON_MROTARY_EMBEDDING", "0"
     )
     == "1",
+    "VLLM_QAIC_TRITON_ROPE": lambda: os.getenv("VLLM_QAIC_TRITON_ROPE", "0") == "1",
     "VLLM_QAIC_TRITON_SILU_AND_MUL": lambda: os.getenv(
         "VLLM_QAIC_TRITON_SILU_AND_MUL", "0"
     )
