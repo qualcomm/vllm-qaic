@@ -346,6 +346,13 @@ class QaicPlatform(Platform):
                 additional_config["override_qaic_config"].update(
                     {"prefill_seq_len": __prefill_seq_len}
                 )
+                # Drive the vLLM scheduler prefill chunk from prefill_seq_len so
+                # each prefill step feeds at most prefill_seq_len tokens. This
+                # matches the QPC vision_embeds binding (sized to prefill_seq_len)
+                # and prevents the mm-embedding gather from overflowing/cropping.
+                # (Replaces the removed --*-long-prefill-token-threshold flag.)
+                if not isinstance(__prefill_seq_len, (list, tuple)):
+                    scheduler_config.long_prefill_token_threshold = __prefill_seq_len
                 # max_num_batched_tokens.  QAIC's _prepare_qaic_inputs expands each
                 # decode request's token count from 1 → (1 + num_spec_tokens), but the
                 # scheduler counts decode requests as 1 token each when enforcing the
