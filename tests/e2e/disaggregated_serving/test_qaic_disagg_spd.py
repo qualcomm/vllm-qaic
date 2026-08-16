@@ -13,20 +13,8 @@ SpD enabled on the decode instances and validate:
 2. Data consistency is maintained across shuffled prompt orders.
 3. All SpD methods (ngram, suffix, draft_model) produce correct results.
 
-Migrated from the pre-4a18ee6, CLI-option-based test tree
-(tests/test_qaic/disaggregated_serving/test_spd_disagg.py) onto this repo's
-tests/e2e/ infra: qaic_test_config marker + device pool + the class-scoped
-disagg_server fixture (tests/e2e/disaggregated_serving/conftest.py), which
-now supports speculative_method/speculative_model/num_speculative_tokens/
-kv_store_size marker kwargs. Also switched from the old pickled-OpenOrca
-dataset (required HF_TOKEN) to the ShareGPT-based get_prompts/query_server
-already used by test_qaic_disagg.py in this directory.
-
 HARDWARE DEPENDENT: requires live QAIC devices and is not part of the
-non-hardware verification gate. Prior hardware runs found that ngram/suffix
-pass generation but can fail data_consistency due to a QAIC compiler
-row-independence issue; draft_model passes after the corresponding runtime
-fixes.
+non-hardware verification gate.
 
 Run examples:
     pytest tests/e2e/disaggregated_serving/test_qaic_disagg_spd.py -v \
@@ -52,6 +40,7 @@ logging.basicConfig(
 
 DEFAULT_MODEL_NAME = "meta-llama/Llama-3.1-8B-Instruct"
 DEFAULT_DRAFT_MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
+DEFAULT_FAST_MODEL_NAME = "TinyLlama/TinyLlama_v1.1"
 DEFAULT_SEQ_LEN = 512
 DEFAULT_CTX_LEN = 12288
 DEFAULT_DECODE_BSZ = 2
@@ -76,6 +65,12 @@ _BASE_CONFIG = dict(
     kv_store_size=DEFAULT_KV_STORE_SIZE,
 )
 
+_FAST_BASE_CONFIG = {
+    **_BASE_CONFIG,
+    "model_name": DEFAULT_FAST_MODEL_NAME,
+    "ctx_len": 2048,
+}
+
 
 # ---------------------------------------------------------------------------
 # Tests: ngram SpD + disaggregated serving
@@ -84,7 +79,7 @@ _BASE_CONFIG = dict(
 
 @pytest.mark.qaic_disagg_installed
 @pytest.mark.qaic_aot_mode
-@pytest.mark.qaic_test_config(speculative_method="ngram", **_BASE_CONFIG)
+@pytest.mark.qaic_test_config(speculative_method="ngram", **_FAST_BASE_CONFIG)
 class TestNgramDisagg:
     """Verify ngram SpD works correctly with disaggregated serving."""
 
@@ -145,7 +140,7 @@ class TestNgramDisagg:
 
 @pytest.mark.qaic_disagg_installed
 @pytest.mark.qaic_aot_mode
-@pytest.mark.qaic_test_config(speculative_method="suffix", **_BASE_CONFIG)
+@pytest.mark.qaic_test_config(speculative_method="suffix", **_FAST_BASE_CONFIG)
 class TestSuffixDisagg:
     """Verify suffix SpD works correctly with disaggregated serving."""
 
@@ -312,7 +307,7 @@ class TestDraftModelDisagg:
 
 @pytest.mark.qaic_disagg_installed
 @pytest.mark.qaic_aot_mode
-@pytest.mark.qaic_test_config(speculative_method="ngram", **_BASE_CONFIG)
+@pytest.mark.qaic_test_config(speculative_method="ngram", **_FAST_BASE_CONFIG)
 class TestKvProducerSpDGuards:
     """
     Validate that the KV producer (prefill node) does not execute SpD logic.

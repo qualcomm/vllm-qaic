@@ -461,9 +461,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             self.is_spec_decode_target_model = True
             configured_decode_ks = list(self.decode_ks)
             session_decode_ks = self._decode_ks_from_session()
-            self._warn_on_decode_k_mismatch(
-                configured_decode_ks, session_decode_ks
-            )
+            self._warn_on_decode_k_mismatch(configured_decode_ks, session_decode_ks)
             self.decode_ks = session_decode_ks
             self.active_k = self.decode_ks[-1]
 
@@ -2123,30 +2121,21 @@ def _get_qaic_compile_config(
         from .qaic_session_np import VLLM_KV_CACHE_PREFIX
 
         cfg["kv_cache_prefix"] = VLLM_KV_CACHE_PREFIX
-        # Prefill and decode roles must compile with identical KV-cache head
-        # counts so the shared-memory KV handoff sizes match. qaic_disagg's
-        # prefill subprocess never receives --speculative-config, so
-        # speculative_model_type stays "default" for prefill even when
-        # decode is "target" for SpD -- which otherwise leaves qaic_config
-        # None for prefill and non-None for decode, asymmetrically gating
-        # QEfficient's ReplicateKVHeadTransform (e.g. 8->32 KV heads on
-        # decode only for Llama-3.1-8B GQA). Pin the same value on both
-        # roles unconditionally in disagg mode, using num_devices=1 which is
-        # topology-insensitive (calculate_num_replicate_kv_heads returns
-        # max_repeat for num_devices=1 regardless of actual device count).
+        # Keep QEfficient's KV-head replication setting symmetric across
+        # disaggregated prefill and decode roles.
         from QEfficient.utils.config_utils import calculate_num_replicate_kv_heads
 
         if qaic_config is None:
             qaic_config = {}
         text_config = vllm_config.model_config.hf_config
         text_config = getattr(text_config, "get_text_config", lambda: text_config)()
-        qaic_config.setdefault(
-            "num_replicate_kv_heads",
-            calculate_num_replicate_kv_heads(
-                num_devices=1,
-                text_model_config=text_config,
-            ),
+        num_replicate_kv_heads = calculate_num_replicate_kv_heads(
+            num_devices=1,
+            text_model_config=text_config,
         )
+        qaic_config.setdefault("replicate_kv_heads", True)
+        if num_replicate_kv_heads is not None:
+            qaic_config.setdefault("num_replicate_kv_heads", num_replicate_kv_heads)
     print(cfg)
     device_group = cfg.pop("device_group")
     if "io_encrypt" in cfg:
