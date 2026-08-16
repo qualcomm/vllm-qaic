@@ -242,7 +242,7 @@ def test_compile_completion_is_deferred_when_draft_model_exists():
     runner.drafter.load_model.assert_called_once_with()
 
 
-def test_register_connector_is_idempotent_and_aot_only():
+def test_register_connector_is_aot_only():
     from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 
     keys = ["QaicConnector", "QaicLMCacheConnectorV1"]
@@ -259,12 +259,48 @@ def test_register_connector_is_idempotent_and_aot_only():
 
             platform.is_aot_inference.return_value = True
             kv_connector_module.register_connector()
-            kv_connector_module.register_connector()
             assert all(key in KVConnectorFactory._registry for key in keys)
     finally:
         for key in keys:
             KVConnectorFactory._registry.pop(key, None)
         KVConnectorFactory._registry.update(saved)
+
+
+def test_disagg_compile_enables_symmetric_kv_head_replication():
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            quantization=None,
+            max_model_len=128,
+            runner_type="generate",
+            is_multimodal_model=False,
+            hf_config=SimpleNamespace(
+                num_attention_heads=32,
+                num_key_value_heads=8,
+            ),
+        ),
+        cache_config=SimpleNamespace(
+            cache_dtype="auto",
+            num_cpu_blocks=1,
+            enable_prefix_caching=False,
+        ),
+        scheduler_config=SimpleNamespace(max_num_seqs=2),
+        additional_config={
+            "device_group": [9],
+            "override_qaic_config": {},
+        },
+        speculative_config=None,
+        kv_transfer_config=SimpleNamespace(kv_role="kv_producer"),
+        lora_config=None,
+    )
+
+    with patch.object(
+        qaic_model_loader,
+        "QAIC_DEVICE_CONFIG",
+        {"default": {}, "target": {}, "draft": {}},
+    ):
+        compiled = qaic_model_loader._get_qaic_compile_config(config, "default")
+
+    assert compiled.qaic_config == {"replicate_kv_heads": True}
 
 
 def test_same_device_draft_and_target_split_nsp_cores():

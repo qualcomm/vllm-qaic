@@ -88,7 +88,7 @@ def _build_speculative_config_json(spd_method: str, kwargs: dict) -> dict:
         spec_config["model"] = "suffix"
     elif spd_method == "draft_model":
         if not kwargs.get("speculative_model"):
-            pytest.skip(
+            raise ValueError(
                 "draft_model SpD requires qaic_test_config(speculative_model=...)"
             )
         spec_config["model"] = kwargs["speculative_model"]
