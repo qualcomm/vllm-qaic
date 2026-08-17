@@ -32,11 +32,23 @@ def _run_streaming(cmd: list[str]) -> subprocess.CompletedProcess:
 
 
 @pytest.mark.qaic_test_config(
-    model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-    ctx_len=2048,
-    dtype="auto",
-    kv_dtype="mxint8",
-    dataset="sharegpt",
+    {
+        "aot": dict(
+            model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+            ctx_len=2048,
+            dtype="auto",
+            kv_dtype="mxint8",
+            quantization="mxfp6",
+            dataset="sharegpt",
+        ),
+        "eager": dict(
+            model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+            ctx_len=2048,
+            dtype="auto",
+            kv_dtype="auto",
+            dataset="sharegpt",
+        ),
+    }
 )
 def test_offline_throughput(
     model_name,
@@ -45,6 +57,7 @@ def test_offline_throughput(
     decode_bsz,
     dtype,
     kv_dtype,
+    quantization,
     device_group,
     override_qaic_config,
     sharegpt_dataset_path,
@@ -75,12 +88,12 @@ def test_offline_throughput(
         "vllm",
         "--max-num-seqs",
         str(decode_bsz),
-        "--quantization",
-        "mxfp6",
         "--long-prefill-token-threshold",
         str(seq_len),
         "--no-async-scheduling",
     ]
+    if quantization is not None:
+        cmd += ["--quantization", quantization]
     if os.environ.get("DISABLE_PREFIX_CACHING") == "1":
         cmd.append("--no-enable-prefix-caching")
     _additional_config: dict = {"device_group": device_group}
@@ -95,10 +108,21 @@ def test_offline_throughput(
 
 
 @pytest.mark.qaic_test_config(
-    model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-    ctx_len=256,
-    dtype="auto",
-    kv_dtype="auto",
+    {
+        "aot": dict(
+            model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+            ctx_len=256,
+            dtype="auto",
+            kv_dtype="auto",
+            quantization="mxfp6",
+        ),
+        "eager": dict(
+            model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+            ctx_len=256,
+            dtype="auto",
+            kv_dtype="auto",
+        ),
+    }
 )
 def test_offline_latency(
     model_name,
@@ -107,6 +131,7 @@ def test_offline_latency(
     decode_bsz,
     dtype,
     kv_dtype,
+    quantization,
     device_group,
     override_qaic_config,
 ):
@@ -134,12 +159,12 @@ def test_offline_latency(
         kv_dtype,
         "--max-num-seqs",
         str(decode_bsz),
-        "--quantization",
-        "mxfp6",
         "--long-prefill-token-threshold",
         str(seq_len),
         "--no-async-scheduling",
     ]
+    if quantization is not None:
+        cmd += ["--quantization", quantization]
     if os.environ.get("DISABLE_PREFIX_CACHING") == "1":
         cmd.append("--no-enable-prefix-caching")
     _additional_config_lat: dict = {"device_group": device_group}

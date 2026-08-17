@@ -282,6 +282,11 @@ def dtype(request, pytestconfig):
 
 
 @pytest.fixture(scope="function")
+def quantization(request, pytestconfig):
+    return _resolve_qaic_test_config_value(request, pytestconfig, "quantization")
+
+
+@pytest.fixture(scope="function")
 def kv_dtype(request, pytestconfig):
     return _resolve_qaic_test_config_value(
         request, pytestconfig, "kv_dtype", default="auto"
@@ -617,7 +622,7 @@ class ServerRunner:
         seq_len: int,
         ctx_len: int,
         decode_bsz: int,
-        dtype: str,
+        dtype: str | None,
         kv_dtype: str,
         additional_config: dict,
         timeout: float = 900,
@@ -638,8 +643,10 @@ class ServerRunner:
             str(ctx_len),
             "--max-num-seqs",
             str(decode_bsz),
-            "--quantization",
-            dtype,
+        ]
+        if dtype is not None:
+            cmd += ["--quantization", dtype]
+        cmd += [
             "--kv-cache-dtype",
             kv_dtype,
             "--no-enable-prefix-caching",

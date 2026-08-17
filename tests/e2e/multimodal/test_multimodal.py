@@ -475,6 +475,7 @@ def _qwenvl_multi_resolution_test(
         assert o1.outputs[0].text == o2.outputs[0].text
 
 
+@pytest.mark.qaic_aot_mode
 @pytest.mark.qaic_test_config(
     model_name="Qwen/Qwen3-VL-2B-Instruct",
     ctx_len=4096,
@@ -488,6 +489,7 @@ class TestQwen3VL(_DualQpcTestBase):
     test_qwenvl_multi_resolution = _qwenvl_multi_resolution_test
 
 
+@pytest.mark.qaic_aot_mode
 @pytest.mark.qaic_test_config(
     model_name="Qwen/Qwen2.5-VL-2B-Instruct",
     ctx_len=4096,
@@ -501,6 +503,7 @@ class TestQwen25VL(_DualQpcTestBase):
     test_qwenvl_multi_resolution = _qwenvl_multi_resolution_test
 
 
+@pytest.mark.qaic_aot_mode
 @pytest.mark.qaic_test_config(
     model_name="OpenGVLab/InternVL2_5-1B",
     ctx_len=4096,
@@ -513,6 +516,7 @@ class TestInternVL(_DualQpcTestBase):
     test_multi_image = _multi_image_test
 
 
+@pytest.mark.qaic_aot_mode
 @pytest.mark.qaic_test_config(
     model_name="llava-hf/llava-interleave-qwen-0.5b-hf",
     ctx_len=4096,
@@ -525,6 +529,7 @@ class TestLlava(_DualQpcTestBase):
     pass
 
 
+@pytest.mark.qaic_aot_mode
 @pytest.mark.qaic_test_config(
     model_name="google/gemma-3-4b-it",
     ctx_len=4096,
@@ -537,6 +542,7 @@ class TestGemma3(_DualQpcTestBase):
     pass
 
 
+@pytest.mark.qaic_aot_mode
 @pytest.mark.qaic_test_config(
     model_name="ibm-granite/granite-vision-3.2-2b",
     ctx_len=6144,
@@ -549,6 +555,7 @@ class TestGranite(_DualQpcTestBase):
     pass
 
 
+@pytest.mark.qaic_aot_mode
 @pytest.mark.qaic_test_config(
     model_name="openai/whisper-tiny.en",
     ctx_len=448,
