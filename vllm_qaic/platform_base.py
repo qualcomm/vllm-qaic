@@ -48,8 +48,7 @@ DYNAMIC_RESOLUTION_MODELS = [
 class QaicPlatform(Platform):
     _enum = PlatformEnum.OOT
     primary_attn_backend_cls = (
-        "vllm_qaic.attention.backends"
-        ".qaic_attn.QAicTorchAttentionBackend"
+        "vllm_qaic.attention.backends.qaic_attn.QAicTorchAttentionBackend"
     )
     device_name: str = "qaic"
     # Set device type to cpu if it's AOT.
@@ -308,7 +307,9 @@ class QaicPlatform(Platform):
                     cache_config.block_size = (
                         scheduler_config.long_prefill_token_threshold
                     )
-                elif model_config.is_multimodal_model and model_config.is_encoder_decoder:
+                elif (
+                    model_config.is_multimodal_model and model_config.is_encoder_decoder
+                ):
                     cache_config.block_size = 100000
                 else:
                     cache_config.block_size = model_config.max_model_len  # ctx_len

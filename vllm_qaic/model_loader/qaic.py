@@ -926,7 +926,9 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 self.decode_batch_inputs["block_table"][:num_decodes] = block_table[
                     :num_decodes
                 ]
-                self.decode_batch_inputs["slot_id"][:num_decodes] = slot_id[:num_decodes]
+                self.decode_batch_inputs["slot_id"][:num_decodes] = slot_id[
+                    :num_decodes
+                ]
                 if num_decodes < self.decode_bsz:
                     self.decode_batch_inputs["block_table"][num_decodes:] = -1
                     self.decode_batch_inputs["slot_id"][num_decodes:] = 0
