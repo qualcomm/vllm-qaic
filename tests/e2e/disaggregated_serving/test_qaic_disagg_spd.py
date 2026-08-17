@@ -204,6 +204,7 @@ class TestSuffixDisagg:
 @pytest.mark.qaic_test_config(
     speculative_method="draft_model",
     speculative_model=DEFAULT_DRAFT_MODEL_NAME,
+    disaggregated_startup_timeout=3600,
     **_BASE_CONFIG,
 )
 class TestDraftModelDisagg:
