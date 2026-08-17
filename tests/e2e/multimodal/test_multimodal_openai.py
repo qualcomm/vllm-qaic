@@ -14,6 +14,7 @@ def client(host, port):
     client.close()
 
 
+@pytest.mark.qaic_aot_mode
 @pytest.mark.qaic_test_config(
     model_name="openai/whisper-tiny.en",
     dtype="mxfp6",
