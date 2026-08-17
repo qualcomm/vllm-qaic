@@ -293,10 +293,22 @@ def test_disagg_compile_enables_symmetric_kv_head_replication():
         lora_config=None,
     )
 
-    with patch.object(
-        qaic_model_loader,
-        "QAIC_DEVICE_CONFIG",
-        {"default": {}, "target": {}, "draft": {}},
+    qaicrt = types.ModuleType("qaicrt")
+    qaicrt.QStatus = SimpleNamespace(QS_SUCCESS=0)
+
+    class FakeUtil:
+        def getResourceInfo(self, _qid):
+            return qaicrt.QStatus.QS_SUCCESS, SimpleNamespace(nspTotal=16)
+
+    qaicrt.Util = FakeUtil
+
+    with (
+        patch.dict("sys.modules", {"qaicrt": qaicrt}),
+        patch.object(
+            qaic_model_loader,
+            "QAIC_DEVICE_CONFIG",
+            {"default": {}, "target": {}, "draft": {}},
+        ),
     ):
         compiled = qaic_model_loader._get_qaic_compile_config(config, "default")
 

@@ -165,8 +165,9 @@ def _disagg_test_config(request, pytestconfig, host, port, device_pool_ids):
         "decode_devices": decode_devices,
         "prefill_max_num_seqs": kwargs["prefill_max_num_seqs"],
         "client_request_timeout": pytestconfig.getoption("client_request_timeout"),
-        "disaggregated_startup_timeout": pytestconfig.getoption(
-            "disaggregated_startup_timeout"
+        "disaggregated_startup_timeout": kwargs.get(
+            "disaggregated_startup_timeout",
+            pytestconfig.getoption("disaggregated_startup_timeout"),
         ),
         "disaggregated_server_port": port,
         "num_prefill_workers": num_prefill_workers,
