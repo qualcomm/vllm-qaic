@@ -6,12 +6,28 @@ up) just provides the generic `VllmRunner` wrapper with no QAIC specifics.
 
 ## Writing a new test
 
-Most tests need the `qaic_model` fixture plus a `qaic_test_config` marker:
+Most tests need the `qaic_model` fixture plus a `qaic_test_config` marker. For
+tests that run in both AOT and PyTorch eager mode, provide mode-specific
+configuration so eager mode does not inherit AOT quantization settings:
 
 ```python
 @pytest.mark.qaic_test_config(
-    model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-    seq_len=128, ctx_len=256, decode_bsz=4, dtype="mxfp6", kv_dtype="mxint8",
+    {
+        "aot": dict(
+            model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+            seq_len=128,
+            ctx_len=256,
+            decode_bsz=4,
+            dtype="mxfp6",
+            kv_dtype="mxint8",
+        ),
+        "eager": dict(
+            model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+            seq_len=128,
+            ctx_len=256,
+            decode_bsz=4,
+        ),
+    }
 )
 class TestSomething:
     def test_x(self, qaic_model, sample_prompts):
@@ -24,8 +40,10 @@ instead. For multi-device runs, add `num_device_groups`/`device_group_size` to t
 `device_groups`/`device_group`.
 
 `qaic_test_config(**kwargs)` is the per-test/class config-override marker — resolved as marker
-kwarg → matching CLI option → default. It's open-ended; common keys are `model_name`, `seq_len`,
-`ctx_len`, `decode_bsz`, `dtype`, `kv_dtype`, `num_device_groups`/`device_group_size`, LoRA options
+kwarg → matching CLI option → default. A single positional dictionary with `aot` and `eager`
+keys selects mode-specific values. It's open-ended; common keys are `model_name`, `seq_len`,
+`ctx_len`, `decode_bsz`, `dtype`, `quantization`, `kv_dtype`,
+`num_device_groups`/`device_group_size`, LoRA options
 (`enable_lora`, `max_loras`, `lora_modules`), and the disaggregated-serving worker/group-size keys
 (`num_prefill_workers`, `prefill_device_group_size`, `num_decode_workers`,
 `decode_device_group_size`, `prefill_max_num_seqs`).
