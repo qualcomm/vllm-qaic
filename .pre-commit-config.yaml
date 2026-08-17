@@ -9,9 +9,14 @@ repos:
 - repo: https://github.com/astral-sh/ruff-pre-commit
   rev: v0.14.0
   hooks:
+  # `identify` tags docker/Dockerfile.pyt as `python` (.pyt is a Python
+  # extension), so Ruff would parse the Dockerfile as Python and report
+  # hundreds of bogus invalid-syntax errors. Exclude the docker/ Dockerfiles.
   - id: ruff-check
     args: [--output-format, github, --fix]
+    exclude: ^docker/Dockerfile\..*$
   - id: ruff-format
+    exclude: ^docker/Dockerfile\..*$
 - repo: https://github.com/crate-ci/typos
   rev: v1.43.5
   hooks:

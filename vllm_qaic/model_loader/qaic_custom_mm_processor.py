@@ -93,7 +93,13 @@ logger = init_logger(__name__)
 # transformers v5.5.4 replaced image_processor.min_pixels / .max_pixels class
 # attributes with a size dict keyed by 'shortest_edge' / 'longest_edge'.
 _TRANSFORMERS_NEW_IMAGE_PROCESSOR = _Version(_transformers_version) == _Version("5.5.4")
-
+_gemma4_get_placeholder_str = Gemma4ForConditionalGeneration.get_placeholder_str
+# Gemma4 with vllm v0.23 wabts image modality instead of image_embeds
+Gemma4ForConditionalGeneration.get_placeholder_str = classmethod(
+    lambda cls, modality, i: _gemma4_get_placeholder_str(
+        "image" if modality == "image_embeds" else modality, i
+    )
+)
 
 class QaicGemma3MultiModalProcessor(Gemma3MultiModalProcessor):
     def _call_hf_processor(
@@ -271,6 +277,15 @@ class QaicQwen2VLMultiModalDataParser(Qwen2VLMultiModalDataParser):
 
                 if num_frames == 0:
                     return super()._parse_image_data(data)
+
+                # Single-image encode output keeps the encoder batch dim
+                # ([1, V, hidden]); multi-image arrives flattened ([sum(V),
+                # hidden]). Flatten to 2-D so all items share the same rank,
+                # else MultiModalFlatField._reduce_data crashes when batching
+                # a 3-D item with 2-D items.
+                if image_embeds.ndim == 3:
+                    image_embeds = image_embeds.reshape(-1, image_embeds.shape[-1])
+                    data["image_embeds"] = image_embeds
 
                 # Determine vision size
                 # based on whether embeds are batched per frame or flattened.
