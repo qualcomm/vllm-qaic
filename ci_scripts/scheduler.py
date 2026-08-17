@@ -35,6 +35,7 @@ except ImportError:
     from qaicrt import Util as _qaic_util
 
 _DEFAULT_TIMEOUT_S = 1800.0
+_DEFAULT_PORT_BASE = 8080
 # Devices need a brief settling window after release before reuse
 _DEFAULT_COOLDOWN_S = 5.0
 _WAKE_FALLBACK_S = 5.0
@@ -166,6 +167,7 @@ class Scheduler:
         cooldown_s: float,
         dry_run: bool = False,
         set_qaic_visible_devices: bool = False,
+        port_base: int = _DEFAULT_PORT_BASE,
     ):
         self.jobs = jobs
         self.device_pool = DevicePool(device_ids, cooldown_s=cooldown_s)
@@ -173,6 +175,7 @@ class Scheduler:
         self.timeout_s = timeout_s
         self.dry_run = dry_run
         self.set_qaic_visible_devices = set_qaic_visible_devices
+        self.port_base = port_base
 
         self.cond = threading.Condition()
         self.print_lock = threading.Lock()
@@ -291,6 +294,12 @@ class Scheduler:
 
         try:
             job_dir.mkdir(parents=True, exist_ok=True)
+            pytest_args = list(job.base_args)
+            if not any(
+                arg == "--port" or arg.startswith("--port=")
+                for arg in pytest_args
+            ):
+                pytest_args += ["--port", str(self.port_base + job.job_id)]
             cmd = [
                 "python3",
                 "-m",
@@ -303,7 +312,7 @@ class Scheduler:
                 *job.nodeids,
                 "--device-id",
                 ",".join(str(d) for d in job.device_ids),
-                *job.base_args,
+                *pytest_args,
             ]
             job_env = None
             if self.set_qaic_visible_devices:

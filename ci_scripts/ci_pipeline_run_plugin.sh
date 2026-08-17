@@ -116,7 +116,11 @@ function execute_tests() {
     mode="$1"
     cd "${VLLM_DIR}"/ci_scripts
     # shellcheck disable=SC1090
-    source ./ci_fasttest_qaic_"${mode}".sh --host "${HOST}" --port "${PORT}"
+    if [ "$mode" = "pyt" ]; then
+        source ./ci_fasttest_qaic_"${mode}".sh --host "${HOST}"
+    else
+        source ./ci_fasttest_qaic_"${mode}".sh --host "${HOST}" --port "${PORT}"
+    fi
     cd "${VLLM_DIR}"
 }
 for mode in $modes
