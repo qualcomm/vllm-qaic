@@ -16,7 +16,9 @@
 #include "jit_dev_status_codes.h"
 #include "jit_qshim_api.h"
 
-
+#if __HEXAGON_ARCH__ < 81
+#error "rms_norm_bf16 requires HVX V81 or later (AI200+)"
+#endif
 
 // BF16 is the top 16 bits of FP32. Expand a BF16 HVX vector (64 x uint16)
 // to two FP32 HVX vectors (32 x float each) by zero-extending each lane to
