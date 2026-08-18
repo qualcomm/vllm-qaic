@@ -2031,6 +2031,13 @@ def _get_qaic_compile_config(
     qaic_config: dict[str, Any] | None = (override_qaic_config or {}).pop(
         "qaic_config", None
     )
+    cfg.pop("qaic_config", None)
+    for key in ("replicate_kv_heads", "num_replicate_kv_heads"):
+        if override_qaic_config and key in override_qaic_config:
+            if qaic_config is None:
+                qaic_config = {}
+            qaic_config.setdefault(key, override_qaic_config.pop(key))
+            cfg.pop(key, None)
     if speculative_model_type in ("target", "turbo"):
         if qaic_config is None:
             qaic_config = {}
@@ -2121,21 +2128,13 @@ def _get_qaic_compile_config(
         from .qaic_session_np import VLLM_KV_CACHE_PREFIX
 
         cfg["kv_cache_prefix"] = VLLM_KV_CACHE_PREFIX
-        # Keep QEfficient's KV-head replication setting symmetric across
-        # disaggregated prefill and decode roles.
-        from QEfficient.utils.config_utils import calculate_num_replicate_kv_heads
-
+        # QEfficient computes the replication factor from the model config and
+        # compile topology. Keep the transform enabled on both disaggregated
+        # roles so their KV-cache layouts remain identical. Any explicit
+        # qaic_config values supplied by the user take precedence.
         if qaic_config is None:
             qaic_config = {}
-        text_config = vllm_config.model_config.hf_config
-        text_config = getattr(text_config, "get_text_config", lambda: text_config)()
-        num_replicate_kv_heads = calculate_num_replicate_kv_heads(
-            num_devices=1,
-            text_model_config=text_config,
-        )
         qaic_config.setdefault("replicate_kv_heads", True)
-        if num_replicate_kv_heads is not None:
-            qaic_config.setdefault("num_replicate_kv_heads", num_replicate_kv_heads)
     print(cfg)
     device_group = cfg.pop("device_group")
     if "io_encrypt" in cfg:
