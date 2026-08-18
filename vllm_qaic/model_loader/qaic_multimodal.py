@@ -4,6 +4,7 @@
 # ------------------------------------------------------------------
 
 import importlib
+import inspect
 import math
 from collections.abc import Iterator, Set
 
@@ -584,13 +585,39 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
         mm_features: list[MultiModalFeatureSpec],
     ) -> tuple[torch.Tensor, int]:
         source_class = self._get_mrope_source_class()
+        # The QaicMultiModal wrapper delegates get_mrope_input_positions to the
+        # upstream qwen3_vl.py implementation via
+        # source_class.get_mrope_input_positions(self, ...). The upstream method
+        # internally calls self._get_mrope_input_positions(...), but
+        # _get_mrope_input_positions is a private method on the original Qwen3VL
+        # class that was not forwarded to the QaicMultiModal wrapper, causing an
+        # AttributeError that kills the EngineCore process.
+        static_impl = inspect.getattr_static(
+            source_class, "_get_mrope_input_positions", None
+        )
+        if isinstance(static_impl, staticmethod):
+            return static_impl.__func__(
+                input_tokens=input_tokens,
+                mm_features=mm_features,
+                config=self.config,
+            )
         return source_class.get_mrope_input_positions(self, input_tokens, mm_features)
 
     def iter_mm_grid_hw(
         self, input_tokens: list[int], mm_features: list[MultiModalFeatureSpec]
-    ) -> Iterator[tuple[int, int, int]]:
+    ) -> Iterator[tuple[int, int, int] | tuple[int, int, int, int]]:
         # Helper for Qwen3-VL's get_mrope_input_positions.
         source_class = self._get_mrope_source_class()
+        static_impl = inspect.getattr_static(source_class, "_iter_mm_grid_hw", None)
+        if isinstance(static_impl, staticmethod):
+            return static_impl.__func__(
+                input_tokens,
+                mm_features,
+                video_token_id=self.config.video_token_id,
+                vision_start_token_id=self.config.vision_start_token_id,
+                vision_end_token_id=self.config.vision_end_token_id,
+                spatial_merge_size=self.config.vision_config.spatial_merge_size,
+            )
         return source_class.iter_mm_grid_hw(self, input_tokens, mm_features)
 
     def iter_mm_grid_thw(
