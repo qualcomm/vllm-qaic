@@ -34,7 +34,7 @@ os.environ["QAIC_VISIBLE_DEVICES"] = (
 
 # Create a LLM.
 llm = LLM(
-    model="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+    model="Qwen/Qwen3-8B-FP8",
     max_num_seqs=decode_bsz,  # determines decode batch size
     max_model_len=ctx_len,  # ctx_len (does not account for padding,
     # but does account for prompt and generated tokens)
