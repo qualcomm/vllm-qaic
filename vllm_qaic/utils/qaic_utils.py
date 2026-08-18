@@ -10,11 +10,84 @@ from typing import TYPE_CHECKING, Any
 import regex as re
 
 from vllm_qaic.logger import init_logger
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec, 
+    KVCacheConfig, 
+    KVCacheSpec, 
+    SlidingWindowSpec,
+    get_kv_quant_mode
+)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
+
+def _is_swa_layer(
+    hf_config: Any,
+    layer_index: int
+) -> bool:
+    
+    # for the models we support only Gemma4 family and GPT-OSS 
+    # has clear per layer attention information inside
+    # hf config
+    
+    if getattr(hf_config, "text_config"):
+        layer_types = hf_config["text_config"]["layer_types"]
+    else:
+        layer_types = hf_config["layer_types"]
+    
+    if layer_index >= len(layer_types):
+        raise ValueError("Layer number out of index")
+    
+    if layer_types[layer_index] == "sliding_attention":
+        sliding_window = getattr(hf_config, "sliding_window", None)
+        return int(sliding_window)
+    
+    return None
+
+def _get_kv_cache_spec(
+    vllm_config: "VllmConfig",
+    kv_cache_dtype: torch.dtype
+) -> dict[str, KVCacheSpec]:
+    
+    model_config = vllm_config.model_config
+    parallel_config = vllm_config.parallel_config
+    cache_config = vllm_config.cache_config
+    hf_config = model_config.hf_config
+    
+    # for creatiung KVCacheSpec we need block_size from
+    # cache_config, num_kv_heads from model_config
+    block_size = cache_config.block_size
+    num_kv_heads = model_config.get_num_kv_heads(parallel_config)
+    head_size = model_config.get_head_size()
+    kv_quant_mode = get_kv_quant_mode(cache_config.cache_dtype)
+    
+    start_layer, end_layer = model_config.get_layers_start_end_indices(parallel_config)
+    kv_cache_spec : dict[str, KVCacheSpec] = {}
+    for i in range(start, end+1):
+        layer_id = f"layer_{i - start + 1}"
+        sliding_attention = _is_swa_layer(hf_config, i)
+        if sliding_attention is not None:
+            # current attention is a SWA
+            kv_cache_spec[layer_id] = SlidingWindowSpec(
+                block_size = block_size,
+                num_kv_heads = num_kv_heads,
+                head_size=head_size,
+                dtype=kv_cache_dtype,
+                kv_quant_mode=kv_quant_mode,
+                sliding_window=sliding_window,
+            )
+        else
+            kv_cache_spec[layer_id] = FullAttentionSpec(
+                block_size = block_size,
+                num_kv_heads = num_kv_heads,
+                head_size = head_size,
+                dtype = kv_cache_dtype,
+                kv_quant_mode=kv_quant_mode,
+            )
+    
+    return kv_cache_spec                     
 
 
 def _clean_config(

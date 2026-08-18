@@ -54,7 +54,7 @@ from vllm.v1.utils import record_function_or_nullcontext
 from vllm.v1.worker.gpu_input_batch import InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm_qaic import envs
-
+from vllm_qaic.utils.qaic_utils import _get_kv_cache_spec
 try:
     import torch_qaic.profile as qaic_profile
     import torch_qaic.qaic as qaic
@@ -1790,24 +1790,16 @@ class QaicModelRunnerAoT(GPUModelRunner):
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """
-        Generates the KVCacheSpec by parsing the kv cache format from each
-        Attention module in the static forward context.
+        Generates the KVCacheSpec by parsing hf_config for heterogenous models
+        Currently supports FullAttentionSpec & SlidingWindowSpec
         Returns:
             KVCacheSpec: A dictionary mapping layer names to their KV cache
             format. Layers that do not need KV cache are not included.
         """
-        block_size = self.cache_config.block_size
-        kv_cache_spec: dict[str, KVCacheSpec] = {}
-        n_layers = self.model_config.get_num_layers(self.parallel_config)
-        for i in range(n_layers):
-            layer_name = f"layer_{i}"
-            kv_cache_spec[layer_name] = FullAttentionSpec(
-                block_size=block_size,
-                num_kv_heads=self.num_kv_heads,
-                head_size=self.head_size,
-                dtype=self.kv_cache_dtype,
-            )
-        return kv_cache_spec
+        return _get_kv_cache_spec(
+            self.vllm_config,
+            self.kv_cache_dtype
+        )
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         if not self.lora_manager:
