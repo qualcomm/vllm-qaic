@@ -5,6 +5,7 @@
 """Behavior-level unit tests for disaggregated speculative decoding."""
 
 from contextlib import nullcontext
+import json
 import types
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -313,6 +314,104 @@ def test_disagg_compile_enables_symmetric_kv_head_replication():
         compiled = qaic_model_loader._get_qaic_compile_config(config, "default")
 
     assert compiled.qaic_config == {"replicate_kv_heads": True}
+
+
+@pytest.mark.parametrize(
+    "replication_override",
+    [
+        {
+            "replicate_kv_heads": False,
+            "num_replicate_kv_heads": 2,
+        },
+        {
+            "qaic_config": {
+                "replicate_kv_heads": False,
+                "num_replicate_kv_heads": 2,
+            }
+        },
+    ],
+)
+def test_disagg_compile_preserves_explicit_qaic_replication_config(
+    replication_override,
+):
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            quantization=None,
+            max_model_len=128,
+            runner_type="generate",
+            is_multimodal_model=False,
+            hf_config=SimpleNamespace(
+                num_attention_heads=32,
+                num_key_value_heads=8,
+            ),
+        ),
+        cache_config=SimpleNamespace(
+            cache_dtype="auto",
+            num_cpu_blocks=1,
+            enable_prefix_caching=False,
+        ),
+        scheduler_config=SimpleNamespace(max_num_seqs=2),
+        additional_config={
+            "device_group": [9],
+            "override_qaic_config": replication_override,
+        },
+        speculative_config=None,
+        kv_transfer_config=SimpleNamespace(kv_role="kv_consumer"),
+        lora_config=None,
+    )
+
+    qaicrt = types.ModuleType("qaicrt")
+    qaicrt.QStatus = SimpleNamespace(QS_SUCCESS=0)
+
+    class FakeUtil:
+        def getResourceInfo(self, _qid):
+            return qaicrt.QStatus.QS_SUCCESS, SimpleNamespace(nspTotal=16)
+
+    qaicrt.Util = FakeUtil
+
+    with (
+        patch.dict("sys.modules", {"qaicrt": qaicrt}),
+        patch.object(
+            qaic_model_loader,
+            "QAIC_DEVICE_CONFIG",
+            {"default": {}, "target": {}, "draft": {}},
+        ),
+    ):
+        compiled = qaic_model_loader._get_qaic_compile_config(config, "default")
+
+    assert compiled.qaic_config == {
+        "replicate_kv_heads": False,
+        "num_replicate_kv_heads": 2,
+    }
+
+
+def test_disagg_launcher_forwards_nested_qaic_config():
+    run_args_vllm_serve = pytest.importorskip("qaic_disagg.utils").run_args_vllm_serve
+    override = {
+        "qaic_config": {
+            "replicate_kv_heads": True,
+            "num_replicate_kv_heads": 2,
+        }
+    }
+    args = SimpleNamespace(
+        model="test-model",
+        port=8000,
+        device_group=[9],
+        override_qaic_config=override,
+    )
+
+    command = run_args_vllm_serve(
+        args,
+        "prefill",
+        kv_connector="",
+        skip_kv_connector=True,
+    )
+
+    additional_config = json.loads(command[command.index("--additional-config") + 1])
+    assert additional_config == {
+        "device_group": [9],
+        "override_qaic_config": override,
+    }
 
 
 def test_same_device_draft_and_target_split_nsp_cores():
