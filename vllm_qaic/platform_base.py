@@ -538,17 +538,20 @@ class QaicPlatform(Platform):
                 )
                 scheduler_config.async_scheduling = False
             scheduler_config.enable_chunked_prefill = False
-            # The vision encoder QPC accepts the full prompt in one shot, so pin
-            # prefill_seq_len to max_model_len and size the scheduler budget from it
-            # (max_num_seqs * prefill_seq_len) so prompts longer than the original
-            # seq_len are allowed.
+            scheduler_config.long_prefill_token_threshold = model_config.max_model_len
+            # max_num_batched_tokens was set earlier as
+            # max_num_seqs * long_prefill_token_threshold (with the original
+            # seq_len value). Now that we have raised long_prefill_token_threshold
+            # to max_model_len for the encoder runner, recompute the budget so
+            # the scheduler allows prompts longer than the original seq_len.
+            scheduler_config.max_num_batched_tokens = (
+                scheduler_config.max_num_seqs
+                * scheduler_config.long_prefill_token_threshold
+            )
             if "override_qaic_config" not in vllm_config.additional_config:
                 additional_config["override_qaic_config"] = {}
             additional_config["override_qaic_config"].update(
                 {"prefill_seq_len": model_config.max_model_len}
-            )
-            scheduler_config.max_num_batched_tokens = (
-                scheduler_config.max_num_seqs * model_config.max_model_len
             )
 
         if model_type in DYNAMIC_RESOLUTION_MODELS:
