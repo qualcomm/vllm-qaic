@@ -5,9 +5,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # SPDX-License-Identifier: Apache-2.0
 # Adapted from examples/qaic_spd.py — DFlash (Diffusion-LM draft) SpD.
-#
-# Local dev/test script (NOT part of the PR). vLLM logs spec-decode acceptance
-# natively when disable_log_stats=False.
 
 import gc
 import random

@@ -165,9 +165,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self.decode_logits: dict[str, np.ndarray] | None = None
         self.is_spec_decode_target_model = False
 
-        # DFlash TLM hidden-state capture buffers (set by QaicModelRunner).
+        # DFlash TLM decode hidden-state capture buffer (set by QaicModelRunner).
         self._dflash_decode_hidden_buf: np.ndarray | None = None
-        self._dflash_hidden_state_chunks: list[np.ndarray] | None = None
 
         # Variable-K decode specializations: compile with [0, K] for ngram/suffix
         # and dispatch to the smallest kernel that covers actual proposals each step.
@@ -231,6 +230,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         prefill_cum_sum: np.ndarray | None = None,
         logits: np.ndarray | None = None,
         num_prompt_tokens_prefill: np.ndarray | None = None,
+        dflash_hidden_chunks: list[np.ndarray] | None = None,
     ) -> Queue | None:
         if self.is_pooling_model and not self.is_multimodal_model:
             output = self._run_encode(prefill_cum_sum, input_ids, positions)
@@ -270,6 +270,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                         logits,
                         lora_ids,
                         mm_kwargs_list,
+                        dflash_hidden_chunks,
                     )
                     return pending_prefill_exec_queue
                 else:
@@ -747,6 +748,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         logits: np.ndarray,
         lora_ids: np.ndarray | None = None,
         mm_kwargs_list: list[dict] | None = None,
+        dflash_hidden_chunks: list[np.ndarray] | None = None,
     ) -> np.ndarray:
         # perform prefill (only prefill_bsz=1 is supported)
         pending_exec_count = 0  # in-flight executions in current batch
@@ -843,8 +845,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     chunk_inputs["num_logits_to_keep"] = np.array([[1]], dtype=np.int64)
 
                 # DFlash: bind per-chunk hidden-states output buffers for the DLM.
-                if self._dflash_hidden_state_chunks is not None:
-                    chunk_inputs["hidden_states"] = self._dflash_hidden_state_chunks[
+                if dflash_hidden_chunks is not None:
+                    chunk_inputs["hidden_states"] = dflash_hidden_chunks[
                         _dflash_chunk_idx
                     ]
                     _dflash_chunk_idx += 1
