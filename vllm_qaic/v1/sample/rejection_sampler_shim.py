@@ -432,6 +432,141 @@ def generate_uniform_probs(
 _shim_installed: bool = False
 
 
+def _patch_sampler_temperature() -> None:
+    """Avoid QAIC's unsupported tensor/scalar comparison in vLLM Sampler."""
+    import vllm.v1.sample.sampler as sampler_module
+
+    if getattr(sampler_module.Sampler, "_qaic_temperature_patched", False):
+        return
+
+    sampling_eps = sampler_module._SAMPLING_EPS
+
+    def apply_temperature(
+        logits: torch.Tensor,
+        temp: torch.Tensor,
+        all_random: bool,
+    ) -> torch.Tensor:
+        if not all_random:
+            host_temp = temp.cpu()
+            host_temp = torch.where(
+                host_temp < sampling_eps,
+                torch.ones_like(host_temp),
+                host_temp,
+            )
+            temp = host_temp.to(device=temp.device)
+        return logits.div_(temp.unsqueeze(dim=1))
+
+    sampler_module.Sampler.apply_temperature = staticmethod(apply_temperature)
+    sampler_module.Sampler._qaic_temperature_patched = True
+
+
+def _patch_sampler_comparisons() -> None:
+    """Move sampler comparison predicates to CPU for the QAIC backend."""
+    import vllm.v1.sample.ops.topk_topp_sampler as topk_topp_module
+    import vllm.v1.sample.sampler as sampler_module
+
+    if not getattr(topk_topp_module, "_qaic_comparisons_patched", False):
+        original_apply_top_k_top_p_pytorch = (
+            topk_topp_module.apply_top_k_top_p_pytorch
+        )
+
+        def apply_top_k_top_p_pytorch(
+            logits: torch.Tensor,
+            k: torch.Tensor | None,
+            p: torch.Tensor | None,
+            allow_cpu_sync: bool = False,
+        ) -> torch.Tensor:
+            if logits.device.type != "qaic":
+                return original_apply_top_k_top_p_pytorch(
+                    logits, k, p, allow_cpu_sync
+                )
+            if p is None and k is None:
+                return logits
+
+            logits_sort, logits_idx = logits.sort(dim=-1, descending=False)
+            if k is not None:
+                top_k_mask = logits_sort.size(1) - k.to(torch.long)
+                top_k_mask = logits_sort.gather(1, top_k_mask.unsqueeze(dim=1))
+                top_k_mask = torch.lt(
+                    logits_sort.cpu(), top_k_mask.cpu()
+                ).to(device=logits.device)
+                logits_sort.masked_fill_(top_k_mask, -float("inf"))
+
+            if p is not None:
+                probs_sort = logits_sort.softmax(dim=-1)
+                probs_sum = torch.cumsum(probs_sort, dim=-1, out=probs_sort)
+                top_p_mask = torch.le(
+                    probs_sum.cpu(),
+                    (1 - p.unsqueeze(dim=1)).cpu(),
+                ).to(device=logits.device)
+                top_p_mask[:, -1] = False
+                logits_sort.masked_fill_(top_p_mask, -float("inf"))
+
+            return logits.scatter_(dim=-1, index=logits_idx, src=logits_sort)
+
+        topk_topp_module.apply_top_k_top_p_pytorch = apply_top_k_top_p_pytorch
+        topk_topp_module._qaic_comparisons_patched = True
+
+    if getattr(sampler_module.Sampler, "_qaic_sample_patched", False):
+        return
+
+    def sample(self, logits, sampling_metadata, logprobs_mode_override=None):
+        if logits.device.type != "qaic":
+            return sampler_module.Sampler._qaic_original_sample(
+                self, logits, sampling_metadata, logprobs_mode_override
+            )
+
+        logprobs_mode = logprobs_mode_override or self.logprobs_mode
+        assert not (sampling_metadata.all_greedy and sampling_metadata.all_random)
+        if sampling_metadata.all_random:
+            greedy_sampled = None
+        else:
+            greedy_sampled = self.greedy_sample(logits)
+            if sampling_metadata.all_greedy:
+                processed_logprobs = None
+                if (
+                    sampling_metadata.max_num_logprobs is not None
+                    or sampling_metadata.logprob_token_ids
+                ):
+                    if logprobs_mode == "processed_logits":
+                        processed_logprobs = logits
+                    elif logprobs_mode == "processed_logprobs":
+                        processed_logprobs = self.compute_logprobs(logits)
+                return greedy_sampled, processed_logprobs
+
+        assert sampling_metadata.temperature is not None
+        logits = self.apply_temperature(
+            logits, sampling_metadata.temperature, sampling_metadata.all_random
+        )
+        for processor in sampling_metadata.logitsprocs.argmax_invariant:
+            logits = processor.apply(logits)
+
+        random_sampled, processed_logprobs = self.topk_topp_sampler(
+            logits,
+            sampling_metadata.generators,
+            sampling_metadata.top_k,
+            sampling_metadata.top_p,
+        )
+        if greedy_sampled is None:
+            return random_sampled, processed_logprobs
+
+        greedy_mask = (
+            sampling_metadata.temperature.cpu()
+            < sampler_module._SAMPLING_EPS
+        ).to(device=logits.device)
+        sampled = torch.where(
+            greedy_mask,
+            greedy_sampled,
+            random_sampled,
+            out=greedy_sampled,
+        )
+        return sampled, processed_logprobs
+
+    sampler_module.Sampler._qaic_original_sample = sampler_module.Sampler.sample
+    sampler_module.Sampler.sample = sample
+    sampler_module.Sampler._qaic_sample_patched = True
+
+
 def install() -> None:
     """Replace Triton kernel objects in ``vllm.v1.sample.rejection_sampler``
     with PyTorch equivalents wrapped in ``_GridLaunchable``.
@@ -455,6 +590,8 @@ def install() -> None:
     _rs.rejection_random_sample_kernel = rejection_random_sample_kernel
     _rs.sample_recovered_tokens_kernel = sample_recovered_tokens_kernel
     _rs.generate_uniform_probs = generate_uniform_probs
+    _patch_sampler_temperature()
+    _patch_sampler_comparisons()
 
     _shim_installed = True
     logger.info(
