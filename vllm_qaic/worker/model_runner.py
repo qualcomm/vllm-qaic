@@ -475,10 +475,18 @@ class QaicModelRunnerAoT(GPUModelRunner):
             # Build a VllmConfig for the draft model using the target's config
             # as a base, overriding with draft-specific model/parallel config.
             spec_cfg = self.speculative_config
+            draft_config_overrides = {
+                "model_config": spec_cfg.draft_model_config,
+                "quant_config": None,
+            }
+            if spec_cfg.use_dflash():
+                # Avoid leaking the DLM's tiny prefill_seq_len into the target's scheduler_config.
+                draft_config_overrides["scheduler_config"] = deepcopy(
+                    self.vllm_config.scheduler_config
+                )
             draft_vllm_config = config_replace(
                 self.vllm_config,
-                model_config=spec_cfg.draft_model_config,
-                quant_config=None,
+                **draft_config_overrides,
             )
             _draft_override = (self.vllm_config.additional_config or {}).get(
                 "draft_override_qaic_config"
