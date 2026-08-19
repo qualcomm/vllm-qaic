@@ -39,6 +39,8 @@ def sample_sharegpt_requests(
     out_len: int,
     tokenizer: PreTrainedTokenizerBase,
     fixed_output_len: int | None = None,
+    min_len: int = 0,
+    seed: int | None = None,
 ) -> list[tuple[str, int, int]]:
     if fixed_output_len is not None and fixed_output_len < 4:
         raise ValueError("output_len too small")
@@ -51,7 +53,10 @@ def sample_sharegpt_requests(
         for data in dataset
     ]
 
-    random.shuffle(dataset)
+    # A local Random instance (rather than the global `random.shuffle`) keeps
+    # this reproducible when `seed` is set, without perturbing global random
+    # state that other concurrently-running tests may depend on.
+    random.Random(seed).shuffle(dataset)
 
     filtered_dataset: list[tuple[str, int, int]] = []
     for i in range(len(dataset)):
@@ -66,7 +71,7 @@ def sample_sharegpt_requests(
         output_len = (
             len(completion_token_ids) if fixed_output_len is None else fixed_output_len
         )
-        if prompt_len < 4 or output_len < 4:
+        if prompt_len < max(4, min_len) or output_len < 4:
             continue
         if prompt_len > in_len or prompt_len + output_len > out_len:
             continue
@@ -106,7 +111,12 @@ def _ensure_sharegpt_dataset() -> str:
 
 
 def get_prompts_sharegpt(
-    num_requests: int, in_len: int, out_len: int, model_name: str
+    num_requests: int,
+    in_len: int,
+    out_len: int,
+    model_name: str,
+    min_len: int = 0,
+    seed: int | None = None,
 ) -> list[str]:
     reqs = sample_sharegpt_requests(
         dataset_path=_ensure_sharegpt_dataset(),
@@ -115,6 +125,8 @@ def get_prompts_sharegpt(
         out_len=out_len,
         tokenizer=AutoTokenizer.from_pretrained(model_name, padding_side="left"),
         fixed_output_len=None,
+        min_len=min_len,
+        seed=seed,
     )
     return [request[0] for request in reqs]
 
@@ -433,9 +445,19 @@ def sample_prompts():
 
 @pytest.fixture(scope="function")
 def sharegpt_prompts(model_name, seq_len, ctx_len):
-    def _get(num_requests: int, in_len: int | None = None) -> list[str]:
+    def _get(
+        num_requests: int,
+        in_len: int | None = None,
+        min_len: int = 0,
+        seed: int | None = None,
+    ) -> list[str]:
         return get_prompts_sharegpt(
-            num_requests, in_len if in_len is not None else seq_len, ctx_len, model_name
+            num_requests,
+            in_len if in_len is not None else seq_len,
+            ctx_len,
+            model_name,
+            min_len=min_len,
+            seed=seed,
         )
 
     return _get
