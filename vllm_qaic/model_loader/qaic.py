@@ -165,9 +165,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self.decode_logits: dict[str, np.ndarray] | None = None
         self.is_spec_decode_target_model = False
 
-        # DFlash TLM decode hidden-state capture buffer (set by QaicModelRunner).
-        self._dflash_decode_hidden_buf: np.ndarray | None = None
-
         # Variable-K decode specializations: compile with [0, K] for ngram/suffix
         # and dispatch to the smallest kernel that covers actual proposals each step.
         _method = (
@@ -231,6 +228,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         logits: np.ndarray | None = None,
         num_prompt_tokens_prefill: np.ndarray | None = None,
         dflash_hidden_chunks: list[np.ndarray] | None = None,
+        dflash_decode_hidden_buf: np.ndarray | None = None,
     ) -> Queue | None:
         if self.is_pooling_model and not self.is_multimodal_model:
             output = self._run_encode(prefill_cum_sum, input_ids, positions)
@@ -280,6 +278,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                         batch_indices,
                         logits,
                         lora_ids,
+                        dflash_decode_hidden_buf=dflash_decode_hidden_buf,
                     )
         return None
 
@@ -878,6 +877,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         logits: np.ndarray,
         lora_ids: np.ndarray | None = None,
         callback: Callable | None = None,
+        dflash_decode_hidden_buf: np.ndarray | None = None,
     ) -> None:
         # Use the per-step K set by QaicModelRunner.  Falls back to max K so
         # the method is callable without a runner (e.g., unit tests).
@@ -898,8 +898,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             )
         batch_inputs["logits"] = logits
         # DFlash: capture TLM decode hidden states for the DLM.
-        if self._dflash_decode_hidden_buf is not None:
-            batch_inputs["hidden_states"] = self._dflash_decode_hidden_buf
+        if dflash_decode_hidden_buf is not None:
+            batch_inputs["hidden_states"] = dflash_decode_hidden_buf
         if num_decodes < self.decode_bsz:
             batch_inputs["input_ids"][num_decodes:] = -1
             batch_inputs["position_ids"][..., num_decodes:, :] = -1
