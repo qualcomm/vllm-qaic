@@ -18,7 +18,7 @@ QEFF_BRANCH="${QEFF_BRANCH:-release/v1.22.0}"
 VLLM_TARGET_DEVICE_AOT="${VLLM_TARGET_DEVICE_AOT:-empty}"
 TRITON_CPU="${TRITON_CPU:-0}"                          # set to 1 to enable
 TRITON_CPU_COMMIT="${TRITON_CPU_COMMIT:-e60f448f8f197073b75d6d3e77347414a5db3ee7}"
-TRITON_CPU_SRC="${TRITON_CPU_SRC:-${HOME}/triton-cpu}"                 # clone destination
+TRITON_CPU_SRC="${TRITON_CPU_SRC:-${SCRIPT_DIR}/../.build/triton-cpu}"                 # clone destination
 TRITON_CPU_COMPILE_MAX_JOBS="${TRITON_CPU_COMPILE_MAX_JOBS:-4}"        # parallel build jobs
 
 # === PYT stack ===

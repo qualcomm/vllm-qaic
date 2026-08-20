@@ -25,6 +25,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/utility.sh"
 
+mkdir -p "${TRITON_CPU_SRC}"
+
 # ── Disk space pre-flight ────────────────────────────────────────────────────
 # Triton-CPU is a large C++ build; running out of disk space or hitting a per-user
 # quota causes the build to fail.  This check tests filesystem available space.
