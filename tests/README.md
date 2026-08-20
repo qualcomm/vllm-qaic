@@ -67,7 +67,9 @@ Registered in `pyproject.toml` and enforced in `tests/e2e/conftest.py`'s
 `pytest_collection_modifyitems`, which adds a `skip` marker at collection time with a specific
 reason:
 
-- **`qaic_aot_mode`** — skipped unless `current_platform.is_aot_inference()` is true.
+- **`qaic_aot_mode(reason=None)`** — skipped unless
+  `current_platform.is_aot_inference()` is true. An optional reason customizes
+  the skip message, for example `@pytest.mark.qaic_aot_mode("requires dual-QPC execution")`.
 - **`qaic_disagg_installed`** — skipped unless the `qaic_disagg` package is importable.
 - Device-pool sizing (not a marker, same hook) — skipped if `num_device_groups * device_group_size`
   exceeds the run's device pool (`--device-pool-size` or `len(--device-id)`).
