@@ -53,6 +53,18 @@ current_platform.import_kernels()
 # 0=fp16 softmax, 1=fp32 softmax, 2=fp16 sigmoid, 3=fp32 sigmoid.
 _FP32_SCORING = os.environ.get("QAIC_ROUTER_FP32_SCORING", "0") == "1"
 
+_MOE_ACTIVATION_IDS = {
+    "silu": 0,
+    "gelu": 1,
+    "gelu_tanh": 2,
+    "swigluoai": 3,
+    "swiglustep": 4,
+    "silu_no_mul": 5,
+    "gelu_no_mul": 6,
+    "gelu_tanh_no_mul": 7,
+    "relu2_no_mul": 8,
+}
+
 
 def _kernel(name: str):
     """Return a compiled QAIC Hexagon kernel by exported symbol name."""
@@ -71,6 +83,97 @@ def _kernel_score_mode(scoring_func: int) -> int:
     if scoring_func == 0:
         return 1 if _FP32_SCORING else 0
     return 3 if _FP32_SCORING else 2
+
+
+@torch.library.custom_op(
+    "qaic::unquantized_fused_moe_hvx", mutates_args=(), device_types="qaic"
+)
+def _unquantized_fused_moe_hvx_op(
+    x: Tensor,
+    topk_weights: Tensor,
+    topk_ids: Tensor,
+    w13_weight: Tensor,
+    w2_weight: Tensor,
+    bias: Tensor,
+    expert_map: Tensor,
+    activation_id: int,
+    has_bias: bool,
+    apply_router_weight_on_input: bool,
+    has_expert_map: bool,
+) -> Tensor:
+    """Low-level QAIC HVX routed-MoE variant using route_out + reduce."""
+    num_tokens = x.shape[0]
+    hidden_size = x.shape[1]
+    num_experts = w13_weight.shape[0]
+    global_num_experts = expert_map.shape[0] if has_expert_map else num_experts
+    w13_dim = w13_weight.shape[1]
+    intermediate_size = w2_weight.shape[2]
+    topk = topk_ids.shape[1]
+    total_routes = num_tokens * topk
+    workers = _NSP_COUNT * _THREAD_COUNT
+    route_out = torch.empty((total_routes, hidden_size), dtype=x.dtype, device=x.device)
+    expert_route_indices = torch.empty((total_routes,), dtype=torch.float32, device=x.device)
+    expert_offsets = torch.empty((num_experts + 1,), dtype=torch.float32, device=x.device)
+    worker_counts = torch.empty((workers, num_experts), dtype=torch.float32, device=x.device)
+    worker_offsets = torch.empty((workers, num_experts), dtype=torch.float32, device=x.device)
+    out = torch.empty_like(x)
+    params = torch.tensor(
+        [
+            num_tokens,
+            hidden_size,
+            w13_dim,
+            intermediate_size,
+            num_experts,
+            topk,
+            activation_id,
+            int(has_bias),
+            int(apply_router_weight_on_input),
+            global_num_experts,
+            int(has_expert_map),
+        ],
+        dtype=torch.float32,
+        device=x.device,
+    ).contiguous()
+
+    group_count_kernel = _kernel("multinsp_multithreaded_unquantized_fused_moe_route_group_count")
+    group_prefix_kernel = _kernel("multinsp_multithreaded_unquantized_fused_moe_route_group_prefix")
+    group_fill_kernel = _kernel("multinsp_multithreaded_unquantized_fused_moe_route_group_fill")
+    route_kernel = _kernel("multinsp_multithreaded_unquantized_fused_moe_route_compute")
+    reduce_kernel = _kernel("multinsp_multithreaded_unquantized_fused_moe_route_reduce")
+    group_count_kernel[_NSP_COUNT, _THREAD_COUNT](
+        topk_ids,
+        expert_map,
+        worker_counts,
+        params,
+    )
+    group_prefix_kernel[_NSP_COUNT, _THREAD_COUNT](
+        worker_counts,
+        worker_offsets,
+        expert_offsets,
+        params,
+    )
+    group_fill_kernel[_NSP_COUNT, _THREAD_COUNT](
+        topk_ids,
+        expert_map,
+        worker_offsets,
+        expert_route_indices,
+        params,
+    )
+    route_kernel[_NSP_COUNT, _THREAD_COUNT](
+        x,
+        topk_weights,
+        topk_ids,
+        w13_weight,
+        w2_weight,
+        bias,
+        route_out,
+        expert_route_indices,
+        expert_offsets,
+        expert_map,
+        params,
+    )
+    reduce_kernel[_NSP_COUNT, _THREAD_COUNT](route_out, out, params)
+    return out
 
 
 @torch.library.custom_op(
@@ -331,4 +434,63 @@ def regular_topk(
         routed_scaling_factor,
         use_bias,
         _scoring_func_id(scoring_func),
+    )
+
+
+def unquantized_fused_moe_hvx(
+    x: Tensor,
+    topk_weights: Tensor,
+    topk_ids: Tensor,
+    w13_weight: Tensor,
+    w2_weight: Tensor,
+    w13_bias: Tensor | None,
+    w2_bias: Tensor | None,
+    activation: str,
+    has_bias: bool,
+    apply_router_weight_on_input: bool,
+    expert_map: Tensor | None = None,
+) -> Tensor:
+    """Run the QAIC HVX route_out + reducer MoE kernel."""
+    if activation not in _MOE_ACTIVATION_IDS:
+        raise ValueError(f"Unsupported QAIC MoE activation: {activation}")
+
+    x = x.contiguous()
+    topk_weights = topk_weights.to(device=x.device, dtype=x.dtype).contiguous()
+    topk_ids = topk_ids.to(device=x.device, dtype=x.dtype).contiguous()
+    w13_weight = w13_weight.to(device=x.device, dtype=x.dtype).contiguous()
+    w2_weight = w2_weight.to(device=x.device, dtype=x.dtype).contiguous()
+    has_expert_map = expert_map is not None
+    if expert_map is None:
+        expert_map_tensor = torch.empty((1,), dtype=torch.float32, device=x.device)
+    else:
+        expert_map_tensor = expert_map.to(device=x.device, dtype=torch.float32).contiguous()
+
+    if has_bias:
+        assert w13_bias is not None and w2_bias is not None
+        w13_bias = w13_bias.to(device=x.device, dtype=x.dtype).contiguous()
+        w2_bias = w2_bias.to(device=x.device, dtype=x.dtype).contiguous()
+        w13_bias_flat = w13_bias.reshape(-1)
+        w2_bias_flat = w2_bias.reshape(-1)
+        bias = torch.empty(
+            (w13_bias_flat.numel() + w2_bias_flat.numel(),),
+            dtype=x.dtype,
+            device=x.device,
+        )
+        bias[: w13_bias_flat.numel()].copy_(w13_bias_flat)
+        bias[w13_bias_flat.numel() :].copy_(w2_bias_flat)
+    else:
+        bias = torch.empty((1,), dtype=x.dtype, device=x.device)
+
+    return _unquantized_fused_moe_hvx_op(
+        x,
+        topk_weights,
+        topk_ids,
+        w13_weight,
+        w2_weight,
+        bias,
+        expert_map_tensor,
+        _MOE_ACTIVATION_IDS[activation],
+        has_bias,
+        apply_router_weight_on_input,
+        has_expert_map,
     )
