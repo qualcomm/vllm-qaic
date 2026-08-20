@@ -323,8 +323,9 @@ class QaicDFlashProposer:
         sampled_token_ids: list[list[int]],
         batch_indices: np.ndarray,
         target_hidden: np.ndarray,
+        commit: bool = True,
     ) -> list[list[int]]:
-        """Run one batched DLM forward and return block_size-1 drafts per active request."""
+        """Batched DLM forward; commit=False still advances KV but discards drafts."""
         num_reqs = input_batch.num_reqs
         req_ids = input_batch.req_ids[:num_reqs]
         in_decode_phase = (
@@ -358,10 +359,11 @@ class QaicDFlashProposer:
                 continue
 
             if st.candidates_from_prefill:
-                # prefill_step already produced candidates; skip the DLM forward.
-                st.candidates_from_prefill = False
-                assert st.dlm_candidates is not None
-                draft_token_ids[i] = st.dlm_candidates[1:].tolist()
+                # Skip forward; keep cached candidates unless committing.
+                if commit:
+                    st.candidates_from_prefill = False
+                    assert st.dlm_candidates is not None
+                    draft_token_ids[i] = st.dlm_candidates[1:].tolist()
                 continue
 
             n_advanced = len(accepted_seq)
@@ -402,10 +404,11 @@ class QaicDFlashProposer:
             exec_obj_idx = self.model.session.np_run(dlm_inputs, is_prefill=True)
             self.model.session.complete_inf(exec_obj_idx, is_prefill=True)
 
-            all_candidates = self._dlm_logits_buf.argmax(axis=-1).astype(np.int64)
-            for slot in active_slots:
-                st = self._req_state[req_ids[slot]]
-                st.dlm_candidates = all_candidates[slot]
-                draft_token_ids[slot] = all_candidates[slot, 1:].tolist()
+            if commit:
+                all_candidates = self._dlm_logits_buf.argmax(axis=-1).astype(np.int64)
+                for slot in active_slots:
+                    st = self._req_state[req_ids[slot]]
+                    st.dlm_candidates = all_candidates[slot]
+                    draft_token_ids[slot] = all_candidates[slot, 1:].tolist()
 
         return draft_token_ids
