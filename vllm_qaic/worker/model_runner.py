@@ -1330,6 +1330,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
                     logits=hidden_states_decode,
                     callback=callback,
                     lora_ids=decode_lora_ids,
+                    dflash_decode_hidden_buf=getattr(self, "_tlm_hidden_buf", None),
                 )
 
         hidden_states, logits = None, None
@@ -1532,6 +1533,15 @@ class QaicModelRunnerAoT(GPUModelRunner):
             and self.drafter is not None
         ):
             self.drafter.update_prefill_kv()
+            if not propose_drafts_after_bookkeeping:
+                # Gate is batch-wide: advance others' DLM KV via a discarded forward.
+                self.drafter.propose(
+                    self.input_batch,
+                    valid_sampled_token_ids,
+                    self.batch_indices,
+                    self._tlm_hidden_buf,
+                    commit=False,
+                )
 
         if propose_drafts_after_bookkeeping:
             # ngram and other speculative decoding methods use the sampled
@@ -1622,7 +1632,6 @@ class QaicModelRunnerAoT(GPUModelRunner):
         self._tlm_hidden_buf = np.zeros(
             (decode_bsz, block_size, hidden_size), dtype=self._dflash_hidden_dtype
         )
-        self.model._dflash_decode_hidden_buf = self._tlm_hidden_buf
 
     def load_model(self, *args, **kwargs) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
@@ -1718,6 +1727,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
             is_prompt=False,
             logits=decode_logits,
             mm_kwargs_list=decode_mm_kwargs_list,
+            dflash_decode_hidden_buf=getattr(self, "_tlm_hidden_buf", None),
         )
 
         # Prefill
