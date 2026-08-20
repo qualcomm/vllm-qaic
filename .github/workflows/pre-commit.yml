@@ -8,6 +8,10 @@ on:
       - reopened
       - ready_for_review
 
+permissions:
+  contents: read
+  pull-requests: read
+
 jobs:
   pre-commit:
     runs-on: ubuntu-latest
