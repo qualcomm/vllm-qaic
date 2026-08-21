@@ -48,8 +48,7 @@ DYNAMIC_RESOLUTION_MODELS = [
 class QaicPlatform(Platform):
     _enum = PlatformEnum.OOT
     primary_attn_backend_cls = (
-        "vllm_qaic.attention.backends"
-        ".qaic_attn.QAicTorchAttentionBackend"
+        "vllm_qaic.attention.backends.qaic_attn.QAicTorchAttentionBackend"
     )
     device_name: str = "qaic"
     # Set device type to cpu if it's AOT.
@@ -72,11 +71,6 @@ class QaicPlatform(Platform):
 
     @classmethod
     def import_kernels(cls) -> None:
-        # QAIC has no CUDA kernels. Skip all kernel imports — importing vllm._C
-        # on non-CUDA hardware triggers a C++ bad_alloc/terminate (SIGABRT), which
-        # Python's except ImportError cannot catch. vllm._moe_C is also skipped
-        # since QAIC uses its own on-chip operators, not CUDA MoE kernels.
-        # TODO: import Hexagon/QAIC-specific .so here when available.
         pass
 
     @classmethod
@@ -351,7 +345,12 @@ class QaicPlatform(Platform):
                 # gives the scheduler the correct per-step budget AND sizes the buffers
                 # large enough to never overflow after decode expansion.
                 scheduler_config.max_num_batched_tokens = min(
-                    scheduler_config.max_num_seqs * (max(__prefill_seq_len) if isinstance(__prefill_seq_len, (list, tuple)) else __prefill_seq_len),
+                    scheduler_config.max_num_seqs
+                    * (
+                        max(__prefill_seq_len)
+                        if isinstance(__prefill_seq_len, (list, tuple))
+                        else __prefill_seq_len
+                    ),
                     scheduler_config.max_num_batched_tokens,
                 )
             # Reset max_num_scheduled_tokens so that
@@ -416,11 +415,11 @@ class QaicPlatform(Platform):
             )
             assert (
                 not vllm_config.speculative_config
-                or vllm_config.speculative_config.method in ["ngram", "draft_model"]
+                or vllm_config.speculative_config.method
+                in ["ngram", "draft_model", "suffix"]
             ), (
-                "PLD and DLM based SPD Types are supported with Disaggregated "
-                "serving, other SPD types such as Turbo is not yet supported "
-                "with Disaggregated serving for QAIC backend"
+                "Only ngram, suffix, and draft_model based SPD types are "
+                "supported with Disaggregated serving for QAIC backend"
             )
             assert not (
                 vllm_config.kv_transfer_config.kv_role != "kv_producer"
