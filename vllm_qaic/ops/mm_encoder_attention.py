@@ -267,8 +267,7 @@ class QAicMMEncoderAttention(MMEncoderAttention):
         if triton_op_enabled("MM_ENCODER_ATTENTION"):
             # Dispatch to vLLM's Triton ViT prefill kernel (context_attention_fwd)
             # via the registered custom op, mirroring upstream _forward_triton.
-            # The wrapper builds a uniform cu_seqlens when None and derives the
-            # kv group count itself, so the GQA repeat above is harmless.
+
             from vllm.v1.attention.ops.vit_attn_wrappers import (
                 vit_triton_attn_wrapper,
             )
