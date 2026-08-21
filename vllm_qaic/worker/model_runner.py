@@ -24,6 +24,7 @@ from torch import nn
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.forward_context import get_forward_context, set_forward_context
@@ -1036,16 +1037,15 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 mm_kwargs, _ = _res
                 mm_kwargs_list.append(mm_kwargs)
         else:
-            # TODO: if we can support ec connector, it will go here
-            # with self.maybe_get_ec_connector_output(
-            #    scheduler_output,
-            #    encoder_cache=self.encoder_cache,
-            # ) as ec_connector_output:
-            self._execute_mm_encoder(scheduler_output)
-            prefill_req_ids = self.input_batch.req_ids[self.num_decodes :]
-            mm_embeds = self._gather_mm_embeddings(
-                scheduler_output, req_ids=prefill_req_ids
-            )
+            with self.maybe_get_ec_connector_output(
+                scheduler_output,
+                encoder_cache=self.encoder_cache,
+            ):
+                self._execute_mm_encoder(scheduler_output)
+                prefill_req_ids = self.input_batch.req_ids[self.num_decodes :]
+                mm_embeds = self._gather_mm_embeddings(
+                    scheduler_output, req_ids=prefill_req_ids
+                )
             for mm_embed in mm_embeds:
                 _kw = self.model.prepare_embedding_mm_kwargs(mm_embed)  # type: ignore
                 mm_kwargs_list.append(_kw)
@@ -1737,6 +1737,16 @@ class QaicModelRunnerAoT(GPUModelRunner):
                     mm_embeds.append(torch.cat(mm_embeds_req, dim=-2))
         return mm_embeds
 
+    def _update_states(self, scheduler_output: SchedulerOutput) -> None:
+        # Capture the mm_hashes the scheduler is freeing this step BEFORE the
+        # base implementation pops them from self.encoder_cache. The base pop
+        # drops the torch view over the SHM buffer; only AFTER that is it safe
+        # to unlink the SHM segment (else use-after-free on the torch tensor).
+        freed_mm_hashes = list(scheduler_output.free_encoder_mm_hashes)
+        super()._update_states(scheduler_output)
+        if freed_mm_hashes and has_ec_transfer() and not get_ec_transfer().is_producer:
+            get_ec_transfer().free_caches(freed_mm_hashes)
+
     def make_encoder_model_runner_output(
         self,
         mm_embeds: list[torch.Tensor],
@@ -1752,6 +1762,11 @@ class QaicModelRunnerAoT(GPUModelRunner):
             req_id_to_index=self.input_batch.req_id_to_index.copy(),
         )
 
+        if mm_embeds is not None and has_ec_transfer() and get_ec_transfer().is_producer:
+            mm_embeds = [
+                torch.zeros((1,) * t.ndim, dtype=t.dtype, device=t.device)
+                for t in mm_embeds
+            ]
         model_runner_output.pooler_output = mm_embeds
 
         return model_runner_output

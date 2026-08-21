@@ -511,10 +511,20 @@ class QaicPlatform(Platform):
             "override_qaic_config"
         ) or {}
 
-        # The QAIC backend does not support the multimodal processor cache.
-        # Disable it unconditionally so input processing uses the
+        # The QAIC backend historically disabled the multimodal processor
+        # cache (not yet built), which forces input processing onto the
         # request-id/modality/index UUID path (see V1 input_processor).
-        if model_config.multimodal_config is not None:
+        # That request-scoped UUID is NOT content-stable across instances,
+        # so the EC connector (encoder vs prefill/decode) would derive
+        # mismatched mm_hashes. When EC transfer is enabled we therefore
+        # keep the processor cache on (>0) so input processing uses the
+        # content-hash path (MultiModalHasher), giving a stable mm_hash that
+        # matches across the encoder and PD instances.
+        ec_transfer_config = vllm_config.ec_transfer_config
+        ec_enabled = (
+            ec_transfer_config is not None and ec_transfer_config.is_ec_transfer_instance
+        )
+        if model_config.multimodal_config is not None and not ec_enabled:
             model_config.multimodal_config.mm_processor_cache_gb = 0
 
         is_vision_encoder = (
