@@ -268,6 +268,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                         batch_indices,
                         logits,
                         lora_ids,
+                        callback=callback,
                     )
         return None
 
