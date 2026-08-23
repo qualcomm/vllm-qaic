@@ -6,13 +6,14 @@ Run with ``pytest -s`` so QAIC runtime diagnostics remain visible::
         tests/test_qaic/spec_decode/test_rejection_sampler_shim.py -v
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
 from vllm_qaic.v1.sample.rejection_sampler_shim import (
     _GridLaunchable,
     _expand_kernel_pyt,
-    _patch_sampler_temperature,
     _rejection_greedy_sample_kernel_pyt,
     _rejection_random_sample_kernel_pyt,
     _sample_recovered_tokens_kernel_pyt,
@@ -328,10 +329,9 @@ def test_generate_uniform_probs_honors_generators():
     assert torch.equal(first_probs, second_probs)
 
 
-def test_temperature_patch_matches_cpu_reference():
+def test_native_temperature_matches_cpu_reference(device):
     import vllm.v1.sample.sampler as sampler_module
 
-    _patch_sampler_temperature()
     logits = torch.tensor(
         [[2.0, 4.0], [1.0, 3.0], [5.0, 7.0]],
         dtype=torch.float32,
@@ -344,31 +344,117 @@ def test_temperature_patch_matches_cpu_reference():
     )
     expected = logits / expected_temperatures.unsqueeze(dim=1)
 
-    actual = logits.clone()
+    actual = logits.to(device).clone()
     sampler_module.Sampler.apply_temperature(
         actual,
-        temperatures,
+        temperatures.to(device),
         all_random=False,
     )
 
-    assert torch.equal(actual, expected)
+    assert actual.device.type == device.type
+    assert torch.equal(actual.cpu(), expected)
 
 
-def test_temperature_patch_install_is_idempotent():
+def test_native_top_k_matches_cpu_reference(device):
+    import vllm.v1.sample.ops.topk_topp_sampler as topk_topp_module
+
+    logits = torch.tensor(
+        [[0.1, 0.3, 0.2, 0.4], [1.0, 0.5, 0.7, 0.9]],
+        dtype=torch.float32,
+    )
+    top_k = torch.tensor([2, 3], dtype=torch.int64)
+    expected = topk_topp_module.apply_top_k_top_p_pytorch(
+        logits.clone(), top_k, None
+    )
+
+    actual = topk_topp_module.apply_top_k_top_p_pytorch(
+        logits.to(device).clone(), top_k.to(device), None
+    )
+
+    assert actual.device.type == device.type
+    assert torch.equal(actual.cpu(), expected)
+
+
+def test_native_mixed_greedy_random_selection_matches_cpu_reference(device):
     import vllm.v1.sample.sampler as sampler_module
 
-    _patch_sampler_temperature()
-    patched = sampler_module.Sampler.apply_temperature
-    _patch_sampler_temperature()
+    class FixedTopKTopPSampler(torch.nn.Module):
+        def __init__(self, sampled: torch.Tensor):
+            super().__init__()
+            self.register_buffer("sampled", sampled)
 
-    assert sampler_module.Sampler.apply_temperature is patched
-    assert sampler_module.Sampler._qaic_temperature_patched is True
+        def forward(self, logits, generators, top_k, top_p):
+            return self.sampled, None
+
+    logits = torch.tensor(
+        [[0.1, 0.7, 0.2], [0.4, 0.3, 0.9]], dtype=torch.float32
+    )
+    temperatures = torch.tensor([0.0, 0.5], dtype=torch.float32)
+    random_sampled = torch.tensor([0, 1], dtype=torch.int64)
+    expected = torch.tensor([1, 1], dtype=torch.int64)
+    sampling_metadata = SimpleNamespace(
+        all_greedy=False,
+        all_random=False,
+        temperature=temperatures.to(device),
+        logitsprocs=SimpleNamespace(argmax_invariant=[]),
+        generators={},
+        top_k=None,
+        top_p=None,
+    )
+    sampler = sampler_module.Sampler()
+    sampler.topk_topp_sampler = FixedTopKTopPSampler(random_sampled.to(device))
+
+    actual, processed_logprobs = sampler.sample(
+        logits.to(device).clone(), sampling_metadata
+    )
+
+    assert processed_logprobs is None
+    assert actual.device.type == device.type
+    assert torch.equal(actual.cpu(), expected)
+
+
+def test_top_p_patch_preserves_cpu_predicate_for_qaic(device):
+    if device.type != "qaic":
+        pytest.skip("Requires QAIC eager CPU fallback")
+
+    import vllm.v1.sample.ops.topk_topp_sampler as topk_topp_module
+
+    def apply_top_p_with_cpu_predicate(
+        logits: torch.Tensor, top_p: torch.Tensor
+    ) -> torch.Tensor:
+        logits_sort, logits_idx = logits.sort(dim=-1, descending=False)
+        probs_sort = logits_sort.softmax(dim=-1)
+        probs_sum = torch.cumsum(probs_sort, dim=-1, out=probs_sort)
+        top_p_mask = torch.le(
+            probs_sum.cpu(), (1 - top_p.unsqueeze(dim=1)).cpu()
+        ).to(device=logits.device)
+        top_p_mask[:, -1] = False
+        logits_sort.masked_fill_(top_p_mask, -float("inf"))
+        return logits.scatter_(dim=-1, index=logits_idx, src=logits_sort)
+
+    install()
+    logits = torch.tensor(
+        [[-2.0, -1.0, 0.0, 0.5, 1.0], [-1.5, -0.5, 0.0, 0.7, 1.5]],
+        dtype=torch.float16,
+        device=device,
+    )
+    top_p = torch.tensor([0.6, 0.8], dtype=torch.float32, device=device)
+    expected = apply_top_p_with_cpu_predicate(logits.clone(), top_p)
+    actual = topk_topp_module.apply_top_k_top_p_pytorch(
+        logits.clone(), None, top_p
+    )
+
+    assert getattr(topk_topp_module, "_qaic_top_p_comparison_patched", False)
+    assert torch.equal(actual.cpu(), expected.cpu())
 
 
 def test_install_patches_rejection_sampler_idempotently():
     import vllm.v1.sample.rejection_sampler as rejection_sampler
+    import vllm.v1.sample.sampler as sampler_module
     import vllm_qaic.v1.sample.rejection_sampler_shim as shim
 
+    original_apply_temperature = sampler_module.Sampler.apply_temperature
+    original_sample = sampler_module.Sampler.sample
     install()
     assert rejection_sampler.expand_kernel is shim.expand_kernel
     assert (
@@ -384,6 +470,8 @@ def test_install_patches_rejection_sampler_idempotently():
         is shim.sample_recovered_tokens_kernel
     )
     assert rejection_sampler.generate_uniform_probs is shim.generate_uniform_probs
+    assert sampler_module.Sampler.apply_temperature is original_apply_temperature
+    assert sampler_module.Sampler.sample is original_sample
 
     install()
     assert rejection_sampler.expand_kernel is shim.expand_kernel
