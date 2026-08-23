@@ -191,3 +191,14 @@ def get_config(model_name):
     main script to handle its own defaults.
     """
     return CONFIGS.get(model_name, {})
+
+
+def get_tp_size(model_name, default):
+    """
+    Returns the tensor-parallel size the model will actually run with: the
+    pinned tp_size from CONFIGS if there is one, else the sweep default.
+
+    Single source of truth for the effective TP so that the runner, the log
+    file names and the Excel summary can never disagree.
+    """
+    return int(get_config(model_name).get("tp_size", default))

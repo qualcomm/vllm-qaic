@@ -26,6 +26,16 @@ from pathlib import Path
 RAW_URL = "https://raw.githubusercontent.com/vllm-project/vllm/{ref}/docs/models/supported_models.md"
 
 
+def ref_suffix(ref: str) -> str:
+    """Normalise a git ref into a filename suffix.
+
+    A ref may contain '/' (e.g. 'release/1.2'), which would otherwise be read as
+    a path separator. Consumers of these files (ci_fallback_ops.sh,
+    parse_logs_to_excel.py) apply the same substitution, so keep them in step.
+    """
+    return ref.replace("/", "_")
+
+
 def fetch_markdown(ref: str) -> str:
     url = RAW_URL.format(ref=ref)
     with urllib.request.urlopen(url) as resp:
@@ -329,7 +339,7 @@ def main():
         print(f"Processing {label.upper()} models...")
         entries = process(markdown, is_vlm)
 
-        json_path = out_dir / f"{label}_models.json"
+        json_path = out_dir / f"{label}_models_{ref_suffix(ref)}.json"
 
         with open(json_path, "w") as f:
             json.dump(entries, f, indent=2)

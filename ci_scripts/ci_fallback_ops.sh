@@ -18,12 +18,20 @@
 #   --tp-size    <N>            Tensor parallel size (default: 4)
 #   --logs-dir   <dir>          Log output directory (default: ./ci_logs)
 #   --models-dir <dir>          Directory containing scraped JSON files
+#   --ref        <git_ref>      vLLM ref whose model list to use, i.e.
+#                               <type>_models_<ref>.json as written by
+#                               scrape_models.py (default: newest found)
+#   --delete-hf-checkpoint      Delete each model's cached HF checkpoint once its
+#                               run finishes, to bound disk use across a sweep
+#                               (default: keep checkpoints)
 #
 # Examples:
 #   bash ci_fallback_ops.sh --type llm --priority P0
 #   bash ci_fallback_ops.sh --type vlm --family qwen --tp-size 4
 #   bash ci_fallback_ops.sh --type llm --model allenai/OLMo-1B-hf
 #   bash ci_fallback_ops.sh --type vlm --model Qwen/Qwen-VL
+#   bash ci_fallback_ops.sh --type llm --delete-hf-checkpoint
+#   bash ci_fallback_ops.sh --type llm --ref v0.23.0
 #
 # To add a new model type (e.g. embedding):
 #   1. Add entry to RUNNER_MAP, JSON_PREFIX, RUNNER_EXTRA_ARGS below
@@ -32,7 +40,7 @@
 ######################################################################
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-EAGER_DIR=EAGER_DIR="${SCRIPT_DIR}/eager"
+EAGER_DIR="${SCRIPT_DIR}/eager"
 
 # User-configurable defaults
 TYPE="all"
@@ -40,16 +48,20 @@ MODEL=""
 PRIORITY=""
 FAMILY=""
 TP_SIZE="4"
-QAIC_DEBUG="0"
+QAIC_DEBUG="1"
 LOGS_DIR="${PWD}/ci_logs"
 MODELS_DIR="${EAGER_DIR}"
 PRIORITY_CFG="${EAGER_DIR}/priority_config.json"
+# Empty means "auto-discover": pick the newest <type>_models_<ref>.json present.
+REF=""
+# Off by default: a sweep must never evict a checkpoint unless explicitly asked,
+# since the HF cache is usually shared between engineers.
+DELETE_HF_CHECKPOINT="0"
 SLEEP_BETWEEN=10
 
 # QAIC runtime environment
 export QAIC_FORCE_PLATFORM_QCCL=1
 export QAIC_QCCL_ALGO=tree
-export QAIC_DDR_SCRATCH_PAD_IN_MB=2000
 export QAIC_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
 # Auto-detect all available QAIC devices if QAIC_VISIBLE_DEVICES is not already set
@@ -100,6 +112,9 @@ while [[ $# -gt 0 ]]; do
         --tp-size)     TP_SIZE="$2";     shift 2 ;;
         --logs-dir)    LOGS_DIR="$2";    shift 2 ;;
         --models-dir)  MODELS_DIR="$2";  shift 2 ;;
+        --ref)         REF="$2";         shift 2 ;;
+        # Boolean flag: takes no value, so shift 1
+        --delete-hf-checkpoint) DELETE_HF_CHECKPOINT=1; shift ;;
         *) echo "Unknown argument: $1"; exit 1 ;;
     esac
 done
@@ -146,6 +161,65 @@ for m in models:
 PYEOF
 }
 
+# Mirror scrape_models.py's ref_suffix(): a ref may contain '/'
+# (e.g. 'release/1.2'), which is not filename-safe.
+ref_suffix() {
+    echo "${1//\//_}"
+}
+
+# Locate the scraped model list for one type, setting RESOLVED_JSON/RESOLVED_REF.
+# scrape_models.py writes one list per vLLM ref -- <prefix>_<ref>.json, e.g.
+# llm_models_v0.23.0.json -- and several refs can sit side by side in MODELS_DIR,
+# so a bare <prefix>.json lookup finds nothing.
+#   --ref given : use exactly that ref's list, no guessing.
+#   no --ref    : use the newest list found, and say which, because silently
+#                 running a stale model list is worse than being noisy.
+# Returns non-zero (with a message) when the type has no list to run.
+resolve_json() {
+    local model_type="$1"
+    local prefix="${JSON_PREFIX[$model_type]}"
+    RESOLVED_JSON=""
+    RESOLVED_REF=""
+
+    if [ -n "$REF" ]; then
+        local candidate="${MODELS_DIR}/${prefix}_$(ref_suffix "$REF").json"
+        if [ ! -f "$candidate" ]; then
+            echo "Warning: model list not found: ${candidate} — skipping ${model_type}"
+            echo "         create it with: python3 ${EAGER_DIR}/scrape_models.py --ref ${REF} --type ${model_type} --output-dir ${MODELS_DIR}"
+            return 1
+        fi
+        RESOLVED_JSON="$candidate"
+        RESOLVED_REF="$REF"
+        echo "Using ${model_type} list: ${RESOLVED_JSON##*/} (ref ${RESOLVED_REF})"
+        return 0
+    fi
+
+    local -a matches=()
+    local f
+    for f in "${MODELS_DIR}/${prefix}_"*.json; do
+        [ -f "$f" ] && matches+=("$f")
+    done
+
+    if [ ${#matches[@]} -eq 0 ]; then
+        echo "Warning: no ${prefix}_<ref>.json in ${MODELS_DIR} — skipping ${model_type}"
+        echo "         create one with: python3 ${EAGER_DIR}/scrape_models.py --type ${model_type} --output-dir ${MODELS_DIR}"
+        return 1
+    fi
+
+    # -V sorts version-ish names naturally, so v0.23.0 beats v0.9.1
+    RESOLVED_JSON=$(printf '%s\n' "${matches[@]}" | sort -V | tail -1)
+    # <prefix>_<ref>.json -> <ref>
+    local base="${RESOLVED_JSON##*/}"
+    base="${base%.json}"
+    RESOLVED_REF="${base#${prefix}_}"
+
+    if [ ${#matches[@]} -gt 1 ]; then
+        echo "Note: ${#matches[@]} ${prefix} lists in ${MODELS_DIR}: ${matches[*]##*/}"
+    fi
+    echo "Using ${model_type} list: ${RESOLVED_JSON##*/} (ref ${RESOLVED_REF})"
+    return 0
+}
+
 # Run one model
 run_model() {
     local model_type="$1"
@@ -167,10 +241,19 @@ run_model() {
     local logname="${LOGS_DIR}/log_${QAIC_DEBUG}_${m_name}_tp${TP_SIZE}.log"
     local parse_logname="${LOGS_DIR}/parse_${QAIC_DEBUG}_${m_name}_tp${TP_SIZE}.log"
 
+    # Both run_llms.py and run_vlms.py expose the same flag name, so a single
+    # array forwards it for every model type. Stays empty (expands to nothing)
+    # unless --delete-hf-checkpoint was passed.
+    local cleanup_flag=()
+    if [ "$DELETE_HF_CHECKPOINT" -eq 1 ]; then
+        cleanup_flag=(--delete-hf-checkpoint)
+    fi
+
     logsave "${logname}" python "${EAGER_DIR}/${runner}" \
         --model-name "${model_name}" \
         --tp-size "${TP_SIZE}" \
-        ${extra_args}
+        ${extra_args} \
+        "${cleanup_flag[@]}"
 
     # Parse the log to extract fallback ops and write to parse log
     log_path="${logname}"
@@ -191,21 +274,32 @@ else
 fi
 
 # Main loop
-# For each type: find its JSON, filter models by priority/family, run each one
+# For each type: find its ref's model list, filter by priority/family, run each one
+# EXCEL_REF is what gets handed to parse_logs_to_excel.py: a single ref when every
+# type resolved to the same one, empty (= merge whatever is found) otherwise.
+EXCEL_REF="$REF"
+EXCEL_REF_SET=0
+
 for model_type in "${TYPES[@]}"; do
 
-    # Single-model mode: bypass JSON entirely and run the given model directly
+    # Single-model mode: bypass the model list entirely and run the given model
     if [ -n "$MODEL" ]; then
         run_model "$model_type" "$MODEL"
         continue
     fi
 
-    json_file="${MODELS_DIR}/${JSON_PREFIX[$model_type]}.json"
+    # Locate <type>_models_<ref>.json; skips this type if it has no list
+    resolve_json "$model_type" || continue
+    json_file="$RESOLVED_JSON"
 
-    # Skip this type if the scraped JSON for the given ref doesn't exist
-    if [ ! -f "$json_file" ]; then
-        echo "Warning: JSON not found: ${json_file} — skipping ${model_type}"
-        continue
+    # Remember the ref actually used, so the Excel step reads the same lists
+    if [ -z "$REF" ] && [ -n "$RESOLVED_REF" ]; then
+        if [ "$EXCEL_REF_SET" -eq 0 ]; then
+            EXCEL_REF="$RESOLVED_REF"
+            EXCEL_REF_SET=1
+        elif [ "$EXCEL_REF" != "$RESOLVED_REF" ]; then
+            EXCEL_REF=""
+        fi
     fi
 
     while IFS= read -r model_name; do
@@ -217,4 +311,5 @@ done
 # Aggregate all parse logs into a per-type Excel sheet once all models are done
 python3 "${EAGER_DIR}/parse_logs_to_excel.py" \
     --log-dir "${LOGS_DIR}" \
-    --models-dir "${MODELS_DIR}"
+    --models-dir "${MODELS_DIR}" \
+    ${EXCEL_REF:+--ref "${EXCEL_REF}"}

@@ -26,7 +26,7 @@
   {
     "model": "skt/A.X-K1",
     "variant": "A.X-K1",
-    "family": "a.x",
+    "family": "axk",
     "arch": "AXK1ForCausalLM"
   },
   {
@@ -98,7 +98,7 @@
   {
     "model": "CohereLabs/North-Mini-Code",
     "variant": "North-Mini-Code",
-    "family": "north",
+    "family": "northminicode",
     "arch": "Cohere2MoeForCausalLM"
   },
   {
@@ -146,13 +146,13 @@
   {
     "model": "rednote-hilab/dots.llm1.base",
     "variant": "dots.llm1",
-    "family": "dots.llm",
+    "family": "dots",
     "arch": "Dots1ForCausalLM"
   },
   {
     "model": "rednote-hilab/dots.ocr",
     "variant": "dots_ocr",
-    "family": "dots",
+    "family": "dotsocr",
     "arch": "DotsOCRForCausalLM"
   },
   {
@@ -176,7 +176,7 @@
   {
     "model": "LGAI-EXAONE/K-EXAONE-236B-A23B",
     "variant": "K-EXAONE",
-    "family": "k",
+    "family": "kexaone",
     "arch": "ExaoneMoEForCausalLM"
   },
   {
@@ -302,7 +302,7 @@
   {
     "model": "EleutherAI/gpt-neox-20b",
     "variant": "GPT-NeoX",
-    "family": "gpt",
+    "family": "gptneox",
     "arch": "GPTNeoXForCausalLM"
   },
   {
@@ -326,7 +326,7 @@
   {
     "model": "openai/gpt-oss-20b",
     "variant": "GPT-OSS",
-    "family": "gpt",
+    "family": "gptoss",
     "arch": "GptOssForCausalLM"
   },
   {
@@ -362,7 +362,7 @@
   {
     "model": "ibm-research/moe-7b-1b-active-shared-experts",
     "variant": "Granite MoE Shared",
-    "family": "granite",
+    "family": "granitemoeshared",
     "arch": "GraniteMoeSharedForCausalLM"
   },
   {
@@ -386,7 +386,7 @@
   {
     "model": "tencent/Hunyuan-7B-Instruct",
     "variant": "Hunyuan Dense",
-    "family": "hunyuan",
+    "family": "hunyuandense",
     "arch": "HunYuanDenseV1ForCausalLM"
   },
   {
@@ -404,7 +404,7 @@
   {
     "model": "naver-hyperclovax/HyperCLOVAX-SEED-Think-14B",
     "variant": "HyperCLOVAX-SEED-Think-14B",
-    "family": "hyperclovax",
+    "family": "hyperclovaxseedthink",
     "arch": "HyperCLOVAXForCausalLM"
   },
   {
@@ -452,13 +452,13 @@
   {
     "model": "moonshotai/Kimi-Linear-48B-A3B-Base",
     "variant": "Kimi-Linear-48B-A3B-Base",
-    "family": "kimi",
+    "family": "kimilinear",
     "arch": "KimiLinearForCausalLM"
   },
   {
     "model": "moonshotai/Kimi-Linear-48B-A3B-Instruct",
     "variant": "Kimi-Linear-48B-A3B-Instruct",
-    "family": "kimi",
+    "family": "kimilinear",
     "arch": "KimiLinearForCausalLM"
   },
   {
@@ -494,7 +494,7 @@
   {
     "model": "meituan-longcat/LongCat-Flash-Chat",
     "variant": "LongCat-Flash",
-    "family": "longcat",
+    "family": "longcatflash",
     "arch": "LongcatFlashForCausalLM"
   },
   {
@@ -548,7 +548,7 @@
   {
     "model": "MiniMaxAI/MiniMax-Text-01-hf",
     "variant": "MiniMax-Text",
-    "family": "minimax",
+    "family": "minimaxtext",
     "arch": "MiniMaxForCausalLM"
   },
   {
@@ -572,13 +572,13 @@
   {
     "model": "mistralai/Mistral-Large-3-675B-Base-2512",
     "variant": "Mistral-Large-3-675B-Base-2512",
-    "family": "mistral",
+    "family": "mistrallarge",
     "arch": "MistralLarge3ForCausalLM"
   },
   {
     "model": "mistralai/Mistral-Large-3-675B-Instruct-2512",
     "variant": "Mistral-Large-3-675B-Instruct-2512",
-    "family": "mistral",
+    "family": "mistrallarge",
     "arch": "MistralLarge3ForCausalLM"
   },
   {
@@ -638,7 +638,7 @@
   {
     "model": "allenai/Olmo-Hybrid-7B",
     "variant": "OLMo Hybrid",
-    "family": "olmo",
+    "family": "olmohybrid",
     "arch": "OlmoHybridForCausalLM"
   },
   {
@@ -668,13 +668,13 @@
   {
     "model": "FreedomIntelligence/openPangu-Embedded-7B-V1.1",
     "variant": "openPangu-Embedded-7B",
-    "family": "openpangu",
+    "family": "openpanguembedded",
     "arch": "PanguEmbeddedForCausalLM"
   },
   {
     "model": "FreedomIntelligence/openPangu-Ultra-MoE-718B-V1.1",
     "variant": "openpangu-ultra-moe-718b-model",
-    "family": "openpangu",
+    "family": "openpanguultramoe",
     "arch": "PanguUltraMoEForCausalLM"
   },
   {
@@ -770,7 +770,7 @@
   {
     "model": "tiiuae/falcon-40b",
     "variant": "Falcon RW",
-    "family": "falcon",
+    "family": "falconrw",
     "arch": "RWForCausalLM"
   },
   {
@@ -800,7 +800,7 @@
   {
     "model": "upstage/solar-pro-preview-instruct",
     "variant": "Solar Pro",
-    "family": "solar",
+    "family": "solarpro",
     "arch": "SolarForCausalLM"
   },
   {
@@ -812,7 +812,7 @@
   {
     "model": "stabilityai/stablelm-zephyr-3b",
     "variant": "StableLM Epoch",
-    "family": "stablelm",
+    "family": "stablelmepoch",
     "arch": "StableLMEpochForCausalLM"
   },
   {
@@ -824,7 +824,7 @@
   {
     "model": "stepfun-ai/Step-Audio-EditX",
     "variant": "Step-Audio",
-    "family": "step",
+    "family": "stepaudio",
     "arch": "Step1ForCausalLM"
   },
   {
@@ -866,13 +866,13 @@
   {
     "model": "MiniMaxAI/MiniMax-M1-40k",
     "variant": "MiniMax-Text",
-    "family": "minimax",
+    "family": "minimaxtext",
     "arch": "MiniMaxM1ForCausalLM"
   },
   {
     "model": "MiniMaxAI/MiniMax-Text-01",
     "variant": "MiniMax-Text",
-    "family": "minimax",
+    "family": "minimaxtext",
     "arch": "MiniMaxText01ForCausalLM"
   },
   {
