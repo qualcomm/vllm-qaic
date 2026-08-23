@@ -79,16 +79,11 @@ def test_llm_vllm(
 ):
     model_name = model_name.replace("--", "/")
     cfg = model_configs_llm.get_config(model_name)
-    # Resolve through the config module so the TP used here always matches the
-    # tp<N> suffix ci_fallback_ops.sh puts on this run's log file.
     tp_size = model_configs_llm.get_tp_size(model_name, tp_size)
     dtype = cfg.get("dtype", "float16")
     tokenizer_mode = cfg.get("tokenizer_mode", "auto")
     trust_remote_code = cfg.get("trust_remote_code", True)
     print(f"Model:{model_name}, TP_SIZE:{tp_size}, DTYPE:{dtype}")
-    # Everything below runs under try/finally so the checkpoint is still deleted
-    # when the model fails to load -- most failures happen inside LLM(), and
-    # without this each failed model would leave its full checkpoint on disk.
     llm = None
     results = []
     try:
