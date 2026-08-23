@@ -14,7 +14,7 @@
   {
     "model": "CohereLabs/aya-vision-8b",
     "variant": "Aya Vision",
-    "family": "aya",
+    "family": "ayavision",
     "arch": "AyaVisionForConditionalGeneration"
   },
   {
@@ -62,19 +62,19 @@
   {
     "model": "deepseek-ai/deepseek-vl2-tiny",
     "variant": "DeepSeek-VL2",
-    "family": "deepseek",
+    "family": "deepseekvl",
     "arch": "DeepseekVLV2ForCausalLM"
   },
   {
     "model": "deepseek-ai/DeepSeek-OCR",
     "variant": "DeepSeek-OCR",
-    "family": "deepseek",
+    "family": "deepseekocr",
     "arch": "DeepseekOCRForCausalLM"
   },
   {
     "model": "deepseek-ai/DeepSeek-OCR-2",
     "variant": "DeepSeek-OCR-2",
-    "family": "deepseek",
+    "family": "deepseekocr",
     "arch": "DeepseekOCR2ForCausalLM"
   },
   {
@@ -146,7 +146,7 @@
   {
     "model": "zai-org/GLM-OCR",
     "variant": "GLM-OCR",
-    "family": "glm",
+    "family": "glmocr",
     "arch": "GlmOcrForConditionalGeneration"
   },
   {
@@ -158,31 +158,31 @@
   {
     "model": "ibm-granite/granite-speech-3.3-8b",
     "variant": "Granite Speech",
-    "family": "granite",
+    "family": "granitespeech",
     "arch": "GraniteSpeechForConditionalGeneration"
   },
   {
     "model": "ibm-granite/granite-speech-4.1-2b-plus",
     "variant": "Granite Speech Plus",
-    "family": "granite",
+    "family": "granitespeechplus",
     "arch": "GraniteSpeechPlusForConditionalGeneration"
   },
   {
     "model": "naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B",
     "variant": "HyperCLOVAX-SEED-Vision-Instruct-3B",
-    "family": "hyperclovax",
+    "family": "hyperclovaxseedvisioninstruct",
     "arch": "HCXVisionForCausalLM"
   },
   {
     "model": "naver-hyperclovax/HyperCLOVAX-SEED-Think-32B",
     "variant": "HyperCLOVAX-SEED-Think-32B",
-    "family": "hyperclovax",
+    "family": "hyperclovaxseedthink",
     "arch": "HCXVisionV2ForCausalLM"
   },
   {
     "model": "h2oai/h2ovl-mississippi-800m",
     "variant": "H2OVL",
-    "family": "h",
+    "family": "hovl",
     "arch": "H2OVLChatModel"
   },
   {
@@ -248,7 +248,7 @@
   {
     "model": "OpenGVLab/Mono-InternVL-2B",
     "variant": "Mono-InternVL",
-    "family": "mono",
+    "family": "monointernvl",
     "arch": "InternVLChatModel"
   },
   {
@@ -266,19 +266,19 @@
   {
     "model": "Kwai-Keye/Keye-VL-8B-Preview",
     "variant": "Keye-VL-8B-Preview",
-    "family": "keye",
+    "family": "keyevl",
     "arch": "KeyeForConditionalGeneration"
   },
   {
     "model": "Kwai-Keye/Keye-VL-1_5-8B",
     "variant": "Keye-VL-1_5-8B",
-    "family": "keye",
+    "family": "keyevl",
     "arch": "`KeyeVL1_5ForConditionalGeneration`"
   },
   {
     "model": "moonshotai/Kimi-Audio-7B-Instruct",
     "variant": "Kimi-Audio",
-    "family": "kimi",
+    "family": "kimiaudio",
     "arch": "KimiAudioForConditionalGeneration"
   },
   {
@@ -290,13 +290,13 @@
   {
     "model": "moonshotai/Kimi-VL-A3B-Instruct",
     "variant": "Kimi-VL-A3B-Instruct",
-    "family": "kimi",
+    "family": "kimivl",
     "arch": "KimiVLForConditionalGeneration"
   },
   {
     "model": "moonshotai/Kimi-VL-A3B-Thinking",
     "variant": "Kimi-VL-A3B-Thinking",
-    "family": "kimi",
+    "family": "kimivl",
     "arch": "KimiVLForConditionalGeneration"
   },
   {
@@ -320,7 +320,7 @@
   {
     "model": "nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1",
     "variant": "Llama Nemotron Nano VL",
-    "family": "llama",
+    "family": "llamanemotronnanovl",
     "arch": "`Llama_Nemotron_Nano_VL`"
   },
   {
@@ -332,19 +332,19 @@
   {
     "model": "ibm-granite/granite-vision-3.3-2b",
     "variant": "Granite Vision",
-    "family": "granite",
+    "family": "granitevision",
     "arch": "LlavaNextForConditionalGeneration"
   },
   {
     "model": "llava-hf/LLaVA-NeXT-Video-7B-hf",
     "variant": "LLaVA-NeXT-Video",
-    "family": "llava",
+    "family": "llavanextvideo",
     "arch": "LlavaNextVideoForConditionalGeneration"
   },
   {
     "model": "llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
     "variant": "LLaVA-Onevision",
-    "family": "llava",
+    "family": "llavaonevision",
     "arch": "LlavaOnevisionForConditionalGeneration"
   },
   {
@@ -374,7 +374,7 @@
   {
     "model": "MiniMaxAI/MiniMax-VL-01",
     "variant": "MiniMax-VL",
-    "family": "minimax",
+    "family": "minimaxvl",
     "arch": "MiniMaxVL01ForConditionalGeneration"
   },
   {
@@ -422,7 +422,7 @@
   {
     "model": "FreedomIntelligence/openPangu-VL-7B",
     "variant": "openpangu-VL",
-    "family": "openpangu",
+    "family": "openpanguvl",
     "arch": "OpenPanguVLForConditionalGeneration"
   },
   {
@@ -464,7 +464,7 @@
   {
     "model": "PaddlePaddle/PaddleOCR-VL",
     "variant": "Paddle-OCR",
-    "family": "paddle",
+    "family": "paddleocr",
     "arch": "PaddleOCRVLForConditionalGeneration"
   },
   {
@@ -512,7 +512,7 @@
   {
     "model": "Qwen/Qwen-VL",
     "variant": "Qwen-VL",
-    "family": "qwen",
+    "family": "qwenvl",
     "arch": "QwenVLForConditionalGeneration"
   },
   {
@@ -584,7 +584,7 @@
   {
     "model": "YannQi/R-4B",
     "variant": "R-VL-4B",
-    "family": "r",
+    "family": "rvlb",
     "arch": "RForConditionalGeneration"
   },
   {
@@ -638,7 +638,7 @@
   {
     "model": "CohereLabs/cohere-transcribe-03-2026",
     "variant": "Cohere-Transcribe",
-    "family": "cohere",
+    "family": "coheretranscribe",
     "arch": "CohereAsrForConditionalGeneration"
   },
   {
@@ -662,13 +662,13 @@
   {
     "model": "zai-org/GLM-ASR-Nano-2512",
     "variant": "GLM-ASR",
-    "family": "glm",
+    "family": "glmasr",
     "arch": "GlmAsrForConditionalGeneration"
   },
   {
     "model": "ibm-granite/granite-speech-3.3-2b",
     "variant": "Granite Speech",
-    "family": "granite",
+    "family": "granitespeech",
     "arch": "GraniteSpeechForConditionalGeneration"
   },
   {
@@ -686,7 +686,7 @@
   {
     "model": "mistralai/Voxtral-Mini-4B-Realtime-2602",
     "variant": "Voxtral Realtime",
-    "family": "voxtral",
+    "family": "voxtralrealtime",
     "arch": "VoxtralRealtimeGeneration"
   },
   {
