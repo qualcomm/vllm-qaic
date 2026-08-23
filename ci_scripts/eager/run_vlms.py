@@ -60,9 +60,6 @@ def delete_hf_checkpoint(model_name: str) -> None:
 
 
 def cleanup(model_name=None, delete_checkpoint=False):
-    # Distributed teardown is best-effort: when LLM() failed early these were
-    # never initialised and will raise. That must not stop the deletion below,
-    # which is the whole reason cleanup runs on the failure path.
     try:
         destroy_model_parallel()
         with contextlib.suppress(AssertionError):
@@ -82,6 +79,22 @@ def test_vlm_vllm(
     model_impl="vllm",
     delete_hf_checkpoint=False,
 ):
+    """Run one VLM, then tear down and optionally evict its checkpoint.
+
+    The teardown wraps the whole body rather than LLM() onwards, because the hub
+    is already touched above it (MistralTokenizer.from_pretrained), and a failure
+    there still has to evict the checkpoint that was just downloaded.
+    """
+    # Un-escape '--' -> '/' as run_llms.py does: a no-op for scraped names, and
+    # only matters for a hand-typed --model.
+    model_name = model_name.replace("--", "/")
+    try:
+        _run_vlm(model_name, tp_size, gen_len, model_impl)
+    finally:
+        cleanup(model_name=model_name, delete_checkpoint=delete_hf_checkpoint)
+
+
+def _run_vlm(model_name: str, tp_size: int, gen_len: int, model_impl="vllm"):
     cfg = model_configs_vlm.get_config(model_name)
     print(f"[DEBUG] Loaded config: {cfg}")
     qcclEnabled = os.getenv("QAIC_FORCE_PLATFORM_QCCL", 0)
@@ -118,10 +131,6 @@ def test_vlm_vllm(
         prompt = "USER: <image>\nDescribe the image in detail.\nASSISTANT:"
         TRUST_REMOTE_CODE = True
     elif cfg.get("mistral_tokenize", False):
-        # Pixtral-based models use mistral-common's encode_chat_completion which
-        # expands [IMG] → full image-grid token sequence. ProcessorMixin.__call__
-        # (used by raw-text path) leaves [IMG] as a single token, causing
-        # _find_mm_placeholders to fail with "0 prompt placeholders".
         from mistral_common.protocol.instruct.chunk import ImageChunk, TextChunk
         from mistral_common.protocol.instruct.messages import UserMessage
         from mistral_common.protocol.instruct.request import ChatCompletionRequest
@@ -144,8 +153,6 @@ def test_vlm_vllm(
     else:
         prompt = "<image>\nDescribe the image in detail."
     prompt = cfg.get("prompt", prompt)
-    # Resolve through the config module so the TP used here always matches the
-    # tp<N> suffix ci_fallback_ops.sh puts on this run's log file.
     effective_tp = model_configs_vlm.get_tp_size(model_name, tp_size)
     print(
         f"Model:{model_name}, TP_SIZE:{effective_tp} "
@@ -154,9 +161,6 @@ def test_vlm_vllm(
         f"QCCL:{qcclEnabled} "
         f"Prompt: {prompt}\n"
     )
-    # Everything below runs under try/finally so the checkpoint is still deleted
-    # when the model fails to load -- most failures happen inside LLM(), and
-    # without this each failed model would leave its full checkpoint on disk.
     llm = None
     results = []
     try:
@@ -200,9 +204,9 @@ def test_vlm_vllm(
             sampling_params=samplingParam,
         )
     finally:
+        # Free device memory before the wrapper's finally tears down and evicts.
         del llm
         gc.collect()
-        cleanup(model_name=model_name, delete_checkpoint=delete_hf_checkpoint)
 
     for r in results:
         print(f"Prompt Token Id Shape: {len(r.prompt_token_ids)}")

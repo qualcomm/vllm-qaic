@@ -1,8 +1,8 @@
+#!/usr/bin/env python
 # ------------------------------------------------------------------
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 # ------------------------------------------------------------------
-#!/usr/bin/env python3
 """
 Scrape vLLM's supported_models.md for a given git ref, select one
 representative HF model per architecture variant (smallest by param count,

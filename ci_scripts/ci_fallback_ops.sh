@@ -1,8 +1,8 @@
+#!/bin/bash
 # ------------------------------------------------------------------
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 # ------------------------------------------------------------------
-#!/bin/bash
 
 #################### ci_fallback_ops.sh ##############################
 # CI script for collecting fallback ops across model types.
@@ -15,7 +15,10 @@
 #   --model      <model_id>     Run a single model directly (requires --type llm|vlm)
 #   --priority   P0|P1|P2       Priority tier filter (default: all)
 #   --family     <name>         Run only models matching this family name
-#   --tp-size    <N>            Tensor parallel size (default: 4)
+#   --tp-size    <N>            Default tensor parallel size (default: 4). A model
+#                               with a pinned tp_size in model_configs_<type>.py
+#                               overrides this, and its log is named with the TP it
+#                               actually ran at.
 #   --logs-dir   <dir>          Log output directory (default: ./ci_logs)
 #   --models-dir <dir>          Directory containing scraped JSON files
 #   --ref        <git_ref>      vLLM ref whose model list to use, i.e.
@@ -63,15 +66,6 @@ SLEEP_BETWEEN=10
 export QAIC_FORCE_PLATFORM_QCCL=1
 export QAIC_QCCL_ALGO=tree
 export QAIC_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-
-# Auto-detect all available QAIC devices if QAIC_VISIBLE_DEVICES is not already set
-# if [ -z "${QAIC_VISIBLE_DEVICES}" ]; then
-#     _devices=$(sudo /opt/qti-aic/tools/qaic-util -q 2>/dev/null \
-#         | grep -oP '^QID \K\d+' \
-#         | sort -n | tr '\n' ',' | sed 's/,$//')
-#     [ -n "$_devices" ] && export QAIC_VISIBLE_DEVICES="$_devices"
-# fi
-
 
 # Model type registry 
 # To support a new model type:
@@ -130,7 +124,7 @@ mkdir -p "${LOGS_DIR}"
 # Python helper: filter model list from JSON
 get_models() {
     local json_file="$1"
-    python3 - "$json_file" "$PRIORITY_CFG" "$PRIORITY" "$FAMILY" << 'PYEOF'
+    python - "$json_file" "$PRIORITY_CFG" "$PRIORITY" "$FAMILY" << 'PYEOF'
 import json, sys
 
 json_file, priority_cfg_file, priority_filter, family_filter = sys.argv[1:]
@@ -185,7 +179,7 @@ resolve_json() {
         local candidate="${MODELS_DIR}/${prefix}_$(ref_suffix "$REF").json"
         if [ ! -f "$candidate" ]; then
             echo "Warning: model list not found: ${candidate} — skipping ${model_type}"
-            echo "         create it with: python3 ${EAGER_DIR}/scrape_models.py --ref ${REF} --type ${model_type} --output-dir ${MODELS_DIR}"
+            echo "         create it with: python ${EAGER_DIR}/scrape_models.py --ref ${REF} --type ${model_type} --output-dir ${MODELS_DIR}"
             return 1
         fi
         RESOLVED_JSON="$candidate"
@@ -202,7 +196,7 @@ resolve_json() {
 
     if [ ${#matches[@]} -eq 0 ]; then
         echo "Warning: no ${prefix}_<ref>.json in ${MODELS_DIR} — skipping ${model_type}"
-        echo "         create one with: python3 ${EAGER_DIR}/scrape_models.py --type ${model_type} --output-dir ${MODELS_DIR}"
+        echo "         create one with: python ${EAGER_DIR}/scrape_models.py --type ${model_type} --output-dir ${MODELS_DIR}"
         return 1
     fi
 
@@ -218,6 +212,34 @@ resolve_json() {
     fi
     echo "Using ${model_type} list: ${RESOLVED_JSON##*/} (ref ${RESOLVED_REF})"
     return 0
+}
+
+# Resolve the TP a model will actually run with.
+# Falls back to the sweep default, with a warning, when the type has no
+# model_configs_<type>.py, so a newly added model type still runs.
+effective_tp() {
+    local model_type="$1"
+    local model_name="$2"
+    local resolved
+
+    resolved=$(python - "$EAGER_DIR" "$model_type" "$model_name" "$TP_SIZE" <<'PYEOF'
+import importlib
+import sys
+
+eager_dir, model_type, model_name, default_tp = sys.argv[1:]
+sys.path.insert(0, eager_dir)
+mod = importlib.import_module(f"model_configs_{model_type}")
+# Mirror run_llms.py, which un-escapes '--' before looking up the config.
+print(mod.get_tp_size(model_name.replace("--", "/"), int(default_tp)))
+PYEOF
+    ) || resolved=""
+
+    if [[ ! "$resolved" =~ ^[0-9]+$ ]]; then
+        echo "Warning: could not resolve effective TP for ${model_name} (${model_type})," \
+             "falling back to --tp-size ${TP_SIZE}" >&2
+        resolved="$TP_SIZE"
+    fi
+    echo "$resolved"
 }
 
 # Run one model
@@ -237,13 +259,19 @@ run_model() {
         source "${EAGER_DIR}/unset_qaic_debug.sh"
     fi
 
-    # Build log file paths: log_<debug>_<model>_tp<N>.log and parse_<debug>_<model>_tp<N>.log
-    local logname="${LOGS_DIR}/log_${QAIC_DEBUG}_${m_name}_tp${TP_SIZE}.log"
-    local parse_logname="${LOGS_DIR}/parse_${QAIC_DEBUG}_${m_name}_tp${TP_SIZE}.log"
+    # TP the runner will actually use. May differ from TP_SIZE when
+    # model_configs_<type>.py pins tp_size for this model.
+    local run_tp
+    run_tp="$(effective_tp "$model_type" "$model_name")"
+    if [ "$run_tp" != "$TP_SIZE" ]; then
+        echo "Note: ${model_name} pins TP=${run_tp} (sweep default ${TP_SIZE})"
+    fi
 
-    # Both run_llms.py and run_vlms.py expose the same flag name, so a single
-    # array forwards it for every model type. Stays empty (expands to nothing)
-    # unless --delete-hf-checkpoint was passed.
+    # Build log file paths: log_<debug>_<model>_tp<N>.log and parse_<debug>_<model>_tp<N>.log
+    # <N> is the effective TP, which is what parse_logs_to_excel.py reports.
+    local logname="${LOGS_DIR}/log_${QAIC_DEBUG}_${m_name}_tp${run_tp}.log"
+    local parse_logname="${LOGS_DIR}/parse_${QAIC_DEBUG}_${m_name}_tp${run_tp}.log"
+
     local cleanup_flag=()
     if [ "$DELETE_HF_CHECKPOINT" -eq 1 ]; then
         cleanup_flag=(--delete-hf-checkpoint)
@@ -309,7 +337,7 @@ for model_type in "${TYPES[@]}"; do
 done
 
 # Aggregate all parse logs into a per-type Excel sheet once all models are done
-python3 "${EAGER_DIR}/parse_logs_to_excel.py" \
+python "${EAGER_DIR}/parse_logs_to_excel.py" \
     --log-dir "${LOGS_DIR}" \
     --models-dir "${MODELS_DIR}" \
     ${EXCEL_REF:+--ref "${EXCEL_REF}"}
