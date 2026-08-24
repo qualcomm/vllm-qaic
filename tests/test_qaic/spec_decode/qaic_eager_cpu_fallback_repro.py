@@ -71,8 +71,22 @@ def _cpu_values(tensor: torch.Tensor) -> list[Any]:
     return tensor.detach().cpu().tolist()
 
 
+def _equal_with_nan(actual: torch.Tensor, expected: torch.Tensor) -> bool:
+    return bool(
+        torch.allclose(
+            actual.detach().cpu(),
+            expected,
+            rtol=0,
+            atol=0,
+            equal_nan=True,
+        )
+    )
+
+
 def _mismatch_count(actual: torch.Tensor, expected: torch.Tensor) -> int:
-    return int((actual.detach().cpu() != expected).sum().item())
+    actual_cpu = actual.detach().cpu()
+    matching_nan = torch.isnan(actual_cpu) & torch.isnan(expected)
+    return int(((actual_cpu != expected) & ~matching_nan).sum().item())
 
 
 def _record_operation(
@@ -94,9 +108,7 @@ def _record_operation(
         result = operation()
         record["result"] = _tensor_metadata(result)
         record["result_values"] = _cpu_values(result)
-        record["cpu_reference_parity"] = torch.equal(
-            result.detach().cpu(), cpu_reference
-        )
+        record["cpu_reference_parity"] = _equal_with_nan(result, cpu_reference)
         try:
             consumed = consume(result)
             record["downstream"] = {
@@ -327,8 +339,8 @@ def _sampler_top_p_case(
                 "cpu_reference": _cpu_values(cpu_reference),
                 "direct": {
                     "result": _tensor_metadata(direct_result),
-                    "cpu_reference_parity": torch.equal(
-                        direct_result.cpu(), cpu_reference
+                    "cpu_reference_parity": _equal_with_nan(
+                        direct_result, cpu_reference
                     ),
                     "cpu_reference_mismatches": _mismatch_count(
                         direct_result, cpu_reference
@@ -338,14 +350,14 @@ def _sampler_top_p_case(
                 },
                 "explicit_transfer": {
                     "result": _tensor_metadata(explicit_result),
-                    "cpu_reference_parity": torch.equal(
-                        explicit_result.cpu(), cpu_reference
+                    "cpu_reference_parity": _equal_with_nan(
+                        explicit_result, cpu_reference
                     ),
                     "cpu_reference_mismatches": _mismatch_count(
                         explicit_result, cpu_reference
                     ),
-                    "matches_direct": torch.equal(
-                        explicit_result.cpu(), direct_result.cpu()
+                    "matches_direct": _equal_with_nan(
+                        explicit_result, direct_result.cpu()
                     ),
                     "direct_mismatches": _mismatch_count(
                         explicit_result, direct_result.cpu()
