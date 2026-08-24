@@ -19,7 +19,9 @@ ADAPTER_ID_0 = "jashing/tinyllama-colorist-lora"
 ADAPTER_ID_1 = "jashing/tinyllama-energy-lora"
 
 
-@pytest.mark.qaic_aot_mode("test isn't relevant for eager mode, no device execution involved anyways")
+@pytest.mark.qaic_aot_mode(
+    "test isn't relevant for eager mode, no device execution involved anyways"
+)
 def test_qaic_search_adapters_in_cache(tmp_path):
     """Test adapter search functionality in cache."""
     hf_home = os.environ.get("HF_HOME", None)
