@@ -279,13 +279,8 @@ def _sampler_top_p_case(
     vocab_size: int,
 ) -> list[dict[str, Any]]:
     import vllm.v1.sample.ops.topk_topp_sampler as topk_topp_module
-    from vllm_qaic.v1.sample.rejection_sampler_shim import (
-        _patch_sampler_top_p_comparison,
-    )
 
     upstream_top_p = topk_topp_module.apply_top_k_top_p_pytorch
-    _patch_sampler_top_p_comparison()
-    explicit_transfer = topk_topp_module.apply_top_k_top_p_pytorch
     records: list[dict[str, Any]] = []
 
     for dtype in (torch.float16, torch.float32):
@@ -306,6 +301,20 @@ def _sampler_top_p_case(
             logits_sort.masked_fill_(top_p_mask, -float("inf"))
             return logits.scatter_(dim=-1, index=logits_idx, src=logits_sort)
 
+        def explicit_cpu_predicate(
+            logits: torch.Tensor, top_p: torch.Tensor
+        ) -> torch.Tensor:
+            logits_sort, logits_idx = logits.sort(dim=-1, descending=False)
+            probs_sort = logits_sort.softmax(dim=-1)
+            probs_sum = torch.cumsum(probs_sort, dim=-1, out=probs_sort)
+            top_p_mask = torch.le(
+                probs_sum.cpu(),
+                (1 - top_p.unsqueeze(dim=1)).cpu(),
+            ).to(device=logits.device)
+            top_p_mask[:, -1] = False
+            logits_sort.masked_fill_(top_p_mask, -float("inf"))
+            return logits.scatter_(dim=-1, index=logits_idx, src=logits_sort)
+
         qaic_logits = _to_qaic(cpu_logits)
         qaic_top_p = _to_qaic(cpu_top_p)
 
@@ -313,7 +322,7 @@ def _sampler_top_p_case(
             return direct(qaic_logits.clone(), qaic_top_p)
 
         def run_explicit_transfer() -> torch.Tensor:
-            return explicit_transfer(qaic_logits.clone(), None, qaic_top_p)
+            return explicit_cpu_predicate(qaic_logits.clone(), qaic_top_p)
 
         direct_result = run_direct()
         explicit_result = run_explicit_transfer()
@@ -328,13 +337,9 @@ def _sampler_top_p_case(
                 "schema": "aten::le.Tensor",
                 "batch_size": batch_size,
                 "vocab_size": vocab_size,
-                "patch_state": {
-                    "qaic_top_p_comparison_patched": getattr(
-                        topk_topp_module,
-                        "_qaic_top_p_comparison_patched",
-                        False,
-                    ),
-                    "active_function_module": explicit_transfer.__module__,
+                "implementation": {
+                    "direct": "upstream apply_top_k_top_p_pytorch",
+                    "explicit_reference": "local CPU top-p predicate",
                 },
                 "cpu_reference": _cpu_values(cpu_reference),
                 "direct": {
