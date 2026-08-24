@@ -48,8 +48,7 @@ DYNAMIC_RESOLUTION_MODELS = [
 class QaicPlatform(Platform):
     _enum = PlatformEnum.OOT
     primary_attn_backend_cls = (
-        "vllm_qaic.attention.backends"
-        ".qaic_attn.QAicTorchAttentionBackend"
+        "vllm_qaic.attention.backends.qaic_attn.QAicTorchAttentionBackend"
     )
     device_name: str = "qaic"
     # Set device type to cpu if it's AOT.
@@ -125,7 +124,7 @@ class QaicPlatform(Platform):
         if not cls.is_aot:
             return torch_qaic.qaic.get_device_info(device_id).num_cores
         else:
-            pass
+            raise NotImplementedError
 
     @classmethod
     @functools.cache
@@ -133,7 +132,7 @@ class QaicPlatform(Platform):
         if not cls.is_aot:
             return torch_qaic.qaic.get_device_info(device_id).per_core_hvx_thread_count
         else:
-            pass
+            raise NotImplementedError
 
     @classmethod
     def check_if_supports_dtype(cls, dtype: torch.dtype):
@@ -199,19 +198,9 @@ class QaicPlatform(Platform):
                 vllm_config.additional_config = cfg
 
         if cls.is_aot:
-            if vllm_config.model_config.enforce_eager:
-                logger.warning_once(
-                    "setting inference mode to Ahead-of-Time since"
-                    "torch_qaic is not installed"
-                )
-                vllm_config.model_config.enforce_eager = False
+            vllm_config.model_config.enforce_eager = False
             device_config.device = torch.device("cpu")
         else:
-            if not vllm_config.model_config.enforce_eager:
-                logger.warning_once(
-                    "setting inference mode to Eager mode since torch_qaic is installed"
-                )
-                vllm_config.model_config.enforce_eager = True
             device_config.device = torch.device("qaic")
             # set QAIC_VISIBLE_DEVICES from device_group
             # if not already set
@@ -249,11 +238,10 @@ class QaicPlatform(Platform):
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = cls.get_worker_cls()
 
-        if parallel_config.world_size > 1:
-            parallel_config.distributed_executor_backend = "uni"
-            if vllm_config.model_config.enforce_eager:
-                # uni backend sets qualnet ip while mp backend sets localhost ip
-                parallel_config.distributed_executor_backend = "mp"
+        parallel_config.distributed_executor_backend = "uni"
+        if not cls.is_aot and parallel_config.world_size > 1:
+            # uni backend sets qualnet ip while mp backend sets localhost ip
+            parallel_config.distributed_executor_backend = "mp"
 
         model_config = vllm_config.model_config
         scheduler_config = vllm_config.scheduler_config
@@ -285,7 +273,7 @@ class QaicPlatform(Platform):
             )
             if vllm_config.speculative_config:
                 raise ValueError(
-                    "Speculative decoding (SpD) is not supported in eager mode on QAIC. "
+                    "Speculative decoding (SpD) is not supported in eager mode on QAIC."
                     "SpD requires AOT (non-eager) compilation."
                 )
             if scheduler_config.async_scheduling:
@@ -297,7 +285,7 @@ class QaicPlatform(Platform):
 
         cache_config = vllm_config.cache_config
         if cache_config:
-            if model_config.enforce_eager:
+            if not cls.is_aot:
                 cache_config.block_size = 16
             else:
                 if cache_config.enable_prefix_caching:
@@ -351,7 +339,12 @@ class QaicPlatform(Platform):
                 # gives the scheduler the correct per-step budget AND sizes the buffers
                 # large enough to never overflow after decode expansion.
                 scheduler_config.max_num_batched_tokens = min(
-                    scheduler_config.max_num_seqs * (max(__prefill_seq_len) if isinstance(__prefill_seq_len, (list, tuple)) else __prefill_seq_len),
+                    scheduler_config.max_num_seqs
+                    * (
+                        max(__prefill_seq_len)
+                        if isinstance(__prefill_seq_len, (list, tuple))
+                        else __prefill_seq_len
+                    ),
                     scheduler_config.max_num_batched_tokens,
                 )
             # Reset max_num_scheduled_tokens so that
@@ -390,7 +383,7 @@ class QaicPlatform(Platform):
         # QAIC_FIXME: default uses torch.compile based custom vllm-backend.
         # Turning off all torch.compile modes to fallback to purely eager for now.
         if compilation_config and compilation_config.mode != CompilationMode.NONE:
-            mode = "eager mode" if vllm_config.model_config.enforce_eager else "AOT"
+            mode = "AoT" if cls.is_aot else "PyT"
             logger.warning_once(
                 "vllm qaic platform doesn't support compilation mode = %s,"
                 "disabling and running with %s...",
@@ -566,10 +559,11 @@ class QaicPlatform(Platform):
         """
         Configure multimodal processor settings for models with
         dynamic resolution support. Some vision-language models
-        (e.g. Qwen2.5VL, Qwen3VL) can handle dynamic image resolutions by mapping them to
-        a variable number of visual tokens. On QAIC hardware, the vision encoder requires
-        fixed-size inputs, so this method registers a set of supported ``(height, width)``
-        resolutions that a custom processor will snap images to at runtime.
+        (e.g. Qwen2.5VL, Qwen3VL) can handle dynamic image resolutions by mapping them
+        to a variable number of visual tokens. On QAIC hardware, the vision encoder
+        requires fixed-size inputs, so this method registers a set of supported
+        ``(height, width)`` resolutions that a custom processor will snap images to at
+        runtime.
 
         Currently only Qwen2.5VL and Qwen3VL are supported.
         """
