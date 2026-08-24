@@ -24,6 +24,11 @@
 # Environment overrides:
 #   TRANSFORMERS_VERSION_AOT   If set, pins transformers version after qefficient install
 #   TRANSFORMERS_VERSION_PYT   If set, pins transformers version after torch_qaic install
+#   VLLM_BUILD_RUST            If "1", clones vllm from source and builds its
+#                              experimental Rust OpenAI-compatible frontend
+#                              (rust/, build_rust.sh) before installing, instead
+#                              of installing straight from the git+URL. Requires
+#                              a Rust toolchain (cargo) on PATH — see rustup.rs.
 
 set -euo pipefail
 
@@ -119,10 +124,38 @@ else
     echo "  target device  : ${VLLM_TARGET_DEVICE_PYT}"
 fi
 echo "  --------------------------------------------------------"
+if [ "${VLLM_BUILD_RUST:-0}" = "1" ]; then
+    echo "  rust frontend  : enabled (building from source)"
+else
+    echo "  rust frontend  : disabled  (set VLLM_BUILD_RUST=1 to enable)"
+fi
+echo "  --------------------------------------------------------"
 echo "  Override any variable before running, e.g.:"
 echo "    TRITON_CPU=1 TRITON_CPU_SRC=/data/triton-cpu ./scripts/install.sh aot"
 echo "========================================================"
 echo ""
+
+# Resolve the vllm install target: either the published git tag (default), or
+# a local source checkout with the experimental Rust frontend built in
+# (VLLM_BUILD_RUST=1). Used by both aot and pyt below.
+VLLM_INSTALL_TARGET="vllm @ git+https://github.com/vllm-project/vllm.git@v${VLLM_VERSION}"
+if [ "${VLLM_BUILD_RUST:-0}" = "1" ]; then
+    echo "=== Building vllm Rust frontend (VLLM_BUILD_RUST=1) ==="
+    if ! command -v cargo >/dev/null 2>&1; then
+        echo "ERROR: VLLM_BUILD_RUST=1 requires a Rust toolchain (cargo not found on PATH)." >&2
+        echo "       Install one via https://rustup.rs and re-run." >&2
+        exit 1
+    fi
+    VLLM_SRC_DIR="$(dirname "${REPO_ROOT}")/vllm"
+    if [ ! -d "${VLLM_SRC_DIR}/.git" ]; then
+        git clone https://github.com/vllm-project/vllm.git "${VLLM_SRC_DIR}"
+    fi
+    git -C "${VLLM_SRC_DIR}" fetch origin "v${VLLM_VERSION}"
+    git -C "${VLLM_SRC_DIR}" checkout "v${VLLM_VERSION}"
+    bash "${VLLM_SRC_DIR}/build_rust.sh"
+    VLLM_INSTALL_TARGET="${VLLM_SRC_DIR}"
+    echo "INFO: vllm will be installed from ${VLLM_SRC_DIR} (with Rust frontend built)"
+fi
 
 # vllm build deps — always needed for --no-build-isolation
 ${PIP} install "setuptools>=77.0.3,<80.0.0" setuptools-scm setuptools-rust wheel "cmake>=3.26"
@@ -159,7 +192,7 @@ if [ "${MODE}" = "aot" ]; then
     ${PIP} install -r "${SCRIPT_DIR}/../requirements/vllm_dependency_aot.txt"
     VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE_AOT}" ${PIP} install \
         --no-build-isolation --no-deps \
-        "vllm @ git+https://github.com/vllm-project/vllm.git@v${VLLM_VERSION}"
+        "${VLLM_INSTALL_TARGET}"
 
     echo "=== Step 3: vllm-qaic-aot ==="
     if [ "${INSTALL_SOURCE}" = "source" ]; then
@@ -205,7 +238,7 @@ elif [ "${MODE}" = "pyt" ]; then
     # and produces no torch Requires-Dist in METADATA so uv will not upgrade torch.
     VLLM_TARGET_DEVICE=${VLLM_TARGET_DEVICE_PYT} ${PIP} install \
         --no-build-isolation --no-deps \
-        "vllm @ git+https://github.com/vllm-project/vllm.git@v${VLLM_VERSION}"
+        "${VLLM_INSTALL_TARGET}"
 
     echo "=== Step 3: vllm-qaic-pyt ==="
     if [ "${INSTALL_SOURCE}" = "source" ]; then
