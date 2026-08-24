@@ -580,7 +580,9 @@ def pytest_collection_modifyitems(session, config, items):
 
         aot_marker = item.get_closest_marker("qaic_aot_mode")
         if aot_marker is not None and not current_platform.is_aot_inference():
-            reason = aot_marker.args[0] if aot_marker.args else "AOT mode is not installed"
+            reason = (
+                aot_marker.args[0] if aot_marker.args else "AOT mode is not installed"
+            )
             item.add_marker(pytest.mark.skip(reason=reason))
 
         if (
