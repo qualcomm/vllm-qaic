@@ -432,49 +432,6 @@ def generate_uniform_probs(
 _shim_installed: bool = False
 
 
-def _patch_sampler_top_p_comparison() -> None:
-    """Preserve the CPU top-p predicate for QAIC fp16 sampler parity."""
-    import vllm.v1.sample.ops.topk_topp_sampler as topk_topp_module
-
-    if not getattr(topk_topp_module, "_qaic_top_p_comparison_patched", False):
-        original_apply_top_k_top_p_pytorch = (
-            topk_topp_module.apply_top_k_top_p_pytorch
-        )
-
-        def apply_top_k_top_p_pytorch(
-            logits: torch.Tensor,
-            k: torch.Tensor | None,
-            p: torch.Tensor | None,
-            allow_cpu_sync: bool = False,
-        ) -> torch.Tensor:
-            if logits.device.type != "qaic" or p is None:
-                return original_apply_top_k_top_p_pytorch(
-                    logits, k, p, allow_cpu_sync
-                )
-
-            logits_sort, logits_idx = logits.sort(dim=-1, descending=False)
-            if k is not None:
-                top_k_mask = logits_sort.size(1) - k.to(torch.long)
-                top_k_mask = logits_sort.gather(1, top_k_mask.unsqueeze(dim=1))
-                top_k_mask = torch.lt(logits_sort, top_k_mask)
-                logits_sort.masked_fill_(top_k_mask, -float("inf"))
-
-            if p is not None:
-                probs_sort = logits_sort.softmax(dim=-1)
-                probs_sum = torch.cumsum(probs_sort, dim=-1, out=probs_sort)
-                top_p_mask = torch.le(
-                    probs_sum.cpu(),
-                    (1 - p.unsqueeze(dim=1)).cpu(),
-                ).to(device=logits.device)
-                top_p_mask[:, -1] = False
-                logits_sort.masked_fill_(top_p_mask, -float("inf"))
-
-            return logits.scatter_(dim=-1, index=logits_idx, src=logits_sort)
-
-        topk_topp_module.apply_top_k_top_p_pytorch = apply_top_k_top_p_pytorch
-        topk_topp_module._qaic_top_p_comparison_patched = True
-
-
 def install() -> None:
     """Replace Triton kernel objects in ``vllm.v1.sample.rejection_sampler``
     with PyTorch equivalents wrapped in ``_GridLaunchable``.
@@ -498,7 +455,6 @@ def install() -> None:
     _rs.rejection_random_sample_kernel = rejection_random_sample_kernel
     _rs.sample_recovered_tokens_kernel = sample_recovered_tokens_kernel
     _rs.generate_uniform_probs = generate_uniform_probs
-    _patch_sampler_top_p_comparison()
 
     _shim_installed = True
     logger.info(
