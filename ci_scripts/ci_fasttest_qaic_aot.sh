@@ -8,7 +8,7 @@
 # goal: To quickly run through vllm tests to check if system works
 # May customize this script for your own test cases
 # $ bash -x ci_fasttest_qaic.sh
-# $ bash -x ci_fasttest_qaic.sh --host localhost --port 8080
+# $ bash -x ci_fasttest_qaic.sh --host localhost
 # $ bash -x ci_fasttest_qaic.sh --device-ids 0,1,2,3,4
 # $ bash -x ci_fasttest_qaic.sh --timeout 900
 ########################################################################
@@ -20,7 +20,6 @@ trap 'rm -rf "$SCRIPT_DIR/scheduler_output"' EXIT
 cd "$SCRIPT_DIR/.." || exit
 
 HOST="localhost"
-PORT="8080"
 TIMEOUT="1800"
 
 # Parse arguments
@@ -29,10 +28,6 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --host)
             HOST="$2"
-            shift 2
-            ;;
-        --port)
-            PORT="$2"
             shift 2
             ;;
         --device-ids)
@@ -83,8 +78,7 @@ DEVICE_POOL_SIZE=$(($(tr -cd ',' <<< "$DEVICE_IDS" | wc -c) + 1))
 python3 "$SCRIPT_DIR/collect_jobs.py" tests/e2e --output "$JOBS_FILE" -- \
     --ignore=tests/e2e/multimodal/test_multimodal.py \
     --device-pool-size "$DEVICE_POOL_SIZE" \
-    --host "$HOST" \
-    --port "$PORT"
+    --host "$HOST"
 COLLECT_STATUS=$?
 if [[ $COLLECT_STATUS -ne 0 ]]; then
     echo "ERROR: collect_jobs.py failed (exit $COLLECT_STATUS)" >&2
