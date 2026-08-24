@@ -79,7 +79,7 @@ The script handles all dependency ordering, version pinning, and `uv`/`pip` dete
 
 > **Configuration banner:** Before installation starts, `install.sh` prints a full summary of
 > every version and setting it will use (vllm, vllm-qaic, torch, qeff branch, target device,
-> triton-cpu state). Review it and override any variable before re-running.
+> triton-cpu state, rust frontend state). Review it and override any variable before re-running.
 
 ### AOT mode — `install.sh`
 
@@ -112,9 +112,25 @@ TRITON_CPU=1 TRITON_CPU_SRC=/path/with/more/space/triton-cpu ./scripts/install.s
 # Skip the disk-space pre-flight check entirely
 TRITON_CPU=1 TRITON_CPU_SKIP_DISK_CHECK=1 ./scripts/install.sh aot
 
+# Build vllm's experimental Rust OpenAI-compatible frontend (rust/, build_rust.sh)
+# from source instead of installing vllm from the published git tag. Requires a
+# Rust toolchain (cargo) on PATH — install one via https://rustup.rs, or via
+# conda-forge (`conda install -c conda-forge rust`) into an env already on PATH.
+# Applies to both aot and pyt; clones/reuses a vllm checkout as a sibling of the
+# vllm-qaic repo (`../vllm`) and checks out the pinned VLLM_VERSION tag.
+VLLM_BUILD_RUST=1 ./scripts/install.sh aot
+
 # Force wheel install from a custom SDK path
 VLLM_QAIC_INSTALL_SOURCE=wheel VLLM_QAIC_SDK_PATH=/path/to/sdk ./scripts/install.sh pyt
 ```
+
+**Using the Rust frontend after installing with `VLLM_BUILD_RUST=1`:** it's opt-in at *serve* time too — the standard `vllm serve` entrypoint still runs the Python frontend unless `VLLM_USE_RUST_FRONTEND=1` is set:
+
+```bash
+VLLM_USE_RUST_FRONTEND=1 vllm serve <model> [...same flags as usual...]
+```
+
+> **Status:** this is an experimental, unfinished component of upstream vLLM (not vllm-qaic specific). It does not support every OpenAI-compatible request field yet — e.g. `truncate_prompt_tokens` is rejected outright — and combining `--async-scheduling` with `--long-prefill-token-threshold` has been observed to stall decode almost entirely on QAIC. Test thoroughly before relying on it.
 
 ---
 
