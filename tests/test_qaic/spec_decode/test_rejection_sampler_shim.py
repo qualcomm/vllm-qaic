@@ -413,48 +413,35 @@ def test_native_mixed_greedy_random_selection_matches_cpu_reference(device):
     assert torch.equal(actual.cpu(), expected)
 
 
-def test_top_p_patch_preserves_cpu_predicate_for_qaic(device):
-    if device.type != "qaic":
-        pytest.skip("Requires QAIC eager CPU fallback")
-
+def test_native_top_p_matches_cpu_predicate(device):
     import vllm.v1.sample.ops.topk_topp_sampler as topk_topp_module
 
-    def apply_top_p_with_cpu_predicate(
-        logits: torch.Tensor, top_p: torch.Tensor
-    ) -> torch.Tensor:
-        logits_sort, logits_idx = logits.sort(dim=-1, descending=False)
-        probs_sort = logits_sort.softmax(dim=-1)
-        probs_sum = torch.cumsum(probs_sort, dim=-1, out=probs_sort)
-        top_p_mask = torch.le(
-            probs_sum.cpu(), (1 - top_p.unsqueeze(dim=1)).cpu()
-        ).to(device=logits.device)
-        top_p_mask[:, -1] = False
-        logits_sort.masked_fill_(top_p_mask, -float("inf"))
-        return logits.scatter_(dim=-1, index=logits_idx, src=logits_sort)
-
-    install()
     logits = torch.tensor(
         [[-2.0, -1.0, 0.0, 0.5, 1.0], [-1.5, -0.5, 0.0, 0.7, 1.5]],
         dtype=torch.float16,
         device=device,
     )
     top_p = torch.tensor([0.6, 0.8], dtype=torch.float32, device=device)
-    expected = apply_top_p_with_cpu_predicate(logits.clone(), top_p)
+    expected = topk_topp_module.apply_top_k_top_p_pytorch(
+        logits.cpu().clone(), None, top_p.cpu()
+    )
     actual = topk_topp_module.apply_top_k_top_p_pytorch(
         logits.clone(), None, top_p
     )
 
-    assert getattr(topk_topp_module, "_qaic_top_p_comparison_patched", False)
+    assert actual.device.type == device.type
     assert torch.equal(actual.cpu(), expected.cpu())
 
 
 def test_install_patches_rejection_sampler_idempotently():
     import vllm.v1.sample.rejection_sampler as rejection_sampler
     import vllm.v1.sample.sampler as sampler_module
+    import vllm.v1.sample.ops.topk_topp_sampler as topk_topp_module
     import vllm_qaic.v1.sample.rejection_sampler_shim as shim
 
     original_apply_temperature = sampler_module.Sampler.apply_temperature
     original_sample = sampler_module.Sampler.sample
+    original_top_k_top_p = topk_topp_module.apply_top_k_top_p_pytorch
     install()
     assert rejection_sampler.expand_kernel is shim.expand_kernel
     assert (
@@ -472,6 +459,7 @@ def test_install_patches_rejection_sampler_idempotently():
     assert rejection_sampler.generate_uniform_probs is shim.generate_uniform_probs
     assert sampler_module.Sampler.apply_temperature is original_apply_temperature
     assert sampler_module.Sampler.sample is original_sample
+    assert topk_topp_module.apply_top_k_top_p_pytorch is original_top_k_top_p
 
     install()
     assert rejection_sampler.expand_kernel is shim.expand_kernel
