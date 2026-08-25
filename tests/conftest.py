@@ -5,7 +5,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # SPDX-License-Identifier: Apache-2.0
 # Adapted from vllm/tests/conftest.py
-import ast
 import math
 from contextlib import nullcontext, suppress
 from typing import Any, TypeVar, cast
@@ -23,32 +22,6 @@ from vllm.logprobs import Logprob, PromptLogprobs, SampleLogprobs
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
 from vllm.utils.torch_utils import set_default_torch_num_threads
-
-
-def pytest_addoption(parser):
-    parser.addoption(
-        "--test-device-group",
-        action="store",
-        default="[0]",
-        help="QAIC QIDs as a Python list literal, for example '[0]' or '[4,5,6,7]'.",
-    )
-
-
-@pytest.fixture(scope="session")
-def device_group(request) -> list[int]:
-    raw = request.config.getoption("--test-device-group")
-    try:
-        parsed = ast.literal_eval(raw)
-    except (ValueError, SyntaxError) as exc:
-        raise pytest.UsageError(
-            f"--test-device-group must be a Python list literal, got {raw!r}"
-        ) from exc
-    if not isinstance(parsed, (list, tuple)):
-        raise pytest.UsageError(
-            "--test-device-group must parse to a list or tuple, "
-            f"got {type(parsed).__name__}"
-        )
-    return list(parsed)
 
 _M = TypeVar("_M")
 _R = TypeVar("_R")
