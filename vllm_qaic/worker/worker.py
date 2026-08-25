@@ -408,7 +408,8 @@ class QaicWorkerPyt(QaicWorker):
             GiB(self.requested_memory),
         )
         logger.debug(
-            "Free memory after profiling: %.2f GiB (total), %.2f GiB (within requested)",
+            "Free memory after profiling: %.2f GiB (total), "
+            "%.2f GiB (within requested)",
             GiB(free_gpu_memory),
             GiB(free_gpu_memory - unrequested_memory),
         )
@@ -440,9 +441,10 @@ class QaicWorkerPyt(QaicWorker):
     # to hijack tensor allocation.
     def load_model(self) -> None:
         # adapted from gpu_worker.py
-        with self._maybe_get_memory_pool_context(
-            tag="weights"
-        ) and set_current_vllm_config(self.vllm_config):
+        with (
+            self._maybe_get_memory_pool_context(tag="weights"),
+            set_current_vllm_config(self.vllm_config),
+        ):
             self.model_runner.load_model()
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
@@ -614,8 +616,6 @@ class QaicWorkerPyt(QaicWorker):
 class QaicWorkerAoT(QaicWorker):
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_cpu_blocks = num_cpu_blocks
-        # disable sliding window
-        self.cache_config.sliding_window = None
 
         assert num_cpu_blocks == 0
         if not self.cache_config.enable_prefix_caching:
