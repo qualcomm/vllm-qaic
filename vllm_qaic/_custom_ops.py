@@ -17,6 +17,7 @@ _rms_norm_kernel = _qaic_custom_ops.rms_norm_dispatch
 _NSP_COUNT = current_platform.get_num_cores()
 _THREAD_COUNT = current_platform.get_num_hvx_threads()
 
+
 def rms_norm_hexagon(
     attn_out: torch.Tensor,  # previous layer's output (acts as the residual)
     x: torch.Tensor,  # current layer's input
@@ -38,8 +39,8 @@ def rms_norm_hexagon(
         attn_out,
         x,
         weight,
-        out,      # written as residual by the kernel
-        dst,      # written as normed output by the kernel
+        out,  # written as residual by the kernel
+        dst,  # written as normed output by the kernel
         float(epsilon),
         attn_out.shape[-1],
         attn_out.numel(),
