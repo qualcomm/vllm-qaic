@@ -302,10 +302,17 @@ class QaicPlatform(Platform):
                         model_config.max_model_len
                     )  # reset to "no-op" default
                     cache_config.mamba_cache_mode = "none"  # reset to disabled
-                    cache_config.block_size = (
-                        vllm_config.additional_config.get("prefill_seq_len")
-                    )
-                elif model_config.is_multimodal_model and model_config.is_encoder_decoder:
+                    if vllm_config.kv_transfer_config:
+                        cache_config.block_size = vllm_config.additional_config.get(
+                            "kv_block_size"
+                        )
+                    else:
+                        cache_config.block_size = vllm_config.additional_config.get(
+                            "prefill_seq_len"
+                        )
+                elif (
+                    model_config.is_multimodal_model and model_config.is_encoder_decoder
+                ):
                     cache_config.block_size = 100000
                 else:
                     cache_config.block_size = model_config.max_model_len  # ctx_len
@@ -436,13 +443,6 @@ class QaicPlatform(Platform):
                 "Only ngram, suffix, and draft_model based SPD types are "
                 "supported with Disaggregated serving for QAIC backend"
             )
-            assert not (
-                vllm_config.kv_transfer_config.kv_role != "kv_producer"
-                and vllm_config.cache_config.enable_prefix_caching
-            ), (
-                "Prefix caching with KV-role 'kv_consumer' or 'kv_both' not "
-                "yet supported for QAIC backend"
-            )
             if (
                 on_device_sampling_en
                 and vllm_config.kv_transfer_config.kv_role == "kv_producer"
@@ -567,7 +567,14 @@ class QaicPlatform(Platform):
             )
             cache_config = vllm_config.cache_config
             if cache_config and cache_config.enable_prefix_caching:
-                cache_config.block_size = vllm_config.additional_config.get("prefill_seq_len")
+                if vllm_config.kv_transfer_config:
+                    cache_config.block_size = vllm_config.additional_config.get(
+                        "kv_block_size"
+                    )
+                else:
+                    cache_config.block_size = vllm_config.additional_config.get(
+                        "prefill_seq_len"
+                    )
             if "override_qaic_config" not in vllm_config.additional_config:
                 additional_config["override_qaic_config"] = {}
             additional_config["override_qaic_config"].update(
