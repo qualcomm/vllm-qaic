@@ -82,7 +82,7 @@ class QaicWorker(WorkerBase):
             is_driver_worker=is_driver_worker,
         )
 
-        self.profiler = None
+        self.profiler: TorchProfilerWrapper | None = None
 
         if self.speculative_config:
             assert self.model_config.hf_config.model_type not in [
@@ -203,27 +203,11 @@ class QaicWorkerPyt(QaicWorker):
         )
         assert self.model_config.enforce_eager
         self.parallel_config.disable_custom_all_reduce = True
+        self.profiler_config = vllm_config.profiler_config
 
         # configure float32 matmul precision according to vLLM env.
         precision = envs.VLLM_FLOAT32_MATMUL_PRECISION
         torch.set_float32_matmul_precision(precision)
-
-        # Torch profiler. Enabled and configured through env vars:
-        if os.environ.get("VLLM_TORCH_PROFILER_DIR"):
-            torch_profiler_trace_dir = os.environ["VLLM_TORCH_PROFILER_DIR"]
-            worker_name = f"{vllm_config.instance_id}-rank-{self.rank}"
-            logger.info(
-                "Profiling enabled. Traces will be saved to: %s",
-                torch_profiler_trace_dir,
-            )
-            profiler_config = vllm_config.profiler_config
-            assert profiler_config.profiler == "torch"
-            self.profiler = TorchProfilerWrapper(
-                profiler_config,
-                worker_name=worker_name,
-                local_rank=self.local_rank,
-                activities=["CPU"],
-            )
 
         from vllm_qaic.ops import register_qaic_customop
 
@@ -408,7 +392,8 @@ class QaicWorkerPyt(QaicWorker):
             GiB(self.requested_memory),
         )
         logger.debug(
-            "Free memory after profiling: %.2f GiB (total), %.2f GiB (within requested)",
+            "Free memory after profiling: %.2f GiB (total), %.2f GiB "
+            "(within requested)",
             GiB(free_gpu_memory),
             GiB(free_gpu_memory - unrequested_memory),
         )
@@ -440,9 +425,10 @@ class QaicWorkerPyt(QaicWorker):
     # to hijack tensor allocation.
     def load_model(self) -> None:
         # adapted from gpu_worker.py
-        with self._maybe_get_memory_pool_context(
-            tag="weights"
-        ) and set_current_vllm_config(self.vllm_config):
+        with (
+            self._maybe_get_memory_pool_context(tag="weights"),
+            set_current_vllm_config(self.vllm_config),
+        ):
             self.model_runner.load_model()
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
@@ -460,7 +446,7 @@ class QaicWorkerPyt(QaicWorker):
 
     def compile_or_warm_up_model(self) -> CompilationTimes:
         # Adapted from gpu_worker.py
-        warmup_sizes = []
+        warmup_sizes: list[int] = []
 
         if self.vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE:
             # warm up sizes that are not in cudagraph capture sizes,
@@ -594,8 +580,8 @@ class QaicWorkerPyt(QaicWorker):
             output = self.model_runner.execute_model(scheduler_output)
         return output
 
-    def profile(self, is_start: bool = True):
-        if self.profiler is None:
+    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
+        if self.profiler_config is None or self.profiler_config.profiler is None:
             raise RuntimeError(
                 "Profiling is not enabled. Please set --profiler-config to enable "
                 "profiling. Example: "
@@ -603,8 +589,40 @@ class QaicWorkerPyt(QaicWorker):
                 "=YOUR_DIR_PATH_TO_DUMP_TRACE'"
             )
         if is_start:
+            # Generate the trace name by combining prefix with comprehensive rank suffix
+            from vllm.distributed.utils import get_worker_rank_suffix
+
+            rank_suffix = get_worker_rank_suffix(global_rank=self.rank)
+
+            # Build the full trace name
+            if profile_prefix:
+                trace_name = f"{profile_prefix}_{rank_suffix}"
+            else:
+                trace_name = rank_suffix
+            if self.profiler is None:
+                profiler_config = self.vllm_config.profiler_config
+                if profiler_config.profiler == "torch":
+                    self.profiler = TorchProfilerWrapper(
+                        profiler_config,
+                        worker_name=trace_name,
+                        local_rank=self.local_rank,
+                        activities=["CPU"],
+                    )
+                    logger.debug(
+                        "Starting torch profiler with trace name: %s", trace_name
+                    )
+                else:
+                    # Config validation should prevent this code being reached
+                    raise ValueError(
+                        f"Invalid profiler value of {self.profiler_config.profiler}"
+                    )
+            # If profiler already initialized, restart profiling but keep
+            # the original trace name from the first initialization.
             self.profiler.start()
         else:
+            if self.profiler is None:
+                logger.warning("Profiler was not started, nothing to stop.")
+                return
             self.profiler.stop()
 
     def execute_dummy_batch(self) -> None:
