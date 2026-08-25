@@ -1,3 +1,7 @@
+# ------------------------------------------------------------------
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause-Clear
+# ------------------------------------------------------------------
 """Eager n-gram and suffix speculative-decoding correctness tests.
 
 Run with visible subprocess output::
@@ -23,47 +27,7 @@ pytestmark = pytest.mark.skipif(
     reason="Requires torch_qaic and eager PYT mode.",
 )
 
-_RUN_SCRIPT = r"""
-import json
-import sys
-
-from vllm import LLM, SamplingParams
-
-method = sys.argv[1]
-output_path = sys.argv[2]
-sampling_params = SamplingParams(temperature=0.0, max_tokens=32, seed=42)
-kwargs = dict(
-    model="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-    max_num_seqs=16,
-    max_model_len=256,
-    long_prefill_token_threshold=128,
-    tensor_parallel_size=1,
-    enforce_eager=True,
-    async_scheduling=False,
-    enable_prefix_caching=False,
-    gpu_memory_utilization=0.9,
-)
-if method != "baseline":
-    kwargs["speculative_config"] = {
-        "num_speculative_tokens": 5,
-        "method": method,
-    }
-
-llm = LLM(**kwargs)
-try:
-    outputs = llm.generate(
-        [
-            "The cat sat on the mat. The cat sat on the mat. The cat sat on the",
-            "My name is",
-        ],
-        sampling_params,
-    )
-    token_ids = [list(output.outputs[0].token_ids) for output in outputs]
-    with open(output_path, "w") as output_file:
-        json.dump(token_ids, output_file)
-finally:
-    del llm
-"""
+_RUNNER_SCRIPT = Path(__file__).with_name("_run_ngram_suffix_generation.py")
 
 
 def _run_generation(method: str, qid: int) -> list[list[int]]:
@@ -72,7 +36,7 @@ def _run_generation(method: str, qid: int) -> list[list[int]]:
     with tempfile.TemporaryDirectory() as temp_dir:
         output_path = Path(temp_dir) / "token_ids.json"
         subprocess.run(
-            [sys.executable, "-c", _RUN_SCRIPT, method, str(output_path)],
+            [sys.executable, str(_RUNNER_SCRIPT), method, str(output_path)],
             check=True,
             env=env,
         )
