@@ -6,38 +6,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # Adapted from vllm/vllm/v1/sample/rejection_sampler.py
 
-"""Pure-PyTorch replacements for the four Triton kernels in
-vllm.v1.sample.rejection_sampler, enabling speculative decoding in PYT
-(eager) mode on QAIC where no active Triton driver is available.
+"""QAIC PYT rejection-sampler helpers for speculative decoding.
 
-In PYT mode, standard Triton 3.3.0 is installed but ``HAS_TRITON=False``
-(vLLM checks for exactly 1 active GPU driver; QAIC does not register a
-Triton backend → 0 active drivers → ``TritonPlaceholder`` is used).
-``TritonPlaceholder`` makes ``@triton.jit`` a no-op decorator, so the
-decorated functions remain plain Python callables.  vLLM then calls them
-as ``kernel[(grid,)](*args)`` which tries to subscript a plain function →
-``TypeError: 'function' object is not subscriptable``.
+QAIC PYT always installs the three local Qualcomm-Triton kernels for expand,
+greedy rejection, and random rejection.  The legacy
+``VLLM_QAIC_REJECTION_SAMPLER_IMPL=hybrid`` selector remains a compatibility
+alias for that default.  The former PyTorch fallback has been removed.
 
-This shim wraps each PyTorch replacement in ``_GridLaunchable`` so that
-the ``kernel[(grid,)](*args, CONSTEXPR=value)`` call syntax works
-identically to the Triton call sites — no changes needed at the call sites.
+vLLM's global Triton detection intentionally remains unchanged: it does not
+recognize the Qualcomm backend and therefore exposes placeholder objects in
+the upstream rejection-sampler module.  The QAIC installer patches only its
+module globals with real, locally defined Qualcomm-Triton kernels.
 
-The PyTorch replacements operate on tensors that are on the QAIC device
-(they come from the model forward pass), so these ops dispatch through
-torch_qaic and run on QAIC hardware.
-
-Key behavioural notes:
-- ``generate_uniform_probs``: uses ``torch.float32`` instead of
-  ``torch.float64`` because QAIC does not support float64.
-- ``sample_recovered_tokens_kernel``: ``inv_q`` is pre-computed by the
-  ``sample_recovered_tokens`` wrapper before calling the kernel.
-- ``USE_FP64_GUMBEL`` is always ``False`` on QAIC; the parameter is
-  accepted but ignored.
-- For ngram/suffix SpD: ``SYNTHETIC_MODE=False``, ``NO_DRAFT_PROBS=True``.
+``sample_recovered_tokens_kernel`` and ``generate_uniform_probs`` remain
+PyTorch helpers.  QAIC does not support the upstream fp64 uniform path, and
+the Qualcomm-Triton recovered-token implementation is not production-safe on
+the current compiler backend.
 """
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import torch
@@ -47,24 +36,8 @@ from vllm_qaic.logger import init_logger
 logger = init_logger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# _GridLaunchable: adapter for Triton grid-launch call syntax
-# ---------------------------------------------------------------------------
-
 class _GridLaunchable:
-    """Makes a plain callable usable with Triton grid-launch syntax.
-
-    Triton kernels are called as::
-
-        kernel[(batch_size,)](*args, CONSTEXPR=value)
-
-    where ``kernel[(batch_size,)]`` returns a callable that is immediately
-    invoked with ``(*args, ...)``.  This adapter intercepts ``__getitem__``
-    and returns a closure over the wrapped function, discarding the grid.
-    The grid is unused because the PyTorch implementations process all
-    requests in a single tensor expression (or a small Python loop over
-    batch_size).
-    """
+    """Make the retained PyTorch helper compatible with Triton launch syntax."""
 
     def __init__(self, fn):
         self._fn = fn
@@ -82,324 +55,68 @@ class _GridLaunchable:
         return self._fn(*args, **kwargs)
 
 
-# ---------------------------------------------------------------------------
-# 1. expand_kernel  (expand_batch_to_tokens helper)
-#
-# Upstream call:
-#   expand_kernel[(batch_size,)](
-#       expanded_x, x, cu_num_tokens,
-#       replace_from, replace_to,
-#       MAX_NUM_TOKENS=MAX_SPEC_LEN,
-#   )
-#
-# Semantics: for each request i, broadcast x[i] (with replace_from→replace_to
-# substitution) into output[cu[i-1]:cu[i]].
-# ---------------------------------------------------------------------------
-
-def _expand_kernel_pyt(
-    output_ptr: torch.Tensor,        # [num_tokens]
-    input_ptr: torch.Tensor,         # [batch_size]
-    cu_num_tokens_ptr: torch.Tensor, # [batch_size]
-    replace_from: int,
-    replace_to: int,
-    MAX_NUM_TOKENS: int = 128,       # constexpr, unused in PyTorch impl
-) -> None:
-    batch_size = input_ptr.shape[0]
-    if batch_size == 0:
-        return
-    num_tokens = int(cu_num_tokens_ptr[-1].item())
-    if num_tokens == 0:
-        return
-
-    # Apply replace_from → replace_to substitution.
-    src = input_ptr.clone()
-    src[src == replace_from] = replace_to
-
-    # Build per-request token counts: counts[i] = cu[i] - cu[i-1].
-    prev = torch.zeros(batch_size, dtype=cu_num_tokens_ptr.dtype,
-                       device=cu_num_tokens_ptr.device)
-    prev[1:] = cu_num_tokens_ptr[:-1]
-    counts = (cu_num_tokens_ptr - prev).to(torch.int64)
-
-    # Expand each scalar to its token segment via repeat_interleave.
-    req_indices = torch.repeat_interleave(
-        torch.arange(batch_size, device=input_ptr.device),
-        counts,
-    )  # [num_tokens]
-
-    output_ptr.copy_(src[req_indices])
-
-
-expand_kernel = _GridLaunchable(_expand_kernel_pyt)
-
-
-# ---------------------------------------------------------------------------
-# 2. rejection_greedy_sample_kernel
-#
-# Upstream call:
-#   rejection_greedy_sample_kernel[(batch_size,)](
-#       output_token_ids, cu_num_draft_tokens,
-#       draft_token_ids, target_argmax, bonus_token_ids,
-#       is_greedy, max_spec_len,
-#       uniform_probs, synthetic_conditional_rates,
-#       SYNTHETIC_MODE=synthetic_mode,
-#   )
-#
-# For ngram/suffix: SYNTHETIC_MODE=False, is_greedy=None (all_greedy=True).
-# The standard path stores target_argmax per position until first mismatch
-# with draft token, then stops; appends bonus token if all accepted.
-# ---------------------------------------------------------------------------
-
-def _rejection_greedy_sample_kernel_pyt(
-    output_token_ids_ptr: torch.Tensor,      # [batch_size, max_spec_len + 1]
-    cu_num_draft_tokens_ptr: torch.Tensor,   # [batch_size]
-    draft_token_ids_ptr: torch.Tensor,       # [num_tokens]
-    target_argmax_ptr: torch.Tensor,         # [num_tokens]
-    bonus_token_ids_ptr: torch.Tensor,       # [batch_size]
-    is_greedy_ptr,                           # [batch_size] tensor or None
-    max_spec_len: int,
-    uniform_probs_ptr,                       # [num_tokens] tensor or None
-    synthetic_conditional_rates_ptr,         # [num_spec_tokens] tensor or None
-    SYNTHETIC_MODE: bool = False,
-) -> None:
-    batch_size = int(cu_num_draft_tokens_ptr.shape[0])
-    device = cu_num_draft_tokens_ptr.device
-
-    prev = torch.zeros(batch_size, dtype=cu_num_draft_tokens_ptr.dtype,
-                       device=device)
-    prev[1:] = cu_num_draft_tokens_ptr[:-1]
-    start_idxs = prev.to(torch.int64)
-    end_idxs = cu_num_draft_tokens_ptr.to(torch.int64)
-
-    for req_idx in range(batch_size):
-        # Skip non-greedy requests — handled by the random-sample kernel.
-        if is_greedy_ptr is not None and not bool(is_greedy_ptr[req_idx].item()):
-            continue
-
-        s = int(start_idxs[req_idx].item())
-        e = int(end_idxs[req_idx].item())
-        num_draft = e - s
-
-        rejected = False
-        for pos in range(num_draft):
-            if rejected:
-                break
-            tok_idx = s + pos
-            draft_tok = int(draft_token_ids_ptr[tok_idx].item())
-            target_tok = int(target_argmax_ptr[tok_idx].item())
-
-            if SYNTHETIC_MODE:
-                u = float(uniform_probs_ptr[tok_idx].item())
-                rate = float(synthetic_conditional_rates_ptr[pos].item())
-                accepted = u < rate
-                token_id = draft_tok if accepted else target_tok
-                rejected = not accepted
-            else:
-                token_id = target_tok
-                rejected = (draft_tok != target_tok)
-
-            output_token_ids_ptr[req_idx, pos] = token_id
-
-        if not rejected:
-            output_token_ids_ptr[req_idx, num_draft] = int(
-                bonus_token_ids_ptr[req_idx].item()
-            )
-
-
-rejection_greedy_sample_kernel = _GridLaunchable(
-    _rejection_greedy_sample_kernel_pyt
-)
-
-
-# ---------------------------------------------------------------------------
-# 3. rejection_random_sample_kernel
-#
-# Upstream call:
-#   rejection_random_sample_kernel[(batch_size,)](
-#       output_token_ids, cu_num_draft_tokens,
-#       draft_token_ids, draft_probs, target_probs,
-#       bonus_token_ids, recovered_token_ids, uniform_probs,
-#       is_greedy, max_spec_len, vocab_size,
-#       synthetic_conditional_rates,
-#       NO_DRAFT_PROBS=draft_probs is None,
-#       SYNTHETIC_MODE=synthetic_mode,
-#   )
-#
-# For ngram/suffix: NO_DRAFT_PROBS=True (draft_prob treated as 1.0).
-# Greedy requests are skipped (handled by the greedy kernel above).
-# ---------------------------------------------------------------------------
-
-def _rejection_random_sample_kernel_pyt(
-    output_token_ids_ptr: torch.Tensor,      # [batch_size, max_spec_len + 1]
-    cu_num_draft_tokens_ptr: torch.Tensor,   # [batch_size]
-    draft_token_ids_ptr: torch.Tensor,       # [num_tokens]
-    draft_probs_ptr,                         # [num_tokens, vocab_size] or None
-    target_probs_ptr: torch.Tensor,          # [num_tokens, vocab_size]
-    bonus_token_ids_ptr: torch.Tensor,       # [batch_size]
-    recovered_token_ids_ptr: torch.Tensor,   # [num_tokens]
-    uniform_probs_ptr: torch.Tensor,         # [num_tokens]
-    is_greedy_ptr: torch.Tensor,             # [batch_size]
-    max_spec_len: int,
-    vocab_size: int,
-    synthetic_conditional_rates_ptr,         # [num_spec_tokens] tensor or None
-    NO_DRAFT_PROBS: bool = True,
-    SYNTHETIC_MODE: bool = False,
-) -> None:
-    batch_size = int(cu_num_draft_tokens_ptr.shape[0])
-    device = cu_num_draft_tokens_ptr.device
-
-    prev = torch.zeros(batch_size, dtype=cu_num_draft_tokens_ptr.dtype,
-                       device=device)
-    prev[1:] = cu_num_draft_tokens_ptr[:-1]
-    start_idxs = prev.to(torch.int64)
-    end_idxs = cu_num_draft_tokens_ptr.to(torch.int64)
-
-    for req_idx in range(batch_size):
-        # Greedy requests are handled by rejection_greedy_sample_kernel.
-        if bool(is_greedy_ptr[req_idx].item()):
-            continue
-
-        s = int(start_idxs[req_idx].item())
-        e = int(end_idxs[req_idx].item())
-        num_draft = e - s
-
-        rejected = False
-        for pos in range(num_draft):
-            if rejected:
-                break
-            tok_idx = s + pos
-            draft_tok = int(draft_token_ids_ptr[tok_idx].item())
-            u = float(uniform_probs_ptr[tok_idx].item())
-
-            if SYNTHETIC_MODE:
-                rate = float(synthetic_conditional_rates_ptr[pos].item())
-                accepted = u < rate
-            else:
-                if NO_DRAFT_PROBS:
-                    draft_prob = 1.0
-                else:
-                    draft_prob = float(
-                        draft_probs_ptr[tok_idx, draft_tok].item()
-                    )
-                target_prob = float(
-                    target_probs_ptr[tok_idx, draft_tok].item()
-                )
-                # Mirror Triton logic exactly: draft_prob==0 means reject.
-                accepted = (
-                    draft_prob > 0
-                    and target_prob / draft_prob >= u
-                )
-
-            if accepted:
-                token_id = draft_tok
-            else:
-                rejected = True
-                token_id = int(recovered_token_ids_ptr[tok_idx].item())
-
-            output_token_ids_ptr[req_idx, pos] = token_id
-
-        if not rejected:
-            output_token_ids_ptr[req_idx, num_draft] = int(
-                bonus_token_ids_ptr[req_idx].item()
-            )
-
-
-rejection_random_sample_kernel = _GridLaunchable(
-    _rejection_random_sample_kernel_pyt
-)
-
-
-# ---------------------------------------------------------------------------
-# 4. sample_recovered_tokens_kernel
-#
-# Upstream call:
-#   sample_recovered_tokens_kernel[(batch_size, max_spec_len)](
-#       recovered_token_ids, cu_num_draft_tokens,
-#       draft_token_ids, draft_probs, target_probs,
-#       inv_q, vocab_size, BLOCK_SIZE,
-#       NO_DRAFT_PROBS=draft_probs is None,
-#       USE_FP64_GUMBEL=use_fp64_gumbel,
-#   )
-#
-# ``inv_q`` is pre-computed by the ``sample_recovered_tokens`` wrapper:
-#   q.exponential_(); inv_q = q.reciprocal()
-#
-# For NO_DRAFT_PROBS=True (ngram/suffix):
-#   prob[pos, v] = target_probs[tok_idx, v], masked to 0 at v==draft_tok.
-#   score[pos, v] = prob[pos, v] * inv_q[req_idx, v]
-#   recovered[pos] = argmax_v(score[pos, :])
-#
-# For NO_DRAFT_PROBS=False:
-#   prob[pos, v] = max(target_probs[tok_idx, v] - draft_probs[tok_idx, v], 0)
-#
-# USE_FP64_GUMBEL is always False on QAIC (no float64 support); accepted
-# but ignored.
-# ---------------------------------------------------------------------------
-
 def _sample_recovered_tokens_kernel_pyt(
-    output_token_ids_ptr: torch.Tensor,      # [num_tokens]
-    cu_num_draft_tokens_ptr: torch.Tensor,   # [batch_size]
-    draft_token_ids_ptr: torch.Tensor,       # [num_tokens]
-    draft_probs_ptr,                         # [num_tokens, vocab_size] or None
-    target_probs_ptr: torch.Tensor,          # [num_tokens, vocab_size]
-    inv_q_ptr: torch.Tensor,                 # [batch_size, vocab_size]
+    output_token_ids_ptr: torch.Tensor,
+    cu_num_draft_tokens_ptr: torch.Tensor,
+    draft_token_ids_ptr: torch.Tensor,
+    draft_probs_ptr,
+    target_probs_ptr: torch.Tensor,
+    inv_q_ptr: torch.Tensor,
     vocab_size: int,
-    BLOCK_SIZE: int = 8192,                  # constexpr, unused in PyTorch
+    BLOCK_SIZE: int = 8192,
     NO_DRAFT_PROBS: bool = True,
-    USE_FP64_GUMBEL: bool = False,           # always False on QAIC
+    USE_FP64_GUMBEL: bool = False,
 ) -> None:
+    """Generate QAIC-compatible recovered tokens for random rejection.
+
+    The QAIC status-26 workaround intentionally performs the scalar scatter
+    on the host.  The recovered IDs are copied back as contiguous QAIC int32
+    tensors before the local Qualcomm-Triton random-rejection kernel consumes
+    them.
+    """
+    del vocab_size, BLOCK_SIZE, USE_FP64_GUMBEL
     batch_size = int(cu_num_draft_tokens_ptr.shape[0])
     device = cu_num_draft_tokens_ptr.device
 
-    prev = torch.zeros(batch_size, dtype=cu_num_draft_tokens_ptr.dtype,
-                       device=device)
-    prev[1:] = cu_num_draft_tokens_ptr[:-1]
-    start_idxs = prev.to(torch.int64)
-    end_idxs = cu_num_draft_tokens_ptr.to(torch.int64)
+    previous = torch.zeros(
+        batch_size,
+        dtype=cu_num_draft_tokens_ptr.dtype,
+        device=device,
+    )
+    previous[1:] = cu_num_draft_tokens_ptr[:-1]
+    start_indices = previous.to(torch.int64)
+    end_indices = cu_num_draft_tokens_ptr.to(torch.int64)
 
-    for req_idx in range(batch_size):
-        s = int(start_idxs[req_idx].item())
-        e = int(end_idxs[req_idx].item())
-        num_draft = e - s
-        if num_draft == 0:
+    for request_index in range(batch_size):
+        start_index = int(start_indices[request_index].item())
+        end_index = int(end_indices[request_index].item())
+        if end_index == start_index:
             continue
 
-        # Flat token indices for this request.
-        tok_slice = slice(s, e)
-
+        token_slice = slice(start_index, end_index)
         if NO_DRAFT_PROBS:
-            # prob[pos, v] = target_probs[s+pos, v], 0 at v == draft_tok.
-            prob = target_probs_ptr[tok_slice].clone()  # [num_draft, vocab]
-            draft_toks = draft_token_ids_ptr[tok_slice].to(torch.int64)
-            # Use scatter_ to zero out the draft-token column for each pos.
-            # (Avoids 2-D advanced indexing which may not be supported on QAIC.)
-            pos_idx = torch.arange(num_draft, device=device)
-            prob.scatter_(1, draft_toks.view(-1, 1), 0.0)
+            probabilities = target_probs_ptr[token_slice].clone()
+            draft_tokens = draft_token_ids_ptr[token_slice].to(torch.int64)
+            draft_tokens = draft_tokens.view(-1, 1)
+            if device.type == "qaic":
+                probabilities = probabilities.cpu()
+                probabilities.scatter_(1, draft_tokens.cpu(), 0.0)
+                probabilities = probabilities.to(device=device)
+            else:
+                probabilities.scatter_(1, draft_tokens, 0.0)
         else:
-            prob = torch.clamp(
-                target_probs_ptr[tok_slice] - draft_probs_ptr[tok_slice],
+            probabilities = torch.clamp(
+                target_probs_ptr[token_slice] - draft_probs_ptr[token_slice],
                 min=0.0,
-            )  # [num_draft, vocab]
+            )
 
-        # Gumbel-max trick: score[pos, v] = prob[pos, v] * inv_q[req, v].
-        # inv_q[req_idx] is [vocab_size]; broadcast over num_draft positions.
-        score = prob * inv_q_ptr[req_idx].unsqueeze(0)  # [num_draft, vocab]
-        recovered = score.argmax(dim=-1).to(torch.int32)  # [num_draft]
-        output_token_ids_ptr[s:e].copy_(recovered)
+        scores = probabilities * inv_q_ptr[request_index].unsqueeze(0)
+        recovered = scores.argmax(dim=-1).to(torch.int32)
+        output_token_ids_ptr[start_index:end_index].copy_(recovered)
 
 
-sample_recovered_tokens_kernel = _GridLaunchable(
-    _sample_recovered_tokens_kernel_pyt
-)
+sample_recovered_tokens_kernel = _GridLaunchable(_sample_recovered_tokens_kernel_pyt)
 
-
-# ---------------------------------------------------------------------------
-# 5. generate_uniform_probs  (float32 replacement for float64 upstream)
-#
-# Upstream uses torch.float64 to avoid sampling exact 0.0 (see PyTorch
-# issue #16706).  QAIC does not support float64, so we use float32.
-# The probability of an exact 0.0 in float32 is ~2^-24 ≈ 6e-8, acceptable.
-# ---------------------------------------------------------------------------
 
 def generate_uniform_probs(
     num_tokens: int,
@@ -407,57 +124,93 @@ def generate_uniform_probs(
     generators: dict,
     device: torch.device,
 ) -> torch.Tensor:
-    """float32 uniform samples; per-request generators are honoured."""
+    """Generate fp32 uniform samples because QAIC does not support fp64."""
     uniform_probs = torch.rand(
         (num_tokens,),
         dtype=torch.float32,
         device=device,
     )
-    start_idx = 0
-    for req_idx, n in enumerate(num_draft_tokens):
-        if n == 0:
+    start_index = 0
+    for request_index, num_drafts in enumerate(num_draft_tokens):
+        if num_drafts == 0:
             continue
-        end_idx = start_idx + n
-        gen = generators.get(req_idx)
-        if gen is not None:
-            uniform_probs[start_idx:end_idx].uniform_(generator=gen)
-        start_idx = end_idx
+        end_index = start_index + num_drafts
+        generator = generators.get(request_index)
+        if generator is not None:
+            uniform_probs[start_index:end_index].uniform_(generator=generator)
+        start_index = end_index
     return uniform_probs
 
 
-# ---------------------------------------------------------------------------
-# install() — idempotent module-level monkey-patch
-# ---------------------------------------------------------------------------
+_REJECTION_SAMPLER_IMPL_ENV = "VLLM_QAIC_REJECTION_SAMPLER_IMPL"
+_HYBRID_IMPL = "hybrid"
+_PYTORCH_IMPL = "pytorch"
+_TRITON_IMPL = "triton"
 
-_shim_installed: bool = False
+_shim_installed = False
+_shim_mode: str | None = None
+
+
+def _selected_implementation() -> str:
+    """Resolve the only supported QAIC PYT kernel implementation."""
+    implementation = os.environ.get(_REJECTION_SAMPLER_IMPL_ENV, "").strip().lower()
+    if implementation in {"", _HYBRID_IMPL}:
+        return _TRITON_IMPL
+    if implementation == _PYTORCH_IMPL:
+        raise RuntimeError(
+            f"{_REJECTION_SAMPLER_IMPL_ENV}=pytorch is no longer supported: "
+            "the QAIC PYT PyTorch fallback for expand, greedy rejection, and "
+            "random rejection was removed. Unset the variable or set it to "
+            "'hybrid' to use the Qualcomm-Triton default."
+        )
+    raise RuntimeError(
+        f"{_REJECTION_SAMPLER_IMPL_ENV} must be unset or '{_HYBRID_IMPL}'; "
+        f"got {implementation!r}."
+    )
 
 
 def install() -> None:
-    """Replace Triton kernel objects in ``vllm.v1.sample.rejection_sampler``
-    with PyTorch equivalents wrapped in ``_GridLaunchable``.
-
-    Must be called before LLM is instantiated, i.e. from
-    ``QaicPlatform.pre_register_and_update()``.
-
-    The function resolves kernel names via the module's ``__dict__``
-    (which is the same object as each function's ``__globals__``), so
-    patching here automatically takes effect inside ``rejection_sample()``
-    and ``sample_recovered_tokens()`` without touching their call sites.
-    """
-    global _shim_installed
+    """Install QAIC PYT rejection-sampler helpers before LLM construction."""
+    global _shim_installed, _shim_mode
+    implementation = _selected_implementation()
     if _shim_installed:
+        if implementation != _shim_mode:
+            raise RuntimeError(
+                "The QAIC rejection-sampler implementation is already installed "
+                f"as {_shim_mode!r}; changing {_REJECTION_SAMPLER_IMPL_ENV} "
+                "within one Python process is unsupported. Use an isolated "
+                "subprocess for each implementation."
+            )
         return
 
-    import vllm.v1.sample.rejection_sampler as _rs
+    try:
+        from vllm_qaic.v1.sample.rejection_sampler_triton import (
+            get_qaic_triton_kernels,
+        )
 
-    _rs.expand_kernel = expand_kernel
-    _rs.rejection_greedy_sample_kernel = rejection_greedy_sample_kernel
-    _rs.rejection_random_sample_kernel = rejection_random_sample_kernel
-    _rs.sample_recovered_tokens_kernel = sample_recovered_tokens_kernel
-    _rs.generate_uniform_probs = generate_uniform_probs
+        triton_kernels = get_qaic_triton_kernels()
+    except (ImportError, ModuleNotFoundError, RuntimeError) as exc:
+        raise RuntimeError(
+            "QAIC PYT rejection sampling requires Qualcomm Triton with "
+            "qcom_hexagon_backend. Install and verify the QAIC Triton wheel "
+            "using docs/qaic/build_hexagon_triton_backend.md."
+        ) from exc
+
+    import vllm.v1.sample.rejection_sampler as rejection_sampler
+
+    rejection_sampler.expand_kernel = triton_kernels.expand_kernel
+    rejection_sampler.rejection_greedy_sample_kernel = (
+        triton_kernels.rejection_greedy_sample_kernel
+    )
+    rejection_sampler.rejection_random_sample_kernel = (
+        triton_kernels.rejection_random_sample_kernel
+    )
+    rejection_sampler.sample_recovered_tokens_kernel = sample_recovered_tokens_kernel
+    rejection_sampler.generate_uniform_probs = generate_uniform_probs
 
     _shim_installed = True
+    _shim_mode = implementation
     logger.info(
-        "vllm_qaic: Triton rejection-sampler kernels replaced with "
-        "PyTorch equivalents (ngram/suffix SpD enabled in PYT mode)."
+        "vllm_qaic: Qualcomm-Triton rejection-sampler kernels installed for "
+        "QAIC PYT (ngram/suffix SpD enabled)."
     )
