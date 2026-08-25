@@ -1,3 +1,7 @@
+# ------------------------------------------------------------------
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause-Clear
+# ------------------------------------------------------------------
 import torch
 
 from vllm_qaic.attention.backends.qaic_attn import (
@@ -9,15 +13,18 @@ from vllm_qaic.attention.backends.qaic_attn import (
 def _metadata(
     request_ids: list[str], seq_lens: list[int], query_lens: list[int]
 ) -> QAicAttentionMetadata:
+    query_start_loc = torch.tensor(
+        [0, *torch.tensor(query_lens, dtype=torch.int32).cumsum(0).tolist()],
+        dtype=torch.int32,
+    )
     return QAicAttentionMetadata(
-        isa="vec",
         num_actual_tokens=sum(query_lens),
         max_query_len=max(query_lens),
-        query_start_loc=torch.tensor([0, *torch.tensor(query_lens).cumsum(0)]),
+        query_start_loc=query_start_loc,
         max_seq_len=max(seq_lens),
-        seq_lens=torch.tensor(seq_lens),
-        block_table=torch.empty(0),
-        slot_mapping=torch.empty(0),
+        seq_lens=torch.tensor(seq_lens, dtype=torch.int32),
+        block_table=torch.empty(0, dtype=torch.int32),
+        slot_mapping=torch.empty(0, dtype=torch.int32),
         max_num_seqs=2,
         max_model_len=16,
         scheduler_metadata=None,
