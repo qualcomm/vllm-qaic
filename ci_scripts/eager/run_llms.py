@@ -7,6 +7,7 @@ import inspect
 import os
 import random
 import model_configs_llm
+from hf_cache import delete_hf_checkpoint
 from vllm import LLM, SamplingParams
 
 # Sample prompts.
@@ -27,46 +28,6 @@ sampling_temp = 0.0
 
 # set QAIC specific environment variables
 os.environ["VLLM_QAIC_PREFILL_SEQ_LEN"] = str(seq_len)
-
-
-def delete_hf_checkpoint(model_name: str) -> None:
-    """Delete the cached HF checkpoint for model_name to free disk between runs.
-
-    Uses the cache configured by HF_HOME / HF_HUB_CACHE. Never raises, since it
-    runs during teardown and must not mask a failure from the run itself.
-
-    Skips a model_name that is a local path. Otherwise deletes unconditionally --
-    the flag is opt-in, so passing it is the authorisation to evict, and the sweep
-    has to bound disk use whether or not the model ran successfully. Ownership is
-    deliberately not consulted: a shared cache is group-writable, so the owner of
-    a repo dir is just whoever downloaded it first and says nothing about who
-    needs it.
-    """
-    if os.path.isdir(model_name):
-        print(f"[cleanup] '{model_name}' is a local path - not deleting")
-        return
-
-    try:
-        from huggingface_hub import scan_cache_dir
-
-        cache_info = scan_cache_dir()
-        revisions = []
-        for repo in cache_info.repos:
-            if repo.repo_type != "model" or repo.repo_id != model_name:
-                continue
-            revisions.extend(rev.commit_hash for rev in repo.revisions)
-
-        if not revisions:
-            print(f"[cleanup] no deletable cache entry for '{model_name}'")
-            return
-
-        strategy = cache_info.delete_revisions(*revisions)
-        freed = strategy.expected_freed_size_str
-        strategy.execute()
-        print(f"[cleanup] deleted checkpoint '{model_name}' (freed {freed})")
-
-    except Exception as exc:  # noqa: BLE001 - teardown must not mask the run
-        print(f"[cleanup] could not delete '{model_name}': {exc}")
 
 
 def cleanup(model_name=None, delete_checkpoint=False):
