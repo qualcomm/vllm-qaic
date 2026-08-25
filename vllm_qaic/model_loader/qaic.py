@@ -148,12 +148,12 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self.ctx_len = model_config.max_model_len
         self.decode_bsz = vllm_config.scheduler_config.max_num_seqs
         self.full_batch_size = vllm_config.scheduler_config.max_num_seqs
-        self.num_gpu_blocks_per_batch = self.ctx_len // self.prefill_seq_len
+        self.num_gpu_blocks_per_batch = self.ctx_len // vllm_config.cache_config.block_size
         if vllm_config.cache_config.enable_prefix_caching:
             self.num_gpu_blocks = (
                 vllm_config.cache_config.num_gpu_blocks_override
                 if vllm_config.cache_config.num_gpu_blocks_override
-                else self.ctx_len // self.prefill_seq_len
+                else self.ctx_len // vllm_config.cache_config.block_size
             )
         else:
             self.num_gpu_blocks = self.decode_bsz
@@ -2134,17 +2134,22 @@ def _get_qaic_compile_config(
                 if (len(cfg.get("comp_ctx_lengths_decode", [])) == 0)
                 else cfg.get("comp_ctx_lengths_decode")
             )
+    # For disaggregated serving, the KV cache block size must match the
+    # prefill chunk size actually compiled into the QPC (post-override), not
+    # just the scheduler's long_prefill_token_threshold, so KV blocks handed
+    # off between producer and consumer stay aligned. Written here, before
+    # get_kv_cache_spec() is queried, so the updated value is picked up when
+    # the KV cache is sized.
+    if vllm_config.kv_transfer_config:
+        vllm_config.cache_config.block_size = cfg["kv_block_size"]
+    else:
+        vllm_config.cache_config.block_size = cfg["prefill_seq_len"]
+
     # Add num_kv_blocks through qaic_config
-    logger.info(
-        "Num KV Blocks: %s",
-        vllm_config.model_config.max_model_len
-        // vllm_config.scheduler_config.long_prefill_token_threshold,
-    )
+    num_kv_blocks = vllm_config.model_config.max_model_len // vllm_config.cache_config.block_size
+    logger.info("Num KV Blocks: %s", num_kv_blocks)
     if vllm_config.cache_config.enable_prefix_caching:
-        qaic_config["num_kv_blocks"] = (
-            vllm_config.model_config.max_model_len
-            // vllm_config.scheduler_config.long_prefill_token_threshold
-        )
+        qaic_config["num_kv_blocks"] = num_kv_blocks
         qaic_config["blocking_mode"] = "kv_paged"
         qaic_config["enable_blocking"] = True
     else:

@@ -306,7 +306,7 @@ class QaicPlatform(Platform):
                     )  # reset to "no-op" default
                     cache_config.mamba_cache_mode = "none"  # reset to disabled
                     cache_config.block_size = (
-                        scheduler_config.long_prefill_token_threshold
+                        vllm_config.additional_config.get("prefill_seq_len")
                     )
                 elif model_config.is_multimodal_model and model_config.is_encoder_decoder:
                     cache_config.block_size = 100000
@@ -550,7 +550,7 @@ class QaicPlatform(Platform):
             )
             cache_config = vllm_config.cache_config
             if cache_config and cache_config.enable_prefix_caching:
-                cache_config.block_size = scheduler_config.long_prefill_token_threshold
+                cache_config.block_size = vllm_config.additional_config.get("prefill_seq_len")
             if "override_qaic_config" not in vllm_config.additional_config:
                 additional_config["override_qaic_config"] = {}
             additional_config["override_qaic_config"].update(

@@ -666,7 +666,7 @@ class QaicWorkerAoT(QaicWorker):
                     self.scheduler_config.max_num_seqs
                     * (
                         self.model_config.max_model_len
-                        // self.scheduler_config.long_prefill_token_threshold
+                        // self.cache_config.block_size
                     )
                     + 1
                 )
@@ -741,7 +741,7 @@ class QaicWorkerAoT(QaicWorker):
                     self.scheduler_config.max_num_seqs
                     * (
                         self.vllm_config.model_config.max_model_len
-                        // self.scheduler_config.long_prefill_token_threshold
+                        // self.cache_config.block_size
                     )
                     + 1
                 )
