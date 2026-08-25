@@ -6,22 +6,48 @@ Run with ``pytest -s`` so QAIC runtime diagnostics remain visible::
         tests/test_qaic/spec_decode/test_rejection_sampler_shim.py -v
 """
 
-from types import SimpleNamespace
+import os
+import subprocess
+import sys
+import textwrap
+from types import ModuleType, SimpleNamespace
 
 import pytest
 import torch
 
 from vllm_qaic.v1.sample.rejection_sampler_shim import (
     _GridLaunchable,
-    _expand_kernel_pyt,
-    _rejection_greedy_sample_kernel_pyt,
-    _rejection_random_sample_kernel_pyt,
     _sample_recovered_tokens_kernel_pyt,
     generate_uniform_probs,
     install,
 )
 
-PLACEHOLDER_TOKEN_ID = -1
+
+def _has_qualcomm_triton_backend() -> bool:
+    try:
+        from triton.backends import backends
+
+        return "qcom_hexagon_backend" in backends
+    except Exception:
+        return False
+
+
+def _run_selector_subprocess(
+    implementation: str | None, source: str
+) -> subprocess.CompletedProcess[str]:
+    environment = os.environ.copy()
+    if implementation is None:
+        environment.pop("VLLM_QAIC_REJECTION_SAMPLER_IMPL", None)
+    else:
+        environment["VLLM_QAIC_REJECTION_SAMPLER_IMPL"] = implementation
+    return subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(source)],
+        check=False,
+        cwd=os.getcwd(),
+        env=environment,
+        text=True,
+        capture_output=True,
+    )
 
 
 def _available_devices() -> list[str]:
@@ -41,6 +67,18 @@ def device(request) -> torch.device:
     return torch.device(request.param)
 
 
+@pytest.fixture
+def qaic_device() -> torch.device:
+    try:
+        import torch_qaic  # noqa: F401
+
+        if torch.qaic.device_count() > 0:
+            return torch.device("qaic")
+    except Exception:
+        pass
+    pytest.skip("Requires a visible QAIC device and torch_qaic")
+
+
 def test_grid_launchable_forwards_args_and_discards_grid():
     seen = []
 
@@ -56,201 +94,86 @@ def test_grid_launchable_forwards_args_and_discards_grid():
     assert wrapped.__name__ == "fn"
 
 
-def test_expand_kernel_broadcasts_and_replaces(device):
-    inputs = torch.tensor([0, 5, 7], device=device)
-    cumulative_tokens = torch.tensor([2, 5, 6], device=device)
-    output = torch.zeros(6, dtype=torch.long, device=device)
-
-    _expand_kernel_pyt(
-        output,
-        inputs,
-        cumulative_tokens,
-        replace_from=0,
-        replace_to=99,
+@pytest.mark.skipif(
+    not _has_qualcomm_triton_backend(),
+    reason="Qualcomm Triton backend is not installed",
+)
+@pytest.mark.parametrize("probability_dtype", [torch.float32, torch.float16])
+def test_triton_random_kernel_handoffs_pytorch_recovered_ids_on_qaic(
+    qaic_device, probability_dtype
+):
+    """Exercise the retained PyTorch producer with the Triton consumer."""
+    from vllm_qaic.v1.sample.rejection_sampler_triton import (
+        get_qaic_triton_kernels,
     )
 
-    assert output.cpu().tolist() == [99, 99, 5, 5, 5, 7]
+    max_spec_len = 3
+    vocab_size = 8
+    draft_cpu = torch.tensor([1, 2, 3, 4, 5], dtype=torch.int32)
+    cu_tokens_cpu = torch.tensor([0, 2, 5], dtype=torch.int32)
+    bonus_cpu = torch.tensor([7, 6, 5], dtype=torch.int32)
+    is_greedy_cpu = torch.tensor([True, False, False], dtype=torch.bool)
+    uniform_cpu = torch.ones(5, dtype=torch.float32)
+    target_cpu = torch.full((5, vocab_size), 0.01, dtype=probability_dtype)
+    for token_index, token_id in enumerate(draft_cpu.tolist()):
+        target_cpu[token_index, token_id] = 0.75
+        target_cpu[token_index, (token_id + 1) % vocab_size] = 0.9
+    inv_q_cpu = torch.ones((3, vocab_size), dtype=torch.float32)
 
-
-def test_expand_kernel_empty_batch(device):
-    output = torch.zeros(0, dtype=torch.long, device=device)
-    inputs = torch.zeros(0, dtype=torch.long, device=device)
-    cumulative_tokens = torch.zeros(0, dtype=torch.long, device=device)
-
-    _expand_kernel_pyt(output, inputs, cumulative_tokens, 0, 0)
-
-    assert output.cpu().tolist() == []
-
-
-def _output(batch_size: int, max_spec_len: int, device: torch.device):
-    return torch.full(
-        (batch_size, max_spec_len + 1),
-        PLACEHOLDER_TOKEN_ID,
+    expected_recovered = torch.tensor([2, 3, 4, 5, 6], dtype=torch.int32)
+    expected_output = torch.tensor(
+        [[-1, -1, -1, -1], [2, -1, -1, -1], [4, -1, -1, -1]],
         dtype=torch.int32,
-        device=device,
     )
-
-
-def test_greedy_accepts_all_and_appends_bonus(device):
-    output = _output(1, 3, device)
-    cumulative_tokens = torch.tensor([2], device=device)
-    draft_tokens = torch.tensor([5, 5], device=device)
-    target_argmax = torch.tensor([5, 5], device=device)
-    bonus_tokens = torch.tensor([99], device=device)
-
-    _rejection_greedy_sample_kernel_pyt(
-        output,
-        cumulative_tokens,
-        draft_tokens,
-        target_argmax,
-        bonus_tokens,
-        None,
-        3,
-        None,
-        None,
-        SYNTHETIC_MODE=False,
+    draft = draft_cpu.to(qaic_device).contiguous()
+    cu_tokens = cu_tokens_cpu.to(qaic_device)
+    target_probs = target_cpu.to(qaic_device)
+    recovered = torch.full((5,), -1, dtype=torch.int32, device=qaic_device)
+    output = torch.full(
+        (3, max_spec_len + 1), -1, dtype=torch.int32, device=qaic_device
     )
-
-    assert output.cpu().tolist() == [[5, 5, 99, PLACEHOLDER_TOKEN_ID]]
-
-
-def test_greedy_stops_at_first_mismatch(device):
-    output = _output(1, 3, device)
-    cumulative_tokens = torch.tensor([2], device=device)
-    draft_tokens = torch.tensor([7, 8], device=device)
-    target_argmax = torch.tensor([9, 8], device=device)
-    bonus_tokens = torch.tensor([99], device=device)
-
-    _rejection_greedy_sample_kernel_pyt(
-        output,
-        cumulative_tokens,
-        draft_tokens,
-        target_argmax,
-        bonus_tokens,
-        None,
-        3,
-        None,
-        None,
-        SYNTHETIC_MODE=False,
-    )
-
-    assert output.cpu().tolist() == [[9, -1, -1, -1]]
-
-
-def test_greedy_handles_multiple_requests(device):
-    output = _output(2, 3, device)
-    cumulative_tokens = torch.tensor([2, 4], device=device)
-    draft_tokens = torch.tensor([5, 5, 7, 8], device=device)
-    target_argmax = torch.tensor([5, 5, 9, 8], device=device)
-    bonus_tokens = torch.tensor([99, 88], device=device)
-
-    _rejection_greedy_sample_kernel_pyt(
-        output,
-        cumulative_tokens,
-        draft_tokens,
-        target_argmax,
-        bonus_tokens,
-        None,
-        3,
-        None,
-        None,
-        SYNTHETIC_MODE=False,
-    )
-
-    assert output.cpu().tolist() == [
-        [5, 5, 99, -1],
-        [9, -1, -1, -1],
-    ]
-
-
-def test_random_accepts_all_when_uniform_is_zero(device):
-    output = _output(1, 3, device)
-    cumulative_tokens = torch.tensor([2], device=device)
-    draft_tokens = torch.tensor([1, 2], device=device)
-    target_probs = torch.full((2, 4), 0.5, device=device)
-    bonus_tokens = torch.tensor([99], device=device)
-    recovered_tokens = torch.zeros(2, dtype=torch.int32, device=device)
-    uniform_probs = torch.zeros(2, device=device)
-    is_greedy = torch.tensor([False], device=device)
-
-    _rejection_random_sample_kernel_pyt(
-        output,
-        cumulative_tokens,
-        draft_tokens,
+    _sample_recovered_tokens_kernel_pyt(
+        recovered,
+        cu_tokens,
+        draft,
         None,
         target_probs,
-        bonus_tokens,
-        recovered_tokens,
-        uniform_probs,
-        is_greedy,
-        3,
-        4,
+        inv_q_cpu.to(qaic_device),
+        vocab_size,
+        BLOCK_SIZE=8,
+        NO_DRAFT_PROBS=True,
+        USE_FP64_GUMBEL=False,
+    )
+
+    triton_kernels = get_qaic_triton_kernels()
+    triton_kernels.rejection_random_sample_kernel[(3,)](
+        output,
+        cu_tokens,
+        draft,
+        None,
+        target_probs,
+        bonus_cpu.to(qaic_device),
+        recovered,
+        uniform_cpu.to(qaic_device),
+        is_greedy_cpu.to(qaic_device),
+        max_spec_len,
+        vocab_size,
         None,
         NO_DRAFT_PROBS=True,
         SYNTHETIC_MODE=False,
     )
+    torch.qaic.synchronize()
 
-    assert output.cpu().tolist() == [[1, 2, 99, -1]]
-
-
-def test_random_recovers_after_rejection(device):
-    output = _output(1, 3, device)
-    cumulative_tokens = torch.tensor([2], device=device)
-    draft_tokens = torch.tensor([1, 2], device=device)
-    target_probs = torch.full((2, 4), 0.5, device=device)
-    bonus_tokens = torch.tensor([99], device=device)
-    recovered_tokens = torch.tensor([42, 43], device=device)
-    uniform_probs = torch.ones(2, device=device)
-    is_greedy = torch.tensor([False], device=device)
-
-    _rejection_random_sample_kernel_pyt(
-        output,
-        cumulative_tokens,
-        draft_tokens,
-        None,
-        target_probs,
-        bonus_tokens,
-        recovered_tokens,
-        uniform_probs,
-        is_greedy,
-        3,
-        4,
-        None,
-        NO_DRAFT_PROBS=True,
-        SYNTHETIC_MODE=False,
-    )
-
-    assert output.cpu().tolist() == [[42, -1, -1, -1]]
-
-
-def test_random_skips_greedy_requests(device):
-    output = _output(1, 3, device)
-    cumulative_tokens = torch.tensor([2], device=device)
-    draft_tokens = torch.tensor([1, 2], device=device)
-    target_probs = torch.full((2, 4), 0.5, device=device)
-    bonus_tokens = torch.tensor([99], device=device)
-    recovered_tokens = torch.zeros(2, dtype=torch.int32, device=device)
-    uniform_probs = torch.zeros(2, device=device)
-    is_greedy = torch.tensor([True], device=device)
-
-    _rejection_random_sample_kernel_pyt(
-        output,
-        cumulative_tokens,
-        draft_tokens,
-        None,
-        target_probs,
-        bonus_tokens,
-        recovered_tokens,
-        uniform_probs,
-        is_greedy,
-        3,
-        4,
-        None,
-        NO_DRAFT_PROBS=True,
-        SYNTHETIC_MODE=False,
-    )
-
-    assert output.cpu().tolist() == [[-1, -1, -1, -1]]
+    assert draft.dtype == torch.int32
+    assert draft.device.type == "qaic"
+    assert draft.is_contiguous()
+    assert recovered.dtype == torch.int32
+    assert recovered.device.type == "qaic"
+    assert recovered.is_contiguous()
+    assert torch.equal(recovered.cpu(), expected_recovered)
+    assert output.dtype == torch.int32
+    assert output.device.type == "qaic"
+    assert torch.equal(output.cpu(), expected_output)
 
 
 def test_recovered_tokens_mask_draft_column(device):
@@ -275,6 +198,37 @@ def test_recovered_tokens_mask_draft_column(device):
     assert output.cpu().tolist() == [3, 4]
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
+@pytest.mark.parametrize("noncontiguous", [False, True])
+def test_recovered_tokens_masks_int64_boundary_ids(device, dtype, noncontiguous):
+    target_probs = torch.tensor(
+        [
+            [0.9, 0.8, 0.1, 0.2, 0.3],
+            [0.5, 0.1, 0.2, 0.3, 0.95],
+            [0.1, 0.2, 0.9, 0.8, 0.3],
+        ],
+        dtype=dtype,
+    )
+    if noncontiguous:
+        target_probs = target_probs.t().contiguous().t()
+
+    output = torch.zeros(3, dtype=torch.int32, device=device)
+    _sample_recovered_tokens_kernel_pyt(
+        output,
+        torch.tensor([1, 3], device=device),
+        torch.tensor([0, 4, 2], dtype=torch.int64, device=device),
+        None,
+        target_probs.to(device),
+        torch.ones((2, 5), dtype=dtype, device=device),
+        5,
+        NO_DRAFT_PROBS=True,
+        USE_FP64_GUMBEL=False,
+    )
+
+    assert output.device.type == device.type
+    assert output.cpu().tolist() == [1, 0, 3]
+
+
 def test_recovered_tokens_uses_clamped_target_minus_draft(device):
     output = torch.zeros(1, dtype=torch.int32, device=device)
 
@@ -294,21 +248,28 @@ def test_recovered_tokens_uses_clamped_target_minus_draft(device):
 
 
 def test_recovered_tokens_skips_zero_draft_requests(device):
-    output = torch.full((1,), -7, dtype=torch.int32, device=device)
+    output = torch.full((3,), -7, dtype=torch.int32, device=device)
 
     _sample_recovered_tokens_kernel_pyt(
         output,
-        torch.tensor([0, 1], device=device),
-        torch.tensor([3], device=device),
+        torch.tensor([1, 1, 3], device=device),
+        torch.tensor([0, 4, 2], dtype=torch.int64, device=device),
         None,
-        torch.tensor([[0.5, 0.2, 0.9, 0.1]], device=device),
-        torch.ones((2, 4), device=device),
-        4,
+        torch.tensor(
+            [
+                [0.9, 0.8, 0.1, 0.2, 0.3],
+                [0.5, 0.1, 0.2, 0.3, 0.95],
+                [0.1, 0.2, 0.9, 0.8, 0.3],
+            ],
+            device=device,
+        ),
+        torch.ones((3, 5), device=device),
+        5,
         NO_DRAFT_PROBS=True,
         USE_FP64_GUMBEL=False,
     )
 
-    assert output.cpu().tolist() == [2]
+    assert output.cpu().tolist() == [1, 0, 3]
 
 
 def test_generate_uniform_probs_uses_float32(device):
@@ -363,9 +324,7 @@ def test_native_top_k_matches_cpu_reference(device):
         dtype=torch.float32,
     )
     top_k = torch.tensor([2, 3], dtype=torch.int64)
-    expected = topk_topp_module.apply_top_k_top_p_pytorch(
-        logits.clone(), top_k, None
-    )
+    expected = topk_topp_module.apply_top_k_top_p_pytorch(logits.clone(), top_k, None)
 
     actual = topk_topp_module.apply_top_k_top_p_pytorch(
         logits.to(device).clone(), top_k.to(device), None
@@ -386,9 +345,7 @@ def test_native_mixed_greedy_random_selection_matches_cpu_reference(device):
         def forward(self, logits, generators, top_k, top_p):
             return self.sampled, None
 
-    logits = torch.tensor(
-        [[0.1, 0.7, 0.2], [0.4, 0.3, 0.9]], dtype=torch.float32
-    )
+    logits = torch.tensor([[0.1, 0.7, 0.2], [0.4, 0.3, 0.9]], dtype=torch.float32)
     temperatures = torch.tensor([0.0, 0.5], dtype=torch.float32)
     random_sampled = torch.tensor([0, 1], dtype=torch.int64)
     expected = torch.tensor([1, 1], dtype=torch.int64)
@@ -425,9 +382,7 @@ def test_native_top_p_matches_cpu_predicate(device):
     expected = topk_topp_module.apply_top_k_top_p_pytorch(
         logits.cpu().clone(), None, top_p.cpu()
     )
-    actual = topk_topp_module.apply_top_k_top_p_pytorch(
-        logits.clone(), None, top_p
-    )
+    actual = topk_topp_module.apply_top_k_top_p_pytorch(logits.clone(), None, top_p)
 
     assert actual.device.type == device.type
     assert torch.equal(actual.cpu(), expected.cpu())
@@ -438,19 +393,21 @@ def test_install_patches_rejection_sampler_idempotently():
     import vllm.v1.sample.sampler as sampler_module
     import vllm.v1.sample.ops.topk_topp_sampler as topk_topp_module
     import vllm_qaic.v1.sample.rejection_sampler_shim as shim
+    from vllm_qaic.v1.sample import rejection_sampler_triton as triton_sampler
 
     original_apply_temperature = sampler_module.Sampler.apply_temperature
     original_sample = sampler_module.Sampler.sample
     original_top_k_top_p = topk_topp_module.apply_top_k_top_p_pytorch
     install()
-    assert rejection_sampler.expand_kernel is shim.expand_kernel
+    assert shim._selected_implementation() == "triton"
+    assert rejection_sampler.expand_kernel is triton_sampler.expand_kernel
     assert (
         rejection_sampler.rejection_greedy_sample_kernel
-        is shim.rejection_greedy_sample_kernel
+        is triton_sampler.rejection_greedy_sample_kernel
     )
     assert (
         rejection_sampler.rejection_random_sample_kernel
-        is shim.rejection_random_sample_kernel
+        is triton_sampler.rejection_random_sample_kernel
     )
     assert (
         rejection_sampler.sample_recovered_tokens_kernel
@@ -462,4 +419,105 @@ def test_install_patches_rejection_sampler_idempotently():
     assert topk_topp_module.apply_top_k_top_p_pytorch is original_top_k_top_p
 
     install()
-    assert rejection_sampler.expand_kernel is shim.expand_kernel
+    assert rejection_sampler.expand_kernel is triton_sampler.expand_kernel
+    for deleted_kernel in (
+        "_expand_kernel_pyt",
+        "_rejection_greedy_sample_kernel_pyt",
+        "_rejection_random_sample_kernel_pyt",
+    ):
+        assert not hasattr(shim, deleted_kernel)
+
+
+@pytest.mark.skipif(
+    not _has_qualcomm_triton_backend(),
+    reason="Qualcomm Triton backend is not installed",
+)
+@pytest.mark.parametrize("implementation", [None, "hybrid"])
+def test_default_and_legacy_selector_patch_triton_objects_in_subprocess(
+    implementation,
+):
+    result = _run_selector_subprocess(
+        implementation,
+        """
+        import vllm.v1.sample.rejection_sampler as rejection_sampler
+        import vllm_qaic.v1.sample.rejection_sampler_shim as shim
+        from vllm_qaic.v1.sample import rejection_sampler_triton as triton_sampler
+
+        shim.install()
+        assert shim._selected_implementation() == "triton"
+        assert rejection_sampler.expand_kernel is triton_sampler.expand_kernel
+        assert rejection_sampler.rejection_greedy_sample_kernel is triton_sampler.rejection_greedy_sample_kernel
+        assert rejection_sampler.rejection_random_sample_kernel is triton_sampler.rejection_random_sample_kernel
+        assert rejection_sampler.sample_recovered_tokens_kernel is shim.sample_recovered_tokens_kernel
+        assert rejection_sampler.generate_uniform_probs is shim.generate_uniform_probs
+        """,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_pytorch_selector_fails_actionably_in_subprocess():
+    result = _run_selector_subprocess(
+        "pytorch",
+        """
+        import vllm_qaic.v1.sample.rejection_sampler_shim as shim
+
+        shim.install()
+        """,
+    )
+
+    assert result.returncode != 0
+    assert "pytorch is no longer supported" in result.stderr
+    assert "fallback" in result.stderr
+
+
+def test_invalid_selector_fails_actionably_in_subprocess():
+    result = _run_selector_subprocess(
+        "invalid",
+        """
+        import vllm_qaic.v1.sample.rejection_sampler_shim as shim
+
+        shim.install()
+        """,
+    )
+
+    assert result.returncode != 0
+    assert "must be unset or 'hybrid'" in result.stderr
+
+
+def test_legacy_alias_can_be_selected_after_default_install_in_subprocess():
+    result = _run_selector_subprocess(
+        None,
+        """
+        import os
+        import vllm_qaic.v1.sample.rejection_sampler_shim as shim
+
+        shim.install()
+        os.environ["VLLM_QAIC_REJECTION_SAMPLER_IMPL"] = "hybrid"
+        shim.install()
+        """,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_default_selector_reports_unavailable_backend(monkeypatch):
+    import vllm_qaic.v1.sample.rejection_sampler_shim as shim
+
+    unavailable_backend = ModuleType("vllm_qaic.v1.sample.rejection_sampler_triton")
+
+    def get_qaic_triton_kernels():
+        raise RuntimeError("Qualcomm Triton backend is unavailable")
+
+    unavailable_backend.get_qaic_triton_kernels = get_qaic_triton_kernels
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm_qaic.v1.sample.rejection_sampler_triton",
+        unavailable_backend,
+    )
+    monkeypatch.delenv("VLLM_QAIC_REJECTION_SAMPLER_IMPL", raising=False)
+    monkeypatch.setattr(shim, "_shim_installed", False)
+    monkeypatch.setattr(shim, "_shim_mode", None)
+
+    with pytest.raises(RuntimeError, match="qcom_hexagon_backend"):
+        shim.install()
