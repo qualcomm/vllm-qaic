@@ -664,10 +664,7 @@ class QaicWorkerAoT(QaicWorker):
                 # based on the max model length and block size.
                 self.cache_config.num_gpu_blocks = (
                     self.scheduler_config.max_num_seqs
-                    * (
-                        self.model_config.max_model_len
-                        // self.cache_config.block_size
-                    )
+                    * (self.model_config.max_model_len // self.cache_config.block_size)
                     + 1
                 )
 

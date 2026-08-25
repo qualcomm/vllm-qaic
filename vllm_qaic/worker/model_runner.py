@@ -1591,15 +1591,15 @@ class QaicModelRunnerAoT(GPUModelRunner):
                     self.vllm_config,
                     self.device,
                 )
-        if self.model.paged_attention:
-            decode_block_table = np.arange(
-                self.model.decode_bsz * self.model.num_gpu_blocks_per_batch,
-                dtype=np.int64,
-            ).reshape(self.model.decode_bsz, self.model.num_gpu_blocks_per_batch)
-            decode_slot_ids = np.zeros(self.model.decode_bsz, dtype=np.int64)
-        else:
-            decode_block_table = None
-            decode_slot_ids = None
+        # if self.model.paged_attention:
+        #     decode_block_table = np.arange(
+        #         self.model.decode_bsz * self.model.num_gpu_blocks_per_batch,
+        #         dtype=np.int64,
+        #     ).reshape(self.model.decode_bsz, self.model.num_gpu_blocks_per_batch)
+        #     decode_slot_ids = np.zeros(self.model.decode_bsz, dtype=np.int64)
+        # else:
+        #     decode_block_table = None
+        #     decode_slot_ids = None
         self.kv_cache_info = (
             self.model.kv_cache_info if self.model.disagg_serving_en else None
         )

@@ -148,13 +148,12 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self.ctx_len = model_config.max_model_len
         self.decode_bsz = vllm_config.scheduler_config.max_num_seqs
         self.full_batch_size = vllm_config.scheduler_config.max_num_seqs
-        self.num_gpu_blocks_per_batch = self.ctx_len // vllm_config.cache_config.block_size
+        # block_size may be None here (vLLM v1 populates it after
+        # determine_num_available_blocks); deferred to load_model.
+        self._vllm_config = vllm_config
+        self.num_gpu_blocks_per_batch = None  # set in load_model
         if vllm_config.cache_config.enable_prefix_caching:
-            self.num_gpu_blocks = (
-                vllm_config.cache_config.num_gpu_blocks_override
-                if vllm_config.cache_config.num_gpu_blocks_override
-                else self.ctx_len // vllm_config.cache_config.block_size
-            )
+            self.num_gpu_blocks = None  # set in load_model
         else:
             self.num_gpu_blocks = self.decode_bsz
         self.paged_attention = bool(vllm_config.cache_config.enable_prefix_caching)
@@ -381,6 +380,18 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self.disagg_serving_en = kv_transfer_role is not None
         self.disagg_producer_en = kv_transfer_role == "kv_producer"
 
+        # block_size is now populated (set during cache initialisation)
+        cache_config = self._vllm_config.cache_config
+        self.num_gpu_blocks_per_batch = self.ctx_len // cache_config.block_size
+        if self.paged_attention:
+            self.num_gpu_blocks = (
+                cache_config.num_gpu_blocks_override
+                if cache_config.num_gpu_blocks_override
+                else self.ctx_len // cache_config.block_size
+            )
+        else:
+            self.num_gpu_blocks = self.decode_bsz
+
         logger.info("Loading QPC...")
         logger.info(
             "This may take some time, please don't press CTRL-C during this phase..."
@@ -393,10 +404,20 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             self.stages = 1
         from .qaic_session_np import QAICInferenceSession
 
+        # qaicrt uses virtual device IDs (0-based within QAIC_VISIBLE_DEVICES).
+        # Translate physical device IDs to virtual IDs before creating the session.
+        _visible = os.environ.get(current_platform.device_control_env_var)
+        if _visible is not None:
+            _visible_ids = [int(x) for x in _visible.replace(",", " ").split()]
+            _phys_to_virt = {phys: virt for virt, phys in enumerate(_visible_ids)}
+            session_device_ids = [_phys_to_virt.get(d, d) for d in device_id]
+        else:
+            session_device_ids = device_id
+
         self.session = QAICInferenceSession(
             qpc_path,
             full_batch_size=self.full_batch_size,
-            device_ids=device_id,
+            device_ids=session_device_ids,
             stages=self.stages,
             cluster_id=cluster_id,
             use_async_scheduling=self.use_async_scheduling,
@@ -925,7 +946,9 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 self.decode_batch_inputs["block_table"][:num_decodes] = block_table[
                     :num_decodes
                 ]
-                self.decode_batch_inputs["slot_id"][:num_decodes] = slot_id[:num_decodes]
+                self.decode_batch_inputs["slot_id"][:num_decodes] = slot_id[
+                    :num_decodes
+                ]
                 if num_decodes < self.decode_bsz:
                     self.decode_batch_inputs["block_table"][num_decodes:] = -1
                     self.decode_batch_inputs["slot_id"][num_decodes:] = 0
@@ -1968,10 +1991,22 @@ def _get_qaic_compile_config(
         from qaicrt import QStatus
 
         if cfg["device_group"] is not None:
+            # qaicrt uses virtual device IDs (0-based within QAIC_VISIBLE_DEVICES).
+            # Physical device IDs from device_group must be translated to virtual
+            # IDs before calling getResourceInfo.
+            _visible = os.environ.get(current_platform.device_control_env_var)
+            if _visible is not None:
+                _visible_ids = [int(x) for x in _visible.replace(",", " ").split()]
+                _phys_to_virt = {phys: virt for virt, phys in enumerate(_visible_ids)}
+            else:
+                _phys_to_virt = {}
             for id in cfg["device_group"]:
-                _nsp_info = qaic_util().getResourceInfo(id)
+                virt_id = _phys_to_virt.get(id, id)
+                _nsp_info = qaic_util().getResourceInfo(virt_id)
                 if _nsp_info[0] != QStatus.QS_SUCCESS:
-                    raise ValueError(f"device_id {id} is not available !!")
+                    raise ValueError(
+                        f"device_id {id} (virtual {virt_id}) is not available !!"
+                    )
                 _hw_num_cores = min(_hw_num_cores, _nsp_info[1].nspTotal)
         cfg["num_cores"] = _hw_num_cores
         # Applicable for draft-target spd scheme
@@ -2140,15 +2175,18 @@ def _get_qaic_compile_config(
     # off between producer and consumer stay aligned. Written here, before
     # get_kv_cache_spec() is queried, so the updated value is picked up when
     # the KV cache is sized.
-    if vllm_config.kv_transfer_config:
-        vllm_config.cache_config.block_size = cfg["kv_block_size"]
-    else:
-        vllm_config.cache_config.block_size = cfg["prefill_seq_len"]
 
-    # Add num_kv_blocks through qaic_config
-    num_kv_blocks = vllm_config.model_config.max_model_len // vllm_config.cache_config.block_size
-    logger.info("Num KV Blocks: %s", num_kv_blocks)
     if vllm_config.cache_config.enable_prefix_caching:
+        # Add num_kv_blocks through qaic_config
+        if vllm_config.kv_transfer_config:
+            num_kv_blocks = (
+                vllm_config.model_config.max_model_len // cfg["kv_block_size"]
+            )
+        else:
+            num_kv_blocks = (
+                vllm_config.model_config.max_model_len // cfg["prefill_seq_len"]
+            )
+        logger.info("Num KV Blocks: %s", num_kv_blocks)
         qaic_config["num_kv_blocks"] = num_kv_blocks
         qaic_config["blocking_mode"] = "kv_paged"
         qaic_config["enable_blocking"] = True
