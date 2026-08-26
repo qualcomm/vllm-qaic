@@ -130,6 +130,7 @@ curl http://localhost:8000/metrics
 ```
 
 Key metrics for QAIC:
+
 - `vllm:num_requests_running` — active requests
 - `vllm:num_requests_waiting` — queued requests
 - `vllm:generation_tokens_total` — total generated tokens

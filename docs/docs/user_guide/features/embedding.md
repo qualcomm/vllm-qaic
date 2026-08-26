@@ -21,6 +21,7 @@ Embedding networks transform high-dimensional inputs — text, images, items —
 ## Usage
 
 "embed" example
+
 ```python
 from vllm import LLM
 

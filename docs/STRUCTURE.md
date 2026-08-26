@@ -8,7 +8,7 @@ Built for eventual deployment at `https://quic.github.io/vllm-qaic/` and later m
 
 ## Directory Tree
 
-```
+```text
 qaic_docs/
 ├── mkdocs.yml                              # MkDocs Material configuration
 ├── requirements-docs.txt                   # Doc build dependencies
@@ -61,8 +61,7 @@ qaic_docs/
     │
     └── profiling/
         └── index.md                        # Top-level profiling quick reference (legacy)
-```
-
+```text
 ---
 
 ## Navigation Structure
@@ -122,8 +121,7 @@ cd qaic_docs
 pip install -r requirements-docs.txt
 mkdocs serve    # Local preview at http://127.0.0.1:8000
 mkdocs build    # Static site in site/
-```
-
+```text
 ---
 
 ## Content Sources
