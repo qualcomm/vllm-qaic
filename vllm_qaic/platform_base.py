@@ -15,6 +15,7 @@ import torch
 
 from vllm_qaic.logger import init_logger
 from vllm.platforms import Platform, PlatformEnum
+from vllm.triton_utils import HAS_TRITON
 from vllm.utils.import_utils import PlaceholderModule
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -51,9 +52,16 @@ class QaicPlatform(Platform):
         "vllm_qaic.attention.backends.qaic_attn.QAicTorchAttentionBackend"
     )
     if os.environ.get("VLLM_QAIC_ENABLE_TRITON_ATTN") == "1":
-        primary_attn_backend_cls = (
-            "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"
-        )
+        if HAS_TRITON:
+            primary_attn_backend_cls = (
+                "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"
+            )
+        else:
+            logger.warning(
+                "VLLM_QAIC_ENABLE_TRITON_ATTN=1 but Triton is not installed; "
+                "keeping the QAIC attention backend %s",
+                primary_attn_backend_cls,
+            )
     device_name: str = "qaic"
     # Set device type to cpu if it's AOT.
     # This is a workaround for online serving's AsyncEngineArgs.
@@ -137,6 +145,13 @@ class QaicPlatform(Platform):
         if cls.is_aot:
             raise NotImplementedError
         return torch_qaic.qaic.get_device_info(device_id).per_core_hvx_thread_count
+
+    @classmethod
+    def num_compute_units(cls, device_id: int = 0) -> int:
+        # matmul_persistent (batch_invariant Triton GEMM) sizes its persistent
+        # launch grid by this; map it to the NSP core count. Without this,
+        # matmul_persistent raises NotImplementedError on QAIC.
+        return cls.get_num_cores(device_id)
 
     @classmethod
     def check_if_supports_dtype(cls, dtype: torch.dtype):
@@ -505,6 +520,38 @@ class QaicPlatform(Platform):
             raise NotImplementedError("QAic doesn't support sparse attention")
 
         return cls.primary_attn_backend_cls
+
+    @classmethod
+    def get_supported_vit_attn_backends(cls) -> list[AttentionBackendEnum]:
+        backends = [AttentionBackendEnum.TORCH_SDPA]
+        if HAS_TRITON:
+            backends.append(AttentionBackendEnum.TRITON_ATTN)
+        return backends
+
+    @classmethod
+    def get_vit_attn_backend(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        backend: AttentionBackendEnum | None = None,
+    ) -> AttentionBackendEnum:
+        """Select the ViT (multimodal encoder) attention backend for QAIC.
+
+        ``QAicMMEncoderAttention.forward_oot`` dispatches to vLLM's Triton ViT
+        prefill kernel when ``VLLM_QAIC_TRITON_MM_ENCODER_ATTENTION=1``.
+        Reporting TRITON_ATTN here keeps the metadata consistent with the kernel
+        actually being invoked.
+        """
+        from vllm_qaic.ops._triton_flags import triton_op_enabled
+
+        if backend is None and triton_op_enabled("MM_ENCODER_ATTENTION"):
+            logger.info_once(
+                "VLLM_QAIC_TRITON_MM_ENCODER_ATTENTION=1: using %s for vit attention",
+                AttentionBackendEnum.TRITON_ATTN,
+            )
+            return AttentionBackendEnum.TRITON_ATTN
+
+        return super().get_vit_attn_backend(head_size, dtype, backend=backend)
 
     @classmethod
     def _configure_multimodal_model(
