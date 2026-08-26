@@ -3,7 +3,6 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 // ---------------------------------------------------------------------------------------
 
-#include <math.h>
 #include <stdint.h>
 
 #include "QAicHexagonHVX.h"
@@ -99,6 +98,14 @@ inline float reduce_sum_vsf_pair(HVX_VectorPair acc_pair) {
   return acc;
 }
 
+inline HVX_Vector load_partial_hf_zero(const float16* ptr, int32_t elements) {
+  const int32_t bytes = elements * (int32_t)sizeof(float16);
+  const HVX_Vector value =
+      LoadUnaligned<HVX_Vector>((const int8_t*)ptr, (uint32_t)bytes);
+  const HVX_VectorPred valid = Q6_Q_vsetq2_R(bytes);
+  return Q6_V_vmux_QVV(valid, value, Q6_V_vzero());
+}
+
 inline float dot_hf_hf_to_float(const float16* lhs,
                                 const float16* rhs,
                                 int32_t size) {
@@ -119,11 +126,22 @@ inline float dot_hf_hf_to_float(const float16* lhs,
         acc_hi, Q6_Vsf_vmpy_VsfVsf(Q6_V_hi_W(lhs_pair), Q6_V_hi_W(rhs_pair)));
   }
 
-  float acc = reduce_sum_vsf_pair(Q6_W_vcombine_VV(acc_hi, acc_lo));
-  for (int32_t i = vector_elems; i < size; ++i) {
-    acc += (float)lhs[i] * (float)rhs[i];
+  const int32_t remaining = size - vector_elems;
+  if (remaining == 0) {
+    return reduce_sum_vsf_pair(Q6_W_vcombine_VV(acc_hi, acc_lo));
   }
-  return acc;
+
+  const HVX_Vector lhs_vhf =
+      load_partial_hf_zero(lhs + vector_elems, remaining);
+  const HVX_Vector rhs_vhf =
+      load_partial_hf_zero(rhs + vector_elems, remaining);
+  const HVX_VectorPair lhs_pair = Q6_Wsf_vcvt_Vhf(lhs_vhf);
+  const HVX_VectorPair rhs_pair = Q6_Wsf_vcvt_Vhf(rhs_vhf);
+  acc_lo = Q6_Vsf_vadd_VsfVsf(
+      acc_lo, Q6_Vsf_vmpy_VsfVsf(Q6_V_lo_W(lhs_pair), Q6_V_lo_W(rhs_pair)));
+  acc_hi = Q6_Vsf_vadd_VsfVsf(
+      acc_hi, Q6_Vsf_vmpy_VsfVsf(Q6_V_hi_W(lhs_pair), Q6_V_hi_W(rhs_pair)));
+  return reduce_sum_vsf_pair(Q6_W_vcombine_VV(acc_hi, acc_lo));
 }
 
 
@@ -199,6 +217,44 @@ inline HVX_Vector clamp_vec_hf(HVX_Vector value_vhf, float min_value, float max_
   return Q6_V_vmux_QVV(too_high, max_vhf, value_vhf);
 }
 
+inline __attribute__((always_inline)) HVX_Vector apply_activation_hvx(
+    HVX_Vector gate_vhf, HVX_Vector up_vhf, int32_t activation_id) {
+  if (activation_id == kSiluNoMul) {
+    return silu_vec_hf(gate_vhf);
+  }
+  if (activation_id == kGeluNoMul) {
+    return gelu_exact_vec_hf(gate_vhf);
+  }
+  if (activation_id == kGeluTanhNoMul) {
+    return gelu_tanh_approx_vec_hf(gate_vhf);
+  }
+  if (activation_id == kRelu2NoMul) {
+    return relu2_vec_hf(gate_vhf);
+  }
+  if (activation_id == kSwigluOAI) {
+    gate_vhf = clamp_max_vec_hf(gate_vhf, 7.0F);
+    up_vhf = clamp_vec_hf(up_vhf, -7.0F, 7.0F);
+    const HVX_Vector sigmoid_arg =
+        Q6_Vhf_vmpy_VhfVhf(gate_vhf, splat_hf(1.702F));
+    const HVX_Vector swish_gate =
+        Q6_Vhf_vmpy_VhfVhf(gate_vhf, qaic_sigmoid_hf(sigmoid_arg));
+    return Q6_Vhf_vmpy_VhfVhf(
+        Q6_Vhf_vadd_VhfVhf(up_vhf, splat_hf(1.0F)), swish_gate);
+  }
+  if (activation_id == kSwigluStep) {
+    gate_vhf = clamp_max_vec_hf(silu_vec_hf(gate_vhf), 7.0F);
+    up_vhf = clamp_vec_hf(up_vhf, -7.0F, 7.0F);
+    return Q6_Vhf_vmpy_VhfVhf(gate_vhf, up_vhf);
+  }
+
+  const HVX_Vector activated = activation_id == kSilu
+                                   ? silu_vec_hf(gate_vhf)
+                                   : activation_id == kGelu
+                                         ? gelu_exact_vec_hf(gate_vhf)
+                                         : gelu_tanh_approx_vec_hf(gate_vhf);
+  return Q6_Vhf_vmpy_VhfVhf(activated, up_vhf);
+}
+
 
 inline void apply_activation_vec(const float16* gate_up,
                                  float16* hidden,
@@ -248,62 +304,19 @@ inline void apply_activation_vec(const float16* gate_up,
     StoreUnalignedHVX((int8_t*)(hidden + offset), out_vhf);
   }
 
-  for (int32_t i = vector_elems; i < intermediate_size; ++i) {
-    float value;
-    if (activation_id == kSiluNoMul) {
-      const float gate = (float)gate_up[i];
-      value = gate * (0.5F * tanhf(0.5F * gate) + 0.5F);
-    } else if (activation_id == kGeluNoMul) {
-      const float gate = (float)gate_up[i];
-      value = 0.5F * gate * (1.0F + erff(gate * 0.7071067811865475F));
-    } else if (activation_id == kGeluTanhNoMul) {
-      const float gate = (float)gate_up[i];
-      const float gate3 = gate * gate * gate;
-      value = 0.5F * gate *
-              (1.0F + tanhf(0.7978845608028654F *
-                             (gate + 0.044715F * gate3)));
-    } else if (activation_id == kRelu2NoMul) {
-      value = (float)gate_up[i];
-      value = value > 0.0F ? value : 0.0F;
-      value *= value;
-    } else {
-      float gate = (float)gate_up[i];
-      float up = (float)gate_up[intermediate_size + i];
-      if (activation_id == kSwigluOAI) {
-        gate = gate < 7.0F ? gate : 7.0F;
-        if (up < -7.0F) {
-          up = -7.0F;
-        } else if (up > 7.0F) {
-          up = 7.0F;
-        }
-        const float sigmoid_arg = 1.702F * gate;
-        value = (up + 1.0F) * gate *
-                (0.5F * tanhf(0.5F * sigmoid_arg) + 0.5F);
-      } else if (activation_id == kSwigluStep) {
-        gate = gate * (0.5F * tanhf(0.5F * gate) + 0.5F);
-        gate = gate < 7.0F ? gate : 7.0F;
-        if (up < -7.0F) {
-          up = -7.0F;
-        } else if (up > 7.0F) {
-          up = 7.0F;
-        }
-        value = gate * up;
-      } else {
-        float activated;
-        if (activation_id == kSilu) {
-          activated = gate * (0.5F * tanhf(0.5F * gate) + 0.5F);
-        } else if (activation_id == kGelu) {
-          activated = 0.5F * gate * (1.0F + erff(gate * 0.7071067811865475F));
-        } else {
-          const float gate3 = gate * gate * gate;
-          activated = 0.5F * gate *
-                      (1.0F + tanhf(0.7978845608028654F *
-                                     (gate + 0.044715F * gate3)));
-        }
-        value = activated * up;
-      }
-    }
-    hidden[i] = (float16)value;
+  const int32_t remaining = intermediate_size - vector_elems;
+  if (remaining > 0) {
+    const HVX_Vector gate_vhf =
+        load_partial_hf_zero(gate_up + vector_elems, remaining);
+    const HVX_Vector up_vhf =
+        activation_is_no_mul(activation_id)
+            ? Q6_V_vzero()
+            : load_partial_hf_zero(
+                  gate_up + intermediate_size + vector_elems, remaining);
+    const HVX_Vector out_vhf =
+        apply_activation_hvx(gate_vhf, up_vhf, activation_id);
+    StoreUnalignedHVX((int8_t*)(hidden + vector_elems), out_vhf,
+                      remaining * (int32_t)sizeof(float16));
   }
 }
 
@@ -315,11 +328,12 @@ inline void zero_route_out(float16* route_out, int32_t hidden_size) {
   for (int32_t offset = 0; offset < vector_elems; offset += kElemsPerHalfVector) {
     StoreUnalignedHVX((int8_t*)(route_out + offset), zero);
   }
-  for (int32_t h = vector_elems; h < hidden_size; ++h) {
-    route_out[h] = (float16)0.0F;
+  const int32_t remaining = hidden_size - vector_elems;
+  if (remaining > 0) {
+    StoreUnalignedHVX((int8_t*)(route_out + vector_elems), zero,
+                      remaining * (int32_t)sizeof(float16));
   }
 }
-
 
 inline int32_t w13_dest_index(int32_t row,
                               int32_t intermediate_size,
@@ -1010,14 +1024,20 @@ inline uint32_t reduce_kernel_main(const AicJitEntryPointConfig* cfg,
       HVX_Vector out_vhf = Q6_Vhf_vcvt_VsfVsf(acc_lo, acc_hi);
       StoreUnalignedHVX((int8_t*)(out_row + h), out_vhf);
     } else {
-      for (int32_t offset = 0; offset < elems; ++offset) {
-        float acc = 0.0F;
-        for (int32_t route = 0; route < topk; ++route) {
-          const float16* route_row = route_out + ((int64_t)token * topk + route) * hidden_size;
-          acc += (float)route_row[h + offset];
-        }
-        out_row[h + offset] = (float16)acc;
+      HVX_Vector acc_lo = Q6_V_vzero();
+      HVX_Vector acc_hi = Q6_V_vzero();
+      for (int32_t route = 0; route < topk; ++route) {
+        const float16* route_row =
+            route_out + ((int64_t)token * topk + route) * hidden_size;
+        const HVX_Vector route_vhf =
+            load_partial_hf_zero(route_row + h, elems);
+        const HVX_VectorPair route_pair = Q6_Wsf_vcvt_Vhf(route_vhf);
+        acc_lo = Q6_Vsf_vadd_VsfVsf(acc_lo, Q6_V_lo_W(route_pair));
+        acc_hi = Q6_Vsf_vadd_VsfVsf(acc_hi, Q6_V_hi_W(route_pair));
       }
+      const HVX_Vector out_vhf = Q6_Vhf_vcvt_VsfVsf(acc_lo, acc_hi);
+      StoreUnalignedHVX((int8_t*)(out_row + h), out_vhf,
+                        elems * (int32_t)sizeof(float16));
     }
   }
 
