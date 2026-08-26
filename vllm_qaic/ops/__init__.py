@@ -9,7 +9,7 @@ _QAIC_CUSTOMOP_IS_REGISTERED = False
 def register_qaic_customop():
     """Register QAic Layers specific CustomOP
 
-    NOTE: if the register branch requires model type, please use 
+    NOTE: if the register branch requires model type, please use
     `vllm.config.get_current_vllm_config`, and ensure this will execute after model
     config is initilazed.
     """

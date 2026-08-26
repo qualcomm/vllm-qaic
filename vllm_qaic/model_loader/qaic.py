@@ -125,7 +125,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 self.is_qaic_pooler = True
                 self.normalize = bool(override_qaic_config.get("normalize", False))
                 self.softmax = bool(override_qaic_config.get("softmax", False))
-            # upstream vllm v0.23 removed "score" as a PoolingTask; cross-encoder scoring maps to "classify" instead.
+            # upstream vllm v0.23 removed "score" as a PoolingTask; cross-encoder
+            # scoring maps to "classify" instead.
             _raw_task: str | None = override_qaic_config.get("task", None)
             self.task: str | None = "classify" if _raw_task == "score" else _raw_task
 
@@ -143,7 +144,11 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             assert "prefill_seq_len" in override_qaic_config, (
                 "Prefill seq_len missing in override_qaic_config"
             )
-            self.prefill_seq_len = override_qaic_config["prefill_seq_len"] if isinstance(override_qaic_config["prefill_seq_len"], (list, tuple)) else int(override_qaic_config["prefill_seq_len"])
+            self.prefill_seq_len = (
+                override_qaic_config["prefill_seq_len"]
+                if isinstance(override_qaic_config["prefill_seq_len"], (list, tuple))
+                else int(override_qaic_config["prefill_seq_len"])
+            )
 
         self.ctx_len = model_config.max_model_len
         self.decode_bsz = vllm_config.scheduler_config.max_num_seqs
@@ -663,7 +668,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     # Single batch-wide bucket chosen before the loop; held constant.
                     if comp_ctx_val is not None:
                         chunk_inputs["comp_ctx_lengths"] = comp_ctx_val
-                    # TODO: Workaround for CCL—LRT requires a buffer matching logits shape
+                    # TODO: Workaround for CCL—LRT requires a buffer matching
+                    # logits shape
                     if logits is not None:
                         chunk_inputs["logits"] = logits[index : index + 1]
 
@@ -671,7 +677,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     if callback:
                         callback()
                     logger.debug(
-                        "All execObjs allocated; waiting for pending execObj completion."
+                        "All execObjs allocated; waiting for pending execObj "
+                        "completion."
                     )
                     eid = pending_exec_queue.get(timeout=120)
                     self.complete_inf(eid, True, pipeline_prefill_en=True)
@@ -809,7 +816,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
 
                 if pending_exec_count == self.session.prefill_num_execObj:
                     logger.debug(
-                        "All execObjs allocated; waiting for pending execObj completion."
+                        "All execObjs allocated; waiting for pending execObj "
+                        "completion."
                     )
                     eid = pending_exec_queue.get()
                     self.session.complete_inf(eid, True)
@@ -1033,7 +1041,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         Args:
             qpc_inputs: input tensors (e.g. input_ids, attention_mask)
             output_key: key for the output buffer ("output" or "logits")
-            encode_num_logits_buffer: output buffer dict; re-registered when shape changes
+            encode_num_logits_buffer: output buffer dict; re-registered when
+                shape changes
         Returns:
             dict: output buffer dict containing the hidden-state / pooled output
         """
@@ -1333,7 +1342,8 @@ def load_qaic_model(
 
     if speculative_model_type not in QAIC_DEVICE_CONFIG:
         raise ValueError(
-            f"Unable to find default profile for model type {speculative_model_type}!!\n"
+            "Unable to find default profile for model type "
+            f"{speculative_model_type}!!\n"
         )
 
     qaic_compile_config = _get_qaic_compile_config(vllm_config, speculative_model_type)
@@ -1995,7 +2005,8 @@ def _get_qaic_compile_config(
             cfg["prefill_seq_len"] = 1
 
         if kv_offload:
-            # Dual QPC approach: select which QPC to load based on which path is skipped.
+            # Dual QPC approach: select which QPC to load based on which path
+            # is skipped.
             skip_lang = cfg.get("skip_lang", False)
             skip_vision = cfg.get("skip_vision", False)
             if not skip_lang and not skip_vision:

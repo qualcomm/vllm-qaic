@@ -13,7 +13,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm_qaic.logger import init_logger
-from vllm.platforms import CpuArchEnum, current_platform
+from vllm.platforms import CpuArchEnum
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
@@ -145,7 +145,8 @@ class QAicAttentionMetadataBuilder(AttentionMetadataBuilder[QAicAttentionMetadat
         self.block_size = vllm_config.cache_config.block_size
 
     def update_req_ids(self, req_ids: list[str]) -> None:
-        """Called by the model runner before build() to supply the current batch's request IDs."""
+        """Called by the model runner before build() to supply the current
+        batch's request IDs."""
         self.current_req_ids = req_ids
 
     def build(
@@ -154,7 +155,6 @@ class QAicAttentionMetadataBuilder(AttentionMetadataBuilder[QAicAttentionMetadat
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> QAicAttentionMetadata:
-        num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
         max_seq_len = common_attn_metadata.max_seq_len
@@ -180,7 +180,6 @@ class QAicAttentionMetadataBuilder(AttentionMetadataBuilder[QAicAttentionMetadat
                 decode_threshold=self.reorder_batch_threshold,
                 require_uniform=True,
             )
-            num_reqs = num_decodes + num_prefills
 
         scheduler_metadata = None
 

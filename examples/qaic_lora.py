@@ -73,5 +73,6 @@ for output in outputs:
     generated_tokens = output.outputs[0].token_ids
     num_generated_tokens = len(generated_tokens)
     print(
-        f"Prompt: {prompt!r}, Generated text: {generated_text!r}, Num generated tokens: {num_generated_tokens!r}"
+        f"Prompt: {prompt!r}, Generated text: {generated_text!r}, "
+        f"Num generated tokens: {num_generated_tokens!r}"
     )

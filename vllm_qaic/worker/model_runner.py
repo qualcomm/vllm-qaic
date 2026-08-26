@@ -29,7 +29,6 @@ from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm_qaic.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, SupportedTask
 from vllm.utils.import_utils import PlaceholderModule
@@ -698,7 +697,9 @@ class QaicModelRunnerAoT(GPUModelRunner):
         num_scheduled_tokens_np: np.ndarray,
         kv_connector_output: KVConnectorOutput | None,
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
-        if not self.model.is_qaic_pooler and self.model.task != "classify":  # for CPU based embed pooling, use GPU model runner's _pool
+        if (
+            not self.model.is_qaic_pooler and self.model.task != "classify"
+        ):  # for CPU based embed pooling, use GPU model runner's _pool
             # Force synchronous path: AsyncGPUPoolingModelRunnerOutput requires
             # CUDA streams which are not available on QAIC hardware.  The QAIC
             # async scheduling for pooling is handled at a higher level by
@@ -736,7 +737,9 @@ class QaicModelRunnerAoT(GPUModelRunner):
         finished_mask_qaicpooler = [
             seq_len == prompt_len
             for seq_len, prompt_len in zip(
-                seq_lens_qaicpooler, pooling_metadata_qaicpooler.prompt_lens
+                seq_lens_qaicpooler,
+                pooling_metadata_qaicpooler.prompt_lens,
+                strict=False,
             )
         ]
 
@@ -934,9 +937,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
         # upcast to float32 before sampling in _compute_hidden_states_and_logits.
         _dtype = getattr(self.model, "logits_dtype", np.float32)  # type: ignore[has-type]
         if num_decode_tokens > 1:
-            return np.empty(
-                (batch_size, num_decode_tokens, vocab_size), dtype=_dtype
-            )
+            return np.empty((batch_size, num_decode_tokens, vocab_size), dtype=_dtype)
         if self.model.logits_ndim == 3:  # type: ignore[has-type]
             return np.empty((batch_size, 1, vocab_size), dtype=_dtype)
         return np.empty((batch_size, vocab_size), dtype=_dtype)
