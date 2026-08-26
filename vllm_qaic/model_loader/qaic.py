@@ -1068,7 +1068,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         """assert prefill and decode work by running dummy inputs
 
         also creates attention_mask and decode input buffers
-        that will be used throughout the lifeycle of worker
+        that will be used throughout the lifecycle of worker
         """
 
         # Prepare dummy run inputs

@@ -161,7 +161,7 @@ PLease refer to [CONTRIBUTING](CONTRIBUTING.md) on how to submit changes.
 
 ## Getting in Contact
 
-Please report an issue or open a discussion as appropiate for your usecase.
+Please report an issue or open a discussion as appropriate for your usecase.
 
 * [Report an Issue on GitHub](../../issues)
 * [Open a Discussion on GitHub](../../discussions)

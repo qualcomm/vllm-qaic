@@ -22,7 +22,7 @@ random.shuffle(prompts)
 sampling_params = SamplingParams(temperature=0.0, max_tokens=200)
 # Only Greedy Sampling (temperature < 1e-5) or
 # Random sampling with best_of==1 is supported.
-# best_of >1 or beam search not supported in current qaic implementaion
+# best_of >1 or beam search not supported in current qaic implementation
 # Beam search not supported.
 
 # define qpc parameters

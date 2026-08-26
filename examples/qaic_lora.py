@@ -43,7 +43,7 @@ llm = LLM(
     # disable_log_stats=False,
     gpu_memory_utilization=1.0,
     enable_lora=True,
-    max_loras=decode_bsz,  # maxium loras to run within a batch,
+    max_loras=decode_bsz,  # maximum loras to run within a batch,
     additional_config={
         "device_group": [0],
         "lora_modules": [
