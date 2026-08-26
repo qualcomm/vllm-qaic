@@ -90,7 +90,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         pooler_config = vllm_config.model_config.pooler_config
         self._pooler = None
         self.is_pooling_model = False
-        self.task = None
+        self.task: str | None = None
         if vllm_config.model_config.runner_type == "pooling":
             self.is_pooling_model = True
             _token_classify_pooler = pooler_for_token_classify(
@@ -128,7 +128,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             # upstream vllm v0.23 removed "score" as a PoolingTask; cross-encoder
             # scoring maps to "classify" instead.
             _raw_task: str | None = override_qaic_config.get("task", None)
-            self.task: str | None = "classify" if _raw_task == "score" else _raw_task
+            self.task = "classify" if _raw_task == "score" else _raw_task
 
         # TODO: Add new variables for turbo
 
@@ -139,13 +139,13 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             # Encoder-decoder models have chunked prefill disabled by vllm,
             # but QAIC still requires a prefill sequence length.
             # For whisper, the prefill sequence length is fixed to 1.
-            self.prefill_seq_len = 1
+            self.prefill_seq_len: int = 1
         else:
             assert "prefill_seq_len" in override_qaic_config, (
                 "Prefill seq_len missing in override_qaic_config"
             )
-            self.prefill_seq_len = (
-                override_qaic_config["prefill_seq_len"]
+            self.prefill_seq_len = (  # type: ignore[assignment]
+                override_qaic_config["prefill_seq_len"]  # type: ignore[assignment]
                 if isinstance(override_qaic_config["prefill_seq_len"], (list, tuple))
                 else int(override_qaic_config["prefill_seq_len"])
             )
@@ -976,6 +976,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         Called either immediately (sync path) or after complete_inf (async path).
         """
         output = self.encode_num_logits_buffer
+        assert output is not None, "encode buffer not initialized"
         output_array = output[output_key][: len(prefill_cum_sum)]
         output_tensor = torch.tensor(output_array)
 
@@ -1046,6 +1047,9 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         Returns:
             dict: output buffer dict containing the hidden-state / pooled output
         """
+        assert encode_num_logits_buffer is not None, (
+            "run_encode requires an output buffer"
+        )
         if (
             self.encode_num_logits_buffer is None
             or encode_num_logits_buffer[output_key].shape
@@ -1053,6 +1057,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         ):
             self.encode_num_logits_buffer = encode_num_logits_buffer
 
+        assert self.encode_num_logits_buffer is not None
         encode_exec_obj_idx = self.session.np_run(
             {**qpc_inputs, **self.encode_num_logits_buffer}
         )
@@ -1524,23 +1529,24 @@ def load_qaic_model(
                     "skip_lang" in qaic_compile_config.cfg
                     and qaic_compile_config.cfg["skip_lang"]
                 ):
-                    qpc_path = qpc_path.get("vision_qpc_path")
+                    _qpc = qpc_path.get("vision_qpc_path")
                 elif (
                     "prefill_only" in qaic_compile_config.cfg
                     and qaic_compile_config.cfg["prefill_only"]
                 ):
-                    qpc_path = qpc_path.get("lang_prefill_qpc_path")
+                    _qpc = qpc_path.get("lang_prefill_qpc_path")
                 elif (
                     "prefill_seq_len" in qaic_compile_config.cfg
                     and qaic_compile_config.cfg["prefill_seq_len"] == 1
                 ):
-                    qpc_path = qpc_path.get("lang_decode_qpc_path")
+                    _qpc = qpc_path.get("lang_decode_qpc_path")
                 else:
-                    qpc_path = qpc_path.get("lang_qpc_path")
-                if qpc_path is None:
+                    _qpc = qpc_path.get("lang_qpc_path")
+                if _qpc is None:
                     raise ValueError(
                         "Failed to extract QPC path from compilation result dictionary"
                     )
+                qpc_path = _qpc
         except Exception as e:
             logger.error("Failed to transform and compile the model! %s", e)
             raise e

@@ -241,6 +241,7 @@ class ShmBuffer:
     def get_data(self, current_idx: int = 0):
         start = self.buff_sizes_cum_sum[current_idx - 1] if current_idx > 0 else 0
         end = self.buff_sizes_cum_sum[current_idx]
+        assert self.shared_memory.buf is not None
         with memoryview(self.shared_memory.buf[start:end]) as buf:
             yield buf
 

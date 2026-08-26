@@ -38,9 +38,6 @@ from vllm.model_executor.models.gemma4_mm import (
     Gemma4MultiModalProcessor,
     Gemma4ProcessingInfo,
 )
-from vllm.model_executor.models.transformers import (
-    TransformersMultiModalForCausalLM,
-)
 from vllm.model_executor.models.qwen2_5_vl import (
     Qwen2_5_VLDummyInputsBuilder,
     Qwen2_5_VLForConditionalGeneration,
@@ -67,6 +64,7 @@ from vllm.model_executor.models.qwen3_vl_moe import (
     Qwen3VLMoeForConditionalGeneration,
     Qwen3VLMoeProcessingInfo,
 )
+from vllm.model_executor.models.transformers import TransformersMultiModalForCausalLM
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     ImageItem,
@@ -596,7 +594,7 @@ class _QaicQwenVLMergedEmbedsFieldsMixin:
                 squeezed[key] = grid.squeeze(0)
         if squeezed is not None:
             hf_inputs = BatchFeature(squeezed)
-        return super()._get_mm_fields_config(hf_inputs, hf_processor_mm_kwargs)
+        return super()._get_mm_fields_config(hf_inputs, hf_processor_mm_kwargs)  # type: ignore[misc]
 
 
 class QaicQwen2_5_VLMultiModalProcessor(

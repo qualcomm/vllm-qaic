@@ -19,7 +19,7 @@ import copy
 import random
 from contextlib import contextmanager
 from dataclasses import asdict
-from typing import NamedTuple
+from typing import NamedTuple, cast
 
 import requests
 import torch
@@ -419,8 +419,8 @@ def apply_image_repeat(
     no_yes = [0, 1]
     probs = [1.0 - image_repeat_prob, image_repeat_prob]
 
-    inputs = []
-    inputs_with_empty_media = []
+    inputs: list[dict] = []
+    inputs_with_empty_media: list[dict] = []
     cur_image = images[0]
     for i in range(num_prompts):
         if image_repeat_prob is not None:
@@ -681,6 +681,7 @@ def main(args):
                     }
                 )
 
+    assert llm_vision is not None
     with time_counter(args.time_generate):
         embeddings = []
         outputs = llm_vision.encode(inputs, pooling_task="embed")
@@ -692,10 +693,11 @@ def main(args):
         for i, input_item in enumerate(inputs):
             # Replace the original image data with the pre-computed vision
             # embeddings so the language model receives features, not raw pixels.
+            mm_data = cast(dict, input_item["multi_modal_data"])
             if req_data.image_grid_thw is None:
-                input_item["multi_modal_data"][modality] = embeddings[i]
+                mm_data[modality] = embeddings[i]
             else:
-                input_item["multi_modal_data"][modality] = {
+                mm_data[modality] = {
                     "image_embeds": embeddings[i],
                     "image_grid_thw": req_data.image_grid_thw,
                 }
@@ -717,6 +719,7 @@ def main(args):
                 "matching UUIDs."
             )
             with time_counter(args.time_generate):
+                assert llm_vision is not None
                 outputs = llm_vision.encode(
                     inputs_with_empty_media, pooling_task="embed"
                 )
@@ -729,12 +732,11 @@ def main(args):
                 for i, input_item in enumerate(inputs_with_empty_media):
                     # Replace the original image data with the new embeddings
                     # so the language model receives pre-computed vision features.
+                    mm_data_empty = cast(dict, input_item["multi_modal_data"])
                     if req_data.image_grid_thw is None:
-                        inputs_with_empty_media[i]["multi_modal_data"][modality] = (
-                            embeddings[i]
-                        )
+                        mm_data_empty[modality] = embeddings[i]
                     else:
-                        inputs_with_empty_media[i]["multi_modal_data"][modality] = {
+                        mm_data_empty[modality] = {
                             "image_embeds": embeddings[i],
                             "image_grid_thw": req_data.image_grid_thw,
                         }
