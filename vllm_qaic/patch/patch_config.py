@@ -27,6 +27,8 @@ QaicCacheDType = str
 @dataclass
 class QaicCacheConfig(CacheConfig):
     cache_dtype: QaicCacheDType = "auto"
+    """Data type for storing the KV cache. Extends the upstream
+    ``CacheConfig.cache_dtype`` choices with the QAIC-only ``mxint8`` option."""
 
     @field_validator("cache_dtype", mode="after")
     @classmethod
@@ -44,8 +46,10 @@ class QaicCacheConfig(CacheConfig):
 @config
 @dataclass(config=ConfigDict(arbitrary_types_allowed=True))
 class QaicDeviceConfig(DeviceConfig):
-    device: str | torch.device | None
-    device_type: str
+    device: str | torch.device | None = "auto"
+    """Device type for vLLM execution."""
+    device_type: str = ""
+    """Device type resolved from the current platform."""
 
     def __post_init__(self):
         if self.device == "auto":
