@@ -190,8 +190,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self.sampler = Sampler(logprobs_mode=model_config.logprobs_mode)
         self.pad = np.full(self.prefill_seq_len, fill_value=-1, dtype=np.int64)
 
-        # Pre-allocate one input dict per K so session.run() receives the correct
-        # static input shape for hardware dispatch.
+        # Pre-allocate one input dict per K for static dispatch shapes.
         self.decode_batch_inputs_by_k: dict[int, dict] = {}
         self.decode_logits_by_k: dict[int, dict] = {}
         self.decode_num_logits_buffer_by_k: dict[int, dict] = {}
@@ -199,8 +198,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             self.decode_batch_inputs_by_k[_k] = self._make_decode_batch_input_for_k(_k)
             _mdt = _k + 1
             self.decode_logits_by_k[_k] = dict(
-                logits=np.random.randn(self.decode_bsz, _mdt, self.vocab_size).astype(
-                    np.float32
+                logits=np.empty(
+                    (self.decode_bsz, _mdt, self.vocab_size), dtype=np.float32
                 )
             )
             self.decode_num_logits_buffer_by_k[_k] = dict(
@@ -473,9 +472,10 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 if _k not in self.decode_logits_by_k:
                     _mdt = _k + 1
                     self.decode_logits_by_k[_k] = dict(
-                        logits=np.random.randn(
-                            self.decode_bsz, _mdt, self.vocab_size
-                        ).astype(np.float32)
+                        logits=np.empty(
+                            (self.decode_bsz, _mdt, self.vocab_size),
+                            dtype=np.float32,
+                        )
                     )
                 if _k not in self.decode_num_logits_buffer_by_k:
                     self.decode_num_logits_buffer_by_k[_k] = dict(
@@ -1548,12 +1548,8 @@ def load_qaic_model(
             # This will create error in parent process if exited,
             # need better solution in future
             raise QaicCompilationComplete()
-        # Caller (target load path with a draft model still to compile)
-        # will proceed to compile the drafter before exiting via its own
-        # load_qaic_model() call. model.load_model() (which sets
-        # disagg_serving_en) never runs on this path, so set a safe default
-        # for the caller's immediate post-load disagg_serving_en/kv_cache_info
-        # checks.
+        # A target with a draft model must return so the drafter can compile.
+        # Set safe defaults because model.load_model() does not run here.
         model.disagg_serving_en = False
         return model.eval()
 

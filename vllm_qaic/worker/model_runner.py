@@ -407,11 +407,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
         | QaicDraftModelProposer
         | None
     )
-    # Declared here because GPUModelRunner.__init__ sets this dynamically
-    # (from SchedulerConfig.async_scheduling), so mypy cannot infer its type
-    # in this subclass without a re-declaration; by the time __init__ below
-    # reaches super().__init__(), VllmConfig.__post_init__ has already
-    # normalized it from `bool | None` to a concrete `bool`.
+    # Parent initializes this dynamically; declare its normalized bool type here.
     use_async_scheduling: bool
 
     def __init__(
