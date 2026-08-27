@@ -4,6 +4,7 @@
 # ------------------------------------------------------------------
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # SPDX-License-Identifier: Apache-2.0
+# Adapted from vllm/vllm/model_executor/models/gemma3_mm.py
 
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
@@ -20,6 +21,7 @@ from transformers.image_utils import SizeDict
 from transformers.models.qwen2_5_vl import Qwen2_5_VLProcessor
 from transformers.models.qwen3_vl import Qwen3VLProcessor
 from transformers.processing_utils import ProcessorMixin
+from transformers.models.gemma3.processing_gemma3 import Gemma3ProcessorKwargs
 from transformers.utils.import_utils import (
     is_torchvision_available,
     is_torchvision_v2_available,
@@ -117,17 +119,20 @@ class QaicGemma3MultiModalProcessor(Gemma3MultiModalProcessor):
         )
 
         processor = self.info.get_hf_processor(**mm_kwargs)
-        images_kwargs = self.info._resolve_image_kwargs(processor, {"do_pan_and_scan"})
-        do_pan_and_scan = images_kwargs["do_pan_and_scan"]
+        images_kwargs = processor._merge_kwargs(
+            Gemma3ProcessorKwargs,
+            tokenizer_init_kwargs=processor.tokenizer.init_kwargs,
+            **self.info.ctx.get_merged_mm_kwargs(mm_kwargs),
+        )["images_kwargs"]
+        do_pan_and_scan = images_kwargs.get(
+            "do_pan_and_scan", processor.image_processor.do_pan_and_scan
+        )
         if do_pan_and_scan:
             raise ValueError("QAIC does not support Gemma3 with pan-and-scan enabled.")
 
         if (images := mm_data.get("images")) is not None:
-            parsed_images = (
-                self._get_data_parser()
-                .parse_mm_data({"image": images})
-                .get_items("image", (ImageEmbeddingItems, ImageProcessorItems))
-            )
+            mm_items = self.info.parse_mm_data({"image": images}, validate=False)
+            parsed_images = mm_items.get_items("image", (ImageEmbeddingItems, ImageProcessorItems))
             num_patches = [1] * len(parsed_images)
             processed_outputs["num_patches"] = torch.tensor(num_patches)
 
@@ -566,7 +571,7 @@ class QaicQwen2_5_VLProcessingInfo(
 
 class _QaicQwenVLMergedEmbedsFieldsMixin:
     """Convert `image_grid_thw` from 3-D to 2-D for Qwen-VL models.
-    
+
     In `qaic_disagg`, `_merge_embeds` adds a leading batch dim to
     `image_grid_thw` ([N, 3] -> [1, N, 3]) and calls `_get_mm_fields_config`
     directly, so `prod(-1)` is 2-D and `flat_from_sizes` raises "size_per_item
