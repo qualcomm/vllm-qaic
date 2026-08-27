@@ -1,6 +1,6 @@
 # vllm-qaic test suite
 
-Guide for developers writing tests here. Start with `tests/e2e/conftest.py` — it has the QAIC
+Guide for developers writing tests here. Start with `tests/device_unit_and_e2e/conftest.py` — it has the QAIC
 device pool, markers, and the `qaic_model`/`make_runner` fixtures. `tests/conftest.py` (one level
 up) just provides the generic `VllmRunner` wrapper with no QAIC specifics.
 
@@ -45,7 +45,7 @@ bare module-level functions each with their own marker — the latter forces a r
 
 ### Markers that gate whether a test runs at all
 
-Registered in `pyproject.toml` and enforced in `tests/e2e/conftest.py`'s
+Registered in `pyproject.toml` and enforced in `tests/device_unit_and_e2e/conftest.py`'s
 `pytest_collection_modifyitems`, which adds a `skip` marker at collection time with a specific
 reason:
 
@@ -68,7 +68,7 @@ across parallel jobs:
 - **`scheduler.py`** — dispatches each job as its own `pytest` subprocess with a disjoint slice of
   real device IDs, and serializes the first job per model/config so concurrent jobs don't race on
   the same QEfficient export/compile cache directory.
-- **`ci_fasttest_qaic_<mode>.sh`** — runs `collect_jobs.py` then `scheduler.py` against `tests/e2e`.
+- **`ci_fasttest_qaic_<mode>.sh`** — runs `collect_jobs.py` then `scheduler.py` against `tests/device_unit_and_e2e`.
 - **`ci_pipeline_run_plugin.sh`** — installs the plugin, then sources the matching
   `ci_fasttest_qaic_<mode>.sh`.
 

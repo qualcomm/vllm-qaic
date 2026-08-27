@@ -78,10 +78,10 @@ OUTPUT_DIR="$SCRIPT_DIR/scheduler_output/fasttest"
 mkdir -p "$OUTPUT_DIR"
 JOBS_FILE="$OUTPUT_DIR/jobs.json"
 
-echo "[ci_fasttest_qaic] Collecting jobs from: tests/e2e"
+echo "[ci_fasttest_qaic] Collecting jobs from: tests/device_unit_and_e2e"
 DEVICE_POOL_SIZE=$(($(tr -cd ',' <<< "$DEVICE_IDS" | wc -c) + 1))
-python3 "$SCRIPT_DIR/collect_jobs.py" tests/e2e --output "$JOBS_FILE" -- \
-    --ignore=tests/e2e/multimodal/test_multimodal.py \
+python3 "$SCRIPT_DIR/collect_jobs.py" tests/device_unit_and_e2e --output "$JOBS_FILE" -- \
+    --ignore=tests/device_unit_and_e2e/multimodal/test_multimodal.py \
     --device-pool-size "$DEVICE_POOL_SIZE" \
     --host "$HOST" \
     --port "$PORT"
