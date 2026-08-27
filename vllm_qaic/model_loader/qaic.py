@@ -203,7 +203,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 )
             )
             self.decode_num_logits_buffer_by_k[_k] = dict(
-                num_logits_to_keep=np.zeros((_mdt, 1), np.int64)
+                num_logits_to_keep=np.empty((_mdt, 1), dtype=np.int64)
             )
 
         # Backward-compat alias pointing at the max-K input dict.
@@ -449,8 +449,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         )
         self.prefill_num_logits_buffer = None
         self.prefill_logits = dict(
-            logits=np.random.randn(self.prefill_bsz, 1, self.vocab_size).astype(
-                self.logits_dtype
+            logits=np.empty(
+                (self.prefill_bsz, 1, self.vocab_size), dtype=self.logits_dtype
             )
         )
         self.batch_prefill_logits = np.empty(
@@ -479,7 +479,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     )
                 if _k not in self.decode_num_logits_buffer_by_k:
                     self.decode_num_logits_buffer_by_k[_k] = dict(
-                        num_logits_to_keep=np.zeros((_k + 1, 1), np.int64)
+                        num_logits_to_keep=np.empty((_k + 1, 1), dtype=np.int64)
                     )
 
             self.decode_logits = self.decode_logits_by_k[self.decode_ks[-1]]
@@ -487,7 +487,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 self.decode_ks[-1]
             ]
             self.prefill_num_logits_buffer = dict(
-                num_logits_to_keep=np.zeros((1, 1), np.int64)
+                num_logits_to_keep=np.empty((1, 1), dtype=np.int64)
             )
         # CCL state for prefill: dict keyed by prefill exec-object slot id, value
         # is the bucket currently in flight on that slot (0 = idle). Used by
