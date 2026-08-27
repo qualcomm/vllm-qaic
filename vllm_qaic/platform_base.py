@@ -307,12 +307,12 @@ class QaicPlatform(Platform):
                     cache_config.mamba_cache_mode = "none"  # reset to disabled
                     if vllm_config.kv_transfer_config:
                         cache_config.block_size = vllm_config.additional_config.get(
-                            "kv_block_size"
-                        )
+                            "override_qaic_config", {}
+                        ).get("kv_block_size")
                     else:
                         cache_config.block_size = vllm_config.additional_config.get(
-                            "prefill_seq_len"
-                        )
+                            "override_qaic_config", {}
+                        ).get("prefill_seq_len")
                 elif (
                     model_config.is_multimodal_model and model_config.is_encoder_decoder
                 ):
@@ -552,12 +552,12 @@ class QaicPlatform(Platform):
             if cache_config and cache_config.enable_prefix_caching:
                 if vllm_config.kv_transfer_config:
                     cache_config.block_size = vllm_config.additional_config.get(
-                        "kv_block_size"
-                    )
+                        "override_qaic_config", {}
+                    ).get("kv_block_size")
                 else:
                     cache_config.block_size = vllm_config.additional_config.get(
-                        "prefill_seq_len"
-                    )
+                        "override_qaic_config", {}
+                    ).get("prefill_seq_len")
             if "override_qaic_config" not in vllm_config.additional_config:
                 additional_config["override_qaic_config"] = {}
             additional_config["override_qaic_config"].update(

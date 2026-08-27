@@ -148,12 +148,10 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self.ctx_len = model_config.max_model_len
         self.decode_bsz = vllm_config.scheduler_config.max_num_seqs
         self.full_batch_size = vllm_config.scheduler_config.max_num_seqs
-        # block_size may be None here (vLLM v1 populates it after
-        # determine_num_available_blocks); deferred to load_model.
         self._vllm_config = vllm_config
-        self.num_gpu_blocks_per_batch = None  # set in load_model
+        self.num_gpu_blocks_per_batch = None
         if vllm_config.cache_config.enable_prefix_caching:
-            self.num_gpu_blocks = None  # set in load_model
+            self.num_gpu_blocks = None
         else:
             self.num_gpu_blocks = self.decode_bsz
         self.paged_attention = bool(vllm_config.cache_config.enable_prefix_caching)
@@ -2182,10 +2180,12 @@ def _get_qaic_compile_config(
             num_kv_blocks = (
                 vllm_config.model_config.max_model_len // cfg["kv_block_size"]
             )
+            vllm_config.cache_config.block_size = cfg["kv_block_size"]
         else:
             num_kv_blocks = (
                 vllm_config.model_config.max_model_len // cfg["prefill_seq_len"]
             )
+            vllm_config.cache_config.block_size = cfg["prefill_seq_len"]
         logger.info("Num KV Blocks: %s", num_kv_blocks)
         qaic_config["num_kv_blocks"] = num_kv_blocks
         qaic_config["blocking_mode"] = "kv_paged"
