@@ -25,6 +25,8 @@ Status of vLLM features on Qualcomm Cloud AI hardware.
 | N-gram | ✅ | ❌ | |
 | Suffix | ✅ | ❌ | |
 | Draft model | ✅ | ❌ | Separate DLM on same device |
+| **Sampling** | | | |
+| On-device sampling | ✅ | ❌ | |
 | **Advanced Features** | | | |
 | LoRA adapters | ✅ | ❌ | Hot-swap adapters |
 | Disaggregated serving | ✅ | ❌ | xEyPzD prefill/decode split |
@@ -52,4 +54,3 @@ Some features cannot be used together. Here is the compatibility matrix for comm
 | LoRA + Disaggregated | ❌ | ❌ | Not supported |
 | Multimodal + CCL (Compiled Context Lengths) | ✅ | 🧪 | Supported (vision encoder on separate device) |
 | Tensor Parallel + Disaggregated | ✅ | ❌ | Supported (TP within each node) |
-| Quantization + LoRA | ✅ | ❌ | Supported (quantized base + LoRA adapters) |
