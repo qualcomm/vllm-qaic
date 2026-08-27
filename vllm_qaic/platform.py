@@ -7,6 +7,7 @@ from vllm_qaic.logger import init_logger
 from .platform_base import QaicPlatform as QaicPlatformBase
 
 from .utils import (
+    QAIC_GPT_OSS_MXFP4_METHOD,
     QAIC_KV_CACHE_DTYPE,
     QAIC_QUANTIZATION_METHOD,
 )
@@ -24,6 +25,14 @@ class QaicPlatform(QaicPlatformBase):
         cls.device_type = "qaic"
         # Adapt the patch here.
         from vllm_qaic import patch  # noqa: F401
+
+        # gpt_oss_mxfp4 is only supported in eager mode: AOT compilation has
+        # no path to dequantize/run the packed MXFP4 MoE weights.
+        if (
+            not cls.is_aot
+            and QAIC_GPT_OSS_MXFP4_METHOD not in cls.supported_quantization
+        ):
+            cls.supported_quantization.append(QAIC_GPT_OSS_MXFP4_METHOD)
 
         if parser is not None:  # For synchronous vLLM engine
             # disable prefix caching as QAIC backend plugin does not support it
@@ -51,3 +60,8 @@ class QaicPlatform(QaicPlatformBase):
         from vllm_qaic.quantization.quant_config import (  # noqa: F401
             QaicQuantConfig,
         )
+
+        if not cls.is_aot:
+            from vllm_qaic.quantization.qaic_gpt_oss_mxfp4_config import (  # noqa: F401
+                QaicGptOssMxfp4Config,
+            )
