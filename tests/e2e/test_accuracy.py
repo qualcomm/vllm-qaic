@@ -209,7 +209,7 @@ def log_perf_metrics(id, metrics, device_group):
     return rouge_1, rouge_2, rouge_L
 
 
-class TestAccuracy:
+class _AccuracyTestBase:
     @pytest.mark.qaic_test_config(
         model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
         ctx_len=256,
@@ -247,3 +247,13 @@ class TestAccuracy:
         assert r1 is not None, "[ERROR] Rouge1 score is None"
         assert r2 is not None, "[ERROR] Rouge2 score is None"
         assert rL is not None, "[ERROR] RougeL score is None"
+
+
+@pytest.mark.qaic_test_config(enable_prefix_caching=True)
+class TestAccuracyPrefixCaching(_AccuracyTestBase):
+    pass
+
+
+@pytest.mark.qaic_test_config(enable_prefix_caching=False)
+class TestAccuracy(_AccuracyTestBase):
+    pass
