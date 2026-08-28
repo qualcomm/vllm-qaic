@@ -6,10 +6,15 @@
 ruff
 isort
 pytest
-
-# type checking
-mypy==1.11.1
-types-PyYAML
-types-regex
-types-requests
-types-setuptools
+anyio
+evaluate
+nltk
+pytest-asyncio
+pytest-tornasync
+pytest-trio
+pytest-twisted
+rich
+rouge_score
+twisted
+tblib
+onnx_ir==0.2.1
