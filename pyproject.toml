@@ -168,7 +168,7 @@ override-dependencies = [
 ]
 
 [tool.uv.sources]
-vllm = { git = "https://github.com/vllm-project/vllm", rev = "v0.23.0" }
+vllm = { git = "https://github.com/vllm-project/vllm", rev = "v0.28.0" }
 
 [tool.pytest.ini_options]
 markers = [
