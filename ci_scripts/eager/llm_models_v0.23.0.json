@@ -1,0 +1,890 @@
+[
+  {
+    "model": "swiss-ai/Apertus-8B-2509",
+    "variant": "Apertus",
+    "family": "apertus",
+    "arch": "ApertusForCausalLM"
+  },
+  {
+    "model": "BAAI/Aquila-7B",
+    "variant": "Aquila",
+    "family": "aquila",
+    "arch": "AquilaForCausalLM"
+  },
+  {
+    "model": "arcee-ai/AFM-4.5B-Base",
+    "variant": "Arcee (AFM)",
+    "family": "arcee",
+    "arch": "ArceeForCausalLM"
+  },
+  {
+    "model": "Snowflake/snowflake-arctic-base",
+    "variant": "Arctic",
+    "family": "arctic",
+    "arch": "ArcticForCausalLM"
+  },
+  {
+    "model": "skt/A.X-K1",
+    "variant": "A.X-K1",
+    "family": "axk",
+    "arch": "AXK1ForCausalLM"
+  },
+  {
+    "model": "baichuan-inc/Baichuan2-13B-Chat",
+    "variant": "Baichuan2",
+    "family": "baichuan",
+    "arch": "BaiChuanForCausalLM"
+  },
+  {
+    "model": "baichuan-inc/Baichuan-7B",
+    "variant": "Baichuan",
+    "family": "baichuan",
+    "arch": "BaiChuanForCausalLM"
+  },
+  {
+    "model": "inclusionAI/Ling-lite-1.5",
+    "variant": "Ling",
+    "family": "ling",
+    "arch": "BailingMoeForCausalLM"
+  },
+  {
+    "model": "inclusionAI/Ling-mini-2.0",
+    "variant": "Ling",
+    "family": "ling",
+    "arch": "BailingMoeV2ForCausalLM"
+  },
+  {
+    "model": "inclusionAI/Ling-2.5-1T",
+    "variant": "Ling",
+    "family": "ling",
+    "arch": "`BailingMoeV2_5ForCausalLM`"
+  },
+  {
+    "model": "ibm-ai-platform/Bamba-9B-fp8",
+    "variant": "Bamba",
+    "family": "bamba",
+    "arch": "BambaForCausalLM"
+  },
+  {
+    "model": "bigscience/bloom",
+    "variant": "BLOOM",
+    "family": "bloom",
+    "arch": "BloomForCausalLM"
+  },
+  {
+    "model": "bigscience/bloomz",
+    "variant": "BLOOMZ",
+    "family": "bloomz",
+    "arch": "BloomForCausalLM"
+  },
+  {
+    "model": "zai-org/chatglm2-6b",
+    "variant": "ChatGLM",
+    "family": "chatglm",
+    "arch": "ChatGLMModel, ChatGLMForConditionalGeneration"
+  },
+  {
+    "model": "CohereLabs/c4ai-command-r7b-12-2024",
+    "variant": "Command-R",
+    "family": "command",
+    "arch": "CohereForCausalLM, Cohere2ForCausalLM"
+  },
+  {
+    "model": "CohereLabs/c4ai-command-a-03-2025",
+    "variant": "Command-A",
+    "family": "command",
+    "arch": "CohereForCausalLM, Cohere2ForCausalLM"
+  },
+  {
+    "model": "CohereLabs/North-Mini-Code",
+    "variant": "North-Mini-Code",
+    "family": "northminicode",
+    "arch": "Cohere2MoeForCausalLM"
+  },
+  {
+    "model": "facebook/cwm",
+    "variant": "CWM",
+    "family": "cwm",
+    "arch": "CwmForCausalLM"
+  },
+  {
+    "model": "databricks/dbrx-base",
+    "variant": "DBRX",
+    "family": "dbrx",
+    "arch": "DbrxForCausalLM"
+  },
+  {
+    "model": "nvidia/Llama-3_3-Nemotron-Super-49B-v1",
+    "variant": "DeciLM",
+    "family": "decilm",
+    "arch": "DeciLMForCausalLM"
+  },
+  {
+    "model": "deepseek-ai/deepseek-llm-7b-chat",
+    "variant": "DeepSeek",
+    "family": "deepseek",
+    "arch": "DeepseekForCausalLM"
+  },
+  {
+    "model": "deepseek-ai/DeepSeek-V2",
+    "variant": "DeepSeek-V2",
+    "family": "deepseek",
+    "arch": "DeepseekV2ForCausalLM"
+  },
+  {
+    "model": "deepseek-ai/DeepSeek-V3",
+    "variant": "DeepSeek-V3",
+    "family": "deepseek",
+    "arch": "DeepseekV3ForCausalLM"
+  },
+  {
+    "model": "deepseek-ai/DeepSeek-V4-Flash",
+    "variant": "DeepSeek-V4",
+    "family": "deepseek",
+    "arch": "DeepseekV4ForCausalLM"
+  },
+  {
+    "model": "rednote-hilab/dots.llm1.base",
+    "variant": "dots.llm1",
+    "family": "dots",
+    "arch": "Dots1ForCausalLM"
+  },
+  {
+    "model": "rednote-hilab/dots.ocr",
+    "variant": "dots_ocr",
+    "family": "dotsocr",
+    "arch": "DotsOCRForCausalLM"
+  },
+  {
+    "model": "baidu/ERNIE-4.5-0.3B-PT",
+    "variant": "Ernie4.5",
+    "family": "ernie",
+    "arch": "`Ernie4_5ForCausalLM`"
+  },
+  {
+    "model": "baidu/ERNIE-4.5-21B-A3B-PT",
+    "variant": "Ernie4.5MoE",
+    "family": "ernie",
+    "arch": "`Ernie4_5_MoeForCausalLM`"
+  },
+  {
+    "model": "LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct",
+    "variant": "EXAONE-3",
+    "family": "exaone",
+    "arch": "ExaoneForCausalLM"
+  },
+  {
+    "model": "LGAI-EXAONE/K-EXAONE-236B-A23B",
+    "variant": "K-EXAONE",
+    "family": "kexaone",
+    "arch": "ExaoneMoEForCausalLM"
+  },
+  {
+    "model": "LGAI-EXAONE/EXAONE-4.0-32B",
+    "variant": "EXAONE-4",
+    "family": "exaone",
+    "arch": "Exaone4ForCausalLM"
+  },
+  {
+    "model": "mgleize/fairseq2-dummy-Llama-3.2-1B",
+    "variant": "Llama (fairseq2 format)",
+    "family": "llama",
+    "arch": "Fairseq2LlamaForCausalLM"
+  },
+  {
+    "model": "tiiuae/falcon-7b",
+    "variant": "Falcon",
+    "family": "falcon",
+    "arch": "FalconForCausalLM"
+  },
+  {
+    "model": "tiiuae/falcon-mamba-7b",
+    "variant": "FalconMamba",
+    "family": "falconmamba",
+    "arch": "FalconMambaForCausalLM"
+  },
+  {
+    "model": "tiiuae/Falcon-H1-34B-Base",
+    "variant": "Falcon-H1",
+    "family": "falcon",
+    "arch": "FalconH1ForCausalLM"
+  },
+  {
+    "model": "allenai/FlexOlmo-7x7B-1T",
+    "variant": "FlexOlmo",
+    "family": "flexolmo",
+    "arch": "FlexOlmoForCausalLM"
+  },
+  {
+    "model": "google/gemma-2b",
+    "variant": "Gemma",
+    "family": "gemma",
+    "arch": "GemmaForCausalLM"
+  },
+  {
+    "model": "google/gemma-2-9b",
+    "variant": "Gemma 2",
+    "family": "gemma",
+    "arch": "Gemma2ForCausalLM"
+  },
+  {
+    "model": "google/gemma-3-1b-it",
+    "variant": "Gemma 3",
+    "family": "gemma",
+    "arch": "Gemma3ForCausalLM"
+  },
+  {
+    "model": "google/gemma-3n-E2B-it",
+    "variant": "Gemma 3n",
+    "family": "gemma",
+    "arch": "Gemma3nForCausalLM"
+  },
+  {
+    "model": "google/gemma-4-E2B-it",
+    "variant": "Gemma 4",
+    "family": "gemma",
+    "arch": "Gemma4ForCausalLM"
+  },
+  {
+    "model": "zai-org/glm-4-9b-chat-hf",
+    "variant": "GLM-4",
+    "family": "glm",
+    "arch": "GlmForCausalLM"
+  },
+  {
+    "model": "zai-org/GLM-4-32B-0414",
+    "variant": "GLM-4-0414",
+    "family": "glm",
+    "arch": "Glm4ForCausalLM"
+  },
+  {
+    "model": "zai-org/GLM-4.5",
+    "variant": "GLM-4.5",
+    "family": "glm",
+    "arch": "Glm4MoeForCausalLM"
+  },
+  {
+    "model": "zai-org/GLM-4.7-Flash",
+    "variant": "GLM-4.7-Flash",
+    "family": "glm",
+    "arch": "Glm4MoeLiteForCausalLM"
+  },
+  {
+    "model": "openai-community/gpt2",
+    "variant": "GPT-2",
+    "family": "gpt",
+    "arch": "GPT2LMHeadModel"
+  },
+  {
+    "model": "bigcode/starcoder",
+    "variant": "StarCoder",
+    "family": "starcoder",
+    "arch": "GPTBigCodeForCausalLM"
+  },
+  {
+    "model": "bigcode/gpt_bigcode-santacoder",
+    "variant": "SantaCoder",
+    "family": "santacoder",
+    "arch": "GPTBigCodeForCausalLM"
+  },
+  {
+    "model": "WizardLM/WizardCoder-15B-V1.0",
+    "variant": "WizardCoder",
+    "family": "wizardcoder",
+    "arch": "GPTBigCodeForCausalLM"
+  },
+  {
+    "model": "EleutherAI/gpt-j-6b",
+    "variant": "GPT-J",
+    "family": "gpt",
+    "arch": "GPTJForCausalLM"
+  },
+  {
+    "model": "EleutherAI/gpt-neox-20b",
+    "variant": "GPT-NeoX",
+    "family": "gptneox",
+    "arch": "GPTNeoXForCausalLM"
+  },
+  {
+    "model": "EleutherAI/pythia-12b",
+    "variant": "Pythia",
+    "family": "pythia",
+    "arch": "GPTNeoXForCausalLM"
+  },
+  {
+    "model": "databricks/dolly-v2-12b",
+    "variant": "Dolly V2",
+    "family": "dolly",
+    "arch": "GPTNeoXForCausalLM"
+  },
+  {
+    "model": "stabilityai/stablelm-tuned-alpha-7b",
+    "variant": "StableLM",
+    "family": "stablelm",
+    "arch": "GPTNeoXForCausalLM"
+  },
+  {
+    "model": "openai/gpt-oss-20b",
+    "variant": "GPT-OSS",
+    "family": "gptoss",
+    "arch": "GptOssForCausalLM"
+  },
+  {
+    "model": "ibm-granite/granite-3.0-2b-base",
+    "variant": "Granite 3.0",
+    "family": "granite",
+    "arch": "GraniteForCausalLM"
+  },
+  {
+    "model": "ibm-granite/granite-3.1-8b-instruct",
+    "variant": "Granite 3.1",
+    "family": "granite",
+    "arch": "GraniteForCausalLM"
+  },
+  {
+    "model": "ibm/PowerLM-3b",
+    "variant": "PowerLM",
+    "family": "powerlm",
+    "arch": "GraniteForCausalLM"
+  },
+  {
+    "model": "ibm/PowerMoE-3b",
+    "variant": "PowerMoE",
+    "family": "powermoe",
+    "arch": "GraniteMoeForCausalLM"
+  },
+  {
+    "model": "ibm-granite/granite-4.0-tiny-preview",
+    "variant": "Granite 4.0 MoE Hybrid",
+    "family": "granite",
+    "arch": "GraniteMoeHybridForCausalLM"
+  },
+  {
+    "model": "ibm-research/moe-7b-1b-active-shared-experts",
+    "variant": "Granite MoE Shared",
+    "family": "granitemoeshared",
+    "arch": "GraniteMoeSharedForCausalLM"
+  },
+  {
+    "model": "parasail-ai/GritLM-7B-vllm",
+    "variant": "GritLM",
+    "family": "gritlm",
+    "arch": "GritLM"
+  },
+  {
+    "model": "hpcai-tech/grok-1",
+    "variant": "Grok1",
+    "family": "grok",
+    "arch": "Grok1ModelForCausalLM"
+  },
+  {
+    "model": "xai-org/grok-2",
+    "variant": "Grok2",
+    "family": "grok",
+    "arch": "Grok1ForCausalLM"
+  },
+  {
+    "model": "tencent/Hunyuan-7B-Instruct",
+    "variant": "Hunyuan Dense",
+    "family": "hunyuandense",
+    "arch": "HunYuanDenseV1ForCausalLM"
+  },
+  {
+    "model": "tencent/Hunyuan-A13B-Instruct",
+    "variant": "Hunyuan-A13B",
+    "family": "hunyuan",
+    "arch": "HunYuanMoEV1ForCausalLM"
+  },
+  {
+    "model": "tencent/Hy3-preview-Base",
+    "variant": "HY3",
+    "family": "hy",
+    "arch": "HYV3ForCausalLM"
+  },
+  {
+    "model": "naver-hyperclovax/HyperCLOVAX-SEED-Think-14B",
+    "variant": "HyperCLOVAX-SEED-Think-14B",
+    "family": "hyperclovaxseedthink",
+    "arch": "HyperCLOVAXForCausalLM"
+  },
+  {
+    "model": "internlm/internlm-7b",
+    "variant": "InternLM",
+    "family": "internlm",
+    "arch": "InternLMForCausalLM"
+  },
+  {
+    "model": "internlm/internlm2-7b",
+    "variant": "InternLM2",
+    "family": "internlm",
+    "arch": "InternLM2ForCausalLM"
+  },
+  {
+    "model": "internlm/internlm3-8b-instruct",
+    "variant": "InternLM3",
+    "family": "internlm",
+    "arch": "InternLM3ForCausalLM"
+  },
+  {
+    "model": "IQuestLab/IQuest-Coder-V1-40B-Instruct",
+    "variant": "IQuestCoderV1",
+    "family": "iquestcoderv",
+    "arch": "IQuestCoderForCausalLM"
+  },
+  {
+    "model": "IQuestLab/IQuest-Coder-V1-40B-Loop-Instruct",
+    "variant": "IQuestLoopCoderV1",
+    "family": "iquestloopcoderv",
+    "arch": "IQuestLoopCoderForCausalLM"
+  },
+  {
+    "model": "inceptionai/Jais-2-8B-Chat",
+    "variant": "Jais2",
+    "family": "jais",
+    "arch": "Jais2ForCausalLM"
+  },
+  {
+    "model": "ai21labs/AI21-Jamba-1.5-Large",
+    "variant": "Jamba",
+    "family": "jamba",
+    "arch": "JambaForCausalLM"
+  },
+  {
+    "model": "moonshotai/Kimi-Linear-48B-A3B-Base",
+    "variant": "Kimi-Linear-48B-A3B-Base",
+    "family": "kimilinear",
+    "arch": "KimiLinearForCausalLM"
+  },
+  {
+    "model": "moonshotai/Kimi-Linear-48B-A3B-Instruct",
+    "variant": "Kimi-Linear-48B-A3B-Instruct",
+    "family": "kimilinear",
+    "arch": "KimiLinearForCausalLM"
+  },
+  {
+    "model": "LiquidAI/LFM2-350M",
+    "variant": "LFM2",
+    "family": "lfm",
+    "arch": "Lfm2ForCausalLM"
+  },
+  {
+    "model": "LiquidAI/LFM2-8B-A1B-preview",
+    "variant": "LFM2MoE",
+    "family": "lfm",
+    "arch": "Lfm2MoeForCausalLM"
+  },
+  {
+    "model": "meta-llama/Meta-Llama-3.1-70B",
+    "variant": "Llama 3.1",
+    "family": "llama",
+    "arch": "LlamaForCausalLM"
+  },
+  {
+    "model": "meta-llama/Llama-2-70b-hf",
+    "variant": "Llama 2",
+    "family": "llama",
+    "arch": "LlamaForCausalLM"
+  },
+  {
+    "model": "01-ai/Yi-34B",
+    "variant": "Yi",
+    "family": "yi",
+    "arch": "LlamaForCausalLM"
+  },
+  {
+    "model": "meituan-longcat/LongCat-Flash-Chat",
+    "variant": "LongCat-Flash",
+    "family": "longcatflash",
+    "arch": "LongcatFlashForCausalLM"
+  },
+  {
+    "model": "state-spaces/mamba-130m-hf",
+    "variant": "Mamba",
+    "family": "mamba",
+    "arch": "MambaForCausalLM"
+  },
+  {
+    "model": "mistralai/Mamba-Codestral-7B-v0.1",
+    "variant": "Mamba2",
+    "family": "mamba",
+    "arch": "Mamba2ForCausalLM"
+  },
+  {
+    "model": "JetBrains/Mellum2-12B-A2.5B-Base",
+    "variant": "Mellum 2",
+    "family": "mellum",
+    "arch": "MellumForCausalLM"
+  },
+  {
+    "model": "XiaomiMiMo/MiMo-7B-RL",
+    "variant": "MiMo",
+    "family": "mimo",
+    "arch": "MiMoForCausalLM"
+  },
+  {
+    "model": "XiaomiMiMo/MiMo-V2-Flash",
+    "variant": "MiMoV2Flash",
+    "family": "mimov",
+    "arch": "MiMoV2FlashForCausalLM"
+  },
+  {
+    "model": "XiaomiMiMo/MiMo-V2.5-Pro",
+    "variant": "MiMoV2Pro",
+    "family": "mimov",
+    "arch": "MiMoV2ForCausalLM"
+  },
+  {
+    "model": "openbmb/MiniCPM-S-1B-sft",
+    "variant": "MiniCPM",
+    "family": "minicpm",
+    "arch": "MiniCPMForCausalLM"
+  },
+  {
+    "model": "openbmb/MiniCPM3-4B",
+    "variant": "MiniCPM3",
+    "family": "minicpm",
+    "arch": "MiniCPM3ForCausalLM"
+  },
+  {
+    "model": "MiniMaxAI/MiniMax-Text-01-hf",
+    "variant": "MiniMax-Text",
+    "family": "minimaxtext",
+    "arch": "MiniMaxForCausalLM"
+  },
+  {
+    "model": "MiniMaxAI/MiniMax-M2",
+    "variant": "MiniMax-M2",
+    "family": "minimax",
+    "arch": "MiniMaxM2ForCausalLM"
+  },
+  {
+    "model": "mistralai/Ministral-3-3B-Instruct-2512",
+    "variant": "Ministral-3",
+    "family": "ministral",
+    "arch": "MistralForCausalLM"
+  },
+  {
+    "model": "mistralai/Mistral-7B-v0.1",
+    "variant": "Mistral",
+    "family": "mistral",
+    "arch": "MistralForCausalLM"
+  },
+  {
+    "model": "mistralai/Mistral-Large-3-675B-Base-2512",
+    "variant": "Mistral-Large-3-675B-Base-2512",
+    "family": "mistrallarge",
+    "arch": "MistralLarge3ForCausalLM"
+  },
+  {
+    "model": "mistralai/Mistral-Large-3-675B-Instruct-2512",
+    "variant": "Mistral-Large-3-675B-Instruct-2512",
+    "family": "mistrallarge",
+    "arch": "MistralLarge3ForCausalLM"
+  },
+  {
+    "model": "mistralai/Mixtral-8x7B-v0.1",
+    "variant": "Mixtral-8x7B",
+    "family": "mixtral",
+    "arch": "MixtralForCausalLM"
+  },
+  {
+    "model": "mistralai/Mixtral-8x7B-Instruct-v0.1",
+    "variant": "Mixtral-8x7B-Instruct",
+    "family": "mixtral",
+    "arch": "MixtralForCausalLM"
+  },
+  {
+    "model": "mosaicml/mpt-7b",
+    "variant": "MPT",
+    "family": "mpt",
+    "arch": "MPTForCausalLM"
+  },
+  {
+    "model": "mgoin/Nemotron-4-340B-Base-hf-FP8",
+    "variant": "Nemotron-4",
+    "family": "nemotron",
+    "arch": "NemotronForCausalLM"
+  },
+  {
+    "model": "nvidia/Minitron-8B-Base",
+    "variant": "Minitron",
+    "family": "minitron",
+    "arch": "NemotronForCausalLM"
+  },
+  {
+    "model": "nvidia/Nemotron-H-8B-Base-8K",
+    "variant": "Nemotron-H",
+    "family": "nemotron",
+    "arch": "NemotronHForCausalLM"
+  },
+  {
+    "model": "allenai/OLMo-1B-hf",
+    "variant": "OLMo",
+    "family": "olmo",
+    "arch": "OlmoForCausalLM"
+  },
+  {
+    "model": "allenai/OLMo-2-0425-1B",
+    "variant": "OLMo2",
+    "family": "olmo",
+    "arch": "Olmo2ForCausalLM"
+  },
+  {
+    "model": "allenai/Olmo-3-7B-Instruct",
+    "variant": "OLMo3",
+    "family": "olmo",
+    "arch": "Olmo3ForCausalLM"
+  },
+  {
+    "model": "allenai/Olmo-Hybrid-7B",
+    "variant": "OLMo Hybrid",
+    "family": "olmohybrid",
+    "arch": "OlmoHybridForCausalLM"
+  },
+  {
+    "model": "allenai/OLMoE-1B-7B-0924",
+    "variant": "OLMoE",
+    "family": "olmoe",
+    "arch": "OlmoeForCausalLM"
+  },
+  {
+    "model": "facebook/opt-iml-max-30b",
+    "variant": "OPT",
+    "family": "opt",
+    "arch": "OPTForCausalLM"
+  },
+  {
+    "model": "OrionStarAI/Orion-14B-Base",
+    "variant": "Orion",
+    "family": "orion",
+    "arch": "OrionForCausalLM"
+  },
+  {
+    "model": "ByteDance/Ouro-1.4B",
+    "variant": "ouro",
+    "family": "ouro",
+    "arch": "OuroForCausalLM"
+  },
+  {
+    "model": "FreedomIntelligence/openPangu-Embedded-7B-V1.1",
+    "variant": "openPangu-Embedded-7B",
+    "family": "openpanguembedded",
+    "arch": "PanguEmbeddedForCausalLM"
+  },
+  {
+    "model": "FreedomIntelligence/openPangu-Ultra-MoE-718B-V1.1",
+    "variant": "openpangu-ultra-moe-718b-model",
+    "family": "openpanguultramoe",
+    "arch": "PanguUltraMoEForCausalLM"
+  },
+  {
+    "model": "bharatgenai/Param2-17B-A2.4B-Thinking",
+    "variant": "param2moe",
+    "family": "param",
+    "arch": "Param2MoEForCausalLM"
+  },
+  {
+    "model": "microsoft/phi-1_5",
+    "variant": "Phi",
+    "family": "phi",
+    "arch": "PhiForCausalLM"
+  },
+  {
+    "model": "microsoft/Phi-4-mini-instruct",
+    "variant": "Phi-4",
+    "family": "phi",
+    "arch": "Phi3ForCausalLM"
+  },
+  {
+    "model": "microsoft/Phi-3-mini-4k-instruct",
+    "variant": "Phi-3",
+    "family": "phi",
+    "arch": "Phi3ForCausalLM"
+  },
+  {
+    "model": "microsoft/Phi-3.5-MoE-instruct",
+    "variant": "Phi-3.5-MoE",
+    "family": "phi",
+    "arch": "PhiMoEForCausalLM"
+  },
+  {
+    "model": "adept/persimmon-8b-base",
+    "variant": "Persimmon",
+    "family": "persimmon",
+    "arch": "PersimmonForCausalLM"
+  },
+  {
+    "model": "pfnet/plamo-2-1b",
+    "variant": "PLaMo2",
+    "family": "plamo",
+    "arch": "Plamo2ForCausalLM"
+  },
+  {
+    "model": "pfnet/plamo-3-nict-2b-base",
+    "variant": "PLaMo3",
+    "family": "plamo",
+    "arch": "Plamo3ForCausalLM"
+  },
+  {
+    "model": "Qwen/Qwen-7B",
+    "variant": "Qwen",
+    "family": "qwen",
+    "arch": "QWenLMHeadModel"
+  },
+  {
+    "model": "Qwen/QwQ-32B-Preview",
+    "variant": "QwQ",
+    "family": "qwq",
+    "arch": "Qwen2ForCausalLM"
+  },
+  {
+    "model": "Qwen/Qwen2-7B-Instruct",
+    "variant": "Qwen2",
+    "family": "qwen",
+    "arch": "Qwen2ForCausalLM"
+  },
+  {
+    "model": "Qwen/Qwen1.5-MoE-A2.7B",
+    "variant": "Qwen2MoE",
+    "family": "qwen",
+    "arch": "Qwen2MoeForCausalLM"
+  },
+  {
+    "model": "Qwen/Qwen3-8B",
+    "variant": "Qwen3",
+    "family": "qwen",
+    "arch": "Qwen3ForCausalLM"
+  },
+  {
+    "model": "Qwen/Qwen3-30B-A3B",
+    "variant": "Qwen3MoE",
+    "family": "qwen",
+    "arch": "Qwen3MoeForCausalLM"
+  },
+  {
+    "model": "Qwen/Qwen3-Next-80B-A3B-Instruct",
+    "variant": "Qwen3NextMoE",
+    "family": "qwen",
+    "arch": "Qwen3NextForCausalLM"
+  },
+  {
+    "model": "tiiuae/falcon-40b",
+    "variant": "Falcon RW",
+    "family": "falconrw",
+    "arch": "RWForCausalLM"
+  },
+  {
+    "model": "EssentialAI/rnj-1-instruct",
+    "variant": "Rnj1",
+    "family": "rnj",
+    "arch": "Rnj1ForCausalLM"
+  },
+  {
+    "model": "sarvamai/sarvam2-30b-a3b",
+    "variant": "Sarvam 2",
+    "family": "sarvam",
+    "arch": "SarvamMoEForCausalLM"
+  },
+  {
+    "model": "sarvamai/sarvam2-105b-a9b",
+    "variant": "Sarvam 2",
+    "family": "sarvam",
+    "arch": "SarvamMLAForCausalLM"
+  },
+  {
+    "model": "ByteDance-Seed/Seed-OSS-36B-Instruct",
+    "variant": "SeedOss",
+    "family": "seedoss",
+    "arch": "SeedOssForCausalLM"
+  },
+  {
+    "model": "upstage/solar-pro-preview-instruct",
+    "variant": "Solar Pro",
+    "family": "solarpro",
+    "arch": "SolarForCausalLM"
+  },
+  {
+    "model": "stabilityai/stablelm-3b-4e1t",
+    "variant": "StableLM",
+    "family": "stablelm",
+    "arch": "StableLmForCausalLM"
+  },
+  {
+    "model": "stabilityai/stablelm-zephyr-3b",
+    "variant": "StableLM Epoch",
+    "family": "stablelmepoch",
+    "arch": "StableLMEpochForCausalLM"
+  },
+  {
+    "model": "bigcode/starcoder2-3b",
+    "variant": "Starcoder2",
+    "family": "starcoder",
+    "arch": "Starcoder2ForCausalLM"
+  },
+  {
+    "model": "stepfun-ai/Step-Audio-EditX",
+    "variant": "Step-Audio",
+    "family": "stepaudio",
+    "arch": "Step1ForCausalLM"
+  },
+  {
+    "model": "stepfun-ai/Step-3.5-Flash",
+    "variant": "Step-3.5-flash",
+    "family": "step",
+    "arch": "Step3p5ForCausalLM"
+  },
+  {
+    "model": "chuhac/TeleChat2-35B",
+    "variant": "TeleChat",
+    "family": "telechat",
+    "arch": "TeleChatForCausalLM"
+  },
+  {
+    "model": "Tele-AI/TeleChat2-3B",
+    "variant": "TeleChat2",
+    "family": "telechat",
+    "arch": "TeleChat2ForCausalLM"
+  },
+  {
+    "model": "Tele-AI/TeleChat3-36B-Thinking",
+    "variant": "TeleChat3",
+    "family": "telechat",
+    "arch": "TeleChat3ForCausalLM"
+  },
+  {
+    "model": "CofeAI/Tele-FLM",
+    "variant": "TeleFLM",
+    "family": "teleflm",
+    "arch": "TeleFLMForCausalLM"
+  },
+  {
+    "model": "xverse/XVERSE-7B-Chat",
+    "variant": "XVERSE",
+    "family": "xverse",
+    "arch": "XverseForCausalLM"
+  },
+  {
+    "model": "MiniMaxAI/MiniMax-M1-40k",
+    "variant": "MiniMax-Text",
+    "family": "minimaxtext",
+    "arch": "MiniMaxM1ForCausalLM"
+  },
+  {
+    "model": "MiniMaxAI/MiniMax-Text-01",
+    "variant": "MiniMax-Text",
+    "family": "minimaxtext",
+    "arch": "MiniMaxText01ForCausalLM"
+  },
+  {
+    "model": "Zyphra/Zamba2-1.2B-instruct",
+    "variant": "Zamba2",
+    "family": "zamba",
+    "arch": "Zamba2ForCausalLM"
+  },
+  {
+    "model": "HuggingFaceTB/SmolLM3-3B",
+    "variant": "SmolLM3",
+    "family": "smollm",
+    "arch": "SmolLM3ForCausalLM"
+  }
+]

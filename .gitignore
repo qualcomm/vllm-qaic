@@ -193,6 +193,9 @@ AGENTS.md
 # Results
 *.csv
 
+# Fallback-ops CI run artifacts (logs/csv/xlsx)
+ci_scripts/ci_logs/
+
 # Python pickle files
 *.pkl
 
