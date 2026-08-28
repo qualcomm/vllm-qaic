@@ -192,9 +192,14 @@ def build_sheet(writer, sheet_name, records):
     if not all_ops:
         print(f"  No operations found for sheet '{sheet_name}'. Writing empty sheet.")
 
+    # Excel-facing labels for the per-op sub-columns. The underlying dict keys
+    # ("tc", "tt") come from fallback_parser.py's printed output and are kept
+    # as-is so existing parse_*.log files still parse correctly.
+    SUB_COLUMNS = [("Fallback Count", "tc"), ("Total Time (us)", "tt")]
+
     columns = pd.MultiIndex.from_tuples(
-        [("Ran?", ""), ("TP", "")]
-        + [(op, sub) for op in all_ops for sub in ["tc", "tt"]],
+        [("Ran?", ""), ("Fallback?", ""), ("TP", "")]
+        + [(op, label) for op in all_ops for label, _ in SUB_COLUMNS],
         names=["Operation", "Metric"],
     )
 
@@ -202,14 +207,11 @@ def build_sheet(writer, sheet_name, records):
     index = [r["model"] for r in records]
     rows = []
     for r in records:
-        row = [r["ran"], r["tp"]]
+        fallback = "Yes" if r["ops"] else "No"
+        row = [r["ran"], fallback, r["tp"]]
         for op in all_ops:
-            if op in r["ops"]:
-                row.append(r["ops"][op].get("tc", ""))
-                row.append(r["ops"][op].get("tt", ""))
-            else:
-                row.append("")
-                row.append("")
+            for _, key in SUB_COLUMNS:
+                row.append(r["ops"].get(op, {}).get(key, ""))
         rows.append(row)
 
     df = pd.DataFrame(rows, index=index, columns=columns)

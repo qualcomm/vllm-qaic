@@ -31,6 +31,7 @@ def extract_fallback_ops(file_path):
                 fallback_ops_stats[op]["tt"] += time
 
     print(fallback_ops_stats)
+    return fallback_ops_stats
 
 
 if __name__ == "__main__":
