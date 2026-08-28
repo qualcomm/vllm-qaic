@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 import torch
@@ -63,9 +64,22 @@ class QAicUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             "relu2_no_mul",
         }
         if x.dtype == torch.float16 and activation in qaic_kernel_activations:
-            from vllm_qaic._custom_ops import unquantized_fused_moe_hvx
+            kernel = os.environ.get("QAIC_UNQUANTIZED_FUSED_MOE_KERNEL", "hmx").lower()
+            if kernel == "hmx":
+                from vllm_qaic._custom_ops import (
+                    unquantized_fused_moe_hmx as unquantized_fused_moe_impl,
+                )
+            elif kernel == "hvx":
+                from vllm_qaic._custom_ops import (
+                    unquantized_fused_moe_hvx as unquantized_fused_moe_impl,
+                )
+            else:
+                raise ValueError(
+                    "QAIC_UNQUANTIZED_FUSED_MOE_KERNEL must be 'hvx' or 'hmx', "
+                    f"got {kernel!r}"
+                )
 
-            return unquantized_fused_moe_hvx(
+            return unquantized_fused_moe_impl(
                 x=x,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
