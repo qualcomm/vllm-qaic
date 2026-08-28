@@ -260,6 +260,7 @@ class QaicAsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         # 3. Book keep to update input batch
         (
             num_nans_in_logits,
+            _num_nans_device,
             logprobs_lists,
             valid_sampled_token_ids,
             prompt_logprobs_dict,
@@ -1446,6 +1447,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
 
         (
             num_nans_in_logits,
+            _num_nans_device,
             logprobs_lists,
             valid_sampled_token_ids,
             prompt_logprobs_dict,
