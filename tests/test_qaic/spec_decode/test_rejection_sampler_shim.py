@@ -467,8 +467,8 @@ def test_pytorch_selector_fails_actionably_in_subprocess():
     )
 
     assert result.returncode != 0
-    assert "pytorch is no longer supported" in result.stderr
-    assert "fallback" in result.stderr
+    assert "pytorch is not a valid QAIC PYT setting" in result.stderr
+    assert "legacy alias" in result.stderr
 
 
 def test_invalid_selector_fails_actionably_in_subprocess():
