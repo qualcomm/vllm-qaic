@@ -1901,13 +1901,16 @@ def _torch_cuda_wrapper():
             pass
 
     cuda_event = torch.Event
+    cuda_cuda_event = torch.cuda.Event
     cuda_stream = torch.cuda.Stream
     try:
         torch.Event = _EventPlaceholder
+        torch.cuda.Event = _EventPlaceholder
         torch.cuda.Stream = _StreamPlaceholder
         yield
     finally:
         torch.Event = cuda_event
+        torch.cuda.Event = cuda_cuda_event
         torch.cuda.Stream = cuda_stream
 
 
