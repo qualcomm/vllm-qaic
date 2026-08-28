@@ -421,6 +421,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
 
         self.use_cuda_graph = False
         self.cascade_attn_enabled = False
+        self.pin_memory = False
 
         assert device == torch.device("cpu")
         # --- Disaggregated serving flags (must precede drafter gating) ---
