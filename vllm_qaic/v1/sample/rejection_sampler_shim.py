@@ -158,10 +158,10 @@ def _selected_implementation() -> str:
         return _TRITON_IMPL
     if implementation == _PYTORCH_IMPL:
         raise RuntimeError(
-            f"{_REJECTION_SAMPLER_IMPL_ENV}=pytorch is no longer supported: "
-            "the QAIC PYT PyTorch fallback for expand, greedy rejection, and "
-            "random rejection was removed. Unset the variable or set it to "
-            "'hybrid' to use the Qualcomm-Triton default."
+            f"{_REJECTION_SAMPLER_IMPL_ENV}=pytorch is not a valid QAIC PYT "
+            "setting. QAIC PYT installs Qualcomm-Triton kernels for expand, "
+            "greedy rejection, and random rejection by default. Unset the "
+            "variable or set it to 'hybrid' (legacy alias)."
         )
     raise RuntimeError(
         f"{_REJECTION_SAMPLER_IMPL_ENV} must be unset or '{_HYBRID_IMPL}'; "
