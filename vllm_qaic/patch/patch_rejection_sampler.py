@@ -85,11 +85,8 @@ def _qaic_forward(
         sampling_metadata,
     )
     # --- BEGIN QAIC modification: skip-softmax optimisation ---
-    # For greedy decoding argmax(logits) == argmax(softmax(logits)).
-    if sampling_metadata.all_greedy:
-        target_probs = target_logits
-    else:
-        target_probs = target_logits.softmax(dim=-1, dtype=torch.float32)
+    # v0.28.0 rejection_sample() consumes logits and handles internal
+    # greedy fast-path/softmax behavior itself.
     # --- END QAIC modification ---
 
     output_token_ids = rejection_sample(
@@ -98,9 +95,12 @@ def _qaic_forward(
         metadata.max_spec_len,
         metadata.cu_num_draft_tokens,
         draft_probs,
-        target_probs,
+        target_logits,
         bonus_token_ids,
         sampling_metadata,
+        synthetic_mode=self.synthetic_mode,
+        synthetic_conditional_rates=self.synthetic_conditional_rates,
+        use_fp64_gumbel=self.use_fp64_gumbel,
     )
 
     logprobs_tensors = None
