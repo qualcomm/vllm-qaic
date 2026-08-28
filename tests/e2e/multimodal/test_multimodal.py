@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 # ------------------------------------------------------------------
 import random
+from difflib import SequenceMatcher
 
 import pytest
 import regex as re
@@ -473,6 +474,88 @@ def _qwenvl_multi_resolution_test(
         print(o1.outputs[0].text)
         print(o2.outputs[0].text)
         assert o1.outputs[0].text == o2.outputs[0].text
+
+
+@pytest.mark.qaic_test_config(
+    model_name="Qwen/Qwen2.5-VL-3B-Instruct",
+    ctx_len=4096,
+    dtype="mxfp6",
+    kv_dtype="mxint8",
+    num_device_groups=2,
+    device_group_size=1,
+)
+def test_paged_attention_single_image(
+    mm_input, model_name, device_groups, make_runner, ctx_len, seq_len
+):
+    """Compare single-batch (no prefix-caching) outputs against
+    paged-attention (prefix_caching=True) outputs."""
+    tokenizer = _tokenizer_for(model_name)
+    sampling_params = _sampling_params_for(model_name, tokenizer)
+    updated_input = build_model_input(model_name, mm_input, tokenizer)
+    override_cfg = update_qaic_config(model_name, None)
+    mm_kwargs = _mm_processor_kwargs(model_name)
+
+    inputs = [
+        {"prompt": p, "multi_modal_data": {"image": img}} for img, p in updated_input
+    ]
+    repeated_inputs = inputs * 3
+    random.shuffle(repeated_inputs)
+
+    with make_runner(
+        async_scheduling=False,
+        dg=device_groups[0],
+        max_num_seqs=1,
+        runner="pooling",
+        quantization=None,
+        kv_cache_dtype="auto",
+        override_qaic_config=override_cfg,
+        trust_remote_code=is_internvl(model_name),
+        enable_mm_embeds=True,
+        limit_mm_per_prompt={"image": 1},
+        **mm_kwargs,
+    ) as qllm_embed:
+        gen_inputs = encode_if_mm(qllm_embed, repeated_inputs, model_name)
+
+    with make_runner(
+        async_scheduling=False,
+        dg=device_groups[1],
+        max_num_seqs=1,
+        override_qaic_config=override_cfg,
+        trust_remote_code=is_internvl(model_name),
+        enable_mm_embeds=True,
+        limit_mm_per_prompt={"image": 1},
+        enable_prefix_caching=False,
+        **mm_kwargs,
+    ) as qllm_gen:
+        outputs = qllm_gen.llm.generate(gen_inputs, sampling_params=sampling_params)
+
+    with make_runner(
+        async_scheduling=False,
+        dg=device_groups[1],
+        max_num_seqs=1,
+        override_qaic_config=override_cfg,
+        trust_remote_code=is_internvl(model_name),
+        enable_mm_embeds=True,
+        limit_mm_per_prompt={"image": 1},
+        enable_prefix_caching=True,
+        **mm_kwargs,
+    ) as qllm_gen_pa:
+        outputs_pa = qllm_gen_pa.llm.generate(
+            gen_inputs, sampling_params=sampling_params
+        )
+
+    assert len(outputs) == len(outputs_pa) == len(repeated_inputs)
+    for o1, o2 in zip(outputs, outputs_pa, strict=False):
+        assert len(o2.outputs[0].text) > 1
+        print(o1.outputs[0].text)
+        print(o2.outputs[0].text)
+        ids1 = o1.outputs[0].token_ids
+        ids2 = o2.outputs[0].token_ids
+        similarity = SequenceMatcher(None, ids1, ids2).ratio()
+        assert similarity >= 0.5, (
+            f"Output similarity {similarity:.3f} below threshold.\n"
+            f"no-pa: {o1.outputs[0].text!r}\npa:    {o2.outputs[0].text!r}"
+        )
 
 
 @pytest.mark.qaic_test_config(
