@@ -12,7 +12,7 @@ from typing import Any
 import torch
 from packaging.version import Version as _Version
 from qwen_vl_utils import smart_resize
-from transformers import BatchFeature, Qwen2VLImageProcessorFast, TensorType
+from transformers import BatchFeature, TensorType
 from transformers import __version__ as _transformers_version
 from transformers.image_processing_utils import select_best_resolution
 from transformers.image_transforms import group_images_by_shape, reorder_images
@@ -90,9 +90,15 @@ from vllm.multimodal.processing.processor import (
 )
 
 logger = init_logger(__name__)
+try:
+    from transformers import Qwen2VLImageProcessorFast
+except ImportError:
+    # Transformers >=5.15 removed the Fast suffix class export.
+    from transformers import Qwen2VLImageProcessor as Qwen2VLImageProcessorFast
+
 # transformers v5.5.4 replaced image_processor.min_pixels / .max_pixels class
 # attributes with a size dict keyed by 'shortest_edge' / 'longest_edge'.
-_TRANSFORMERS_NEW_IMAGE_PROCESSOR = _Version(_transformers_version) == _Version("5.5.4")
+_TRANSFORMERS_NEW_IMAGE_PROCESSOR = _Version(_transformers_version) >= _Version("5.5.4")
 _gemma4_get_placeholder_str = Gemma4ForConditionalGeneration.get_placeholder_str
 # Gemma4 with vllm v0.23 wabts image modality instead of image_embeds
 Gemma4ForConditionalGeneration.get_placeholder_str = classmethod(
