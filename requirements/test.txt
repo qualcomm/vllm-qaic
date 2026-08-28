@@ -3,10 +3,9 @@
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 # ------------------------------------------------------------------
 
-ruff
-isort
 pytest
 anyio
+datasets
 evaluate
 nltk
 pytest-asyncio
