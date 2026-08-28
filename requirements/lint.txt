@@ -3,4 +3,4 @@
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 # ------------------------------------------------------------------
 
-pre-commit==4.0.1
+pre-commit>=4.5.1
