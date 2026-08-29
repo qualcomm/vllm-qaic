@@ -261,11 +261,18 @@ RUN python -m pip install --quiet \
 # Cache key: TRITON_CPU and TRITON_CPU_COMMIT ENV vars (set above).
 # Cache mounts keep the git clone and LLVM toolchain across rebuilds so
 # only changed source files are recompiled on subsequent builds.
+# zlib1g-dev/libxml2-dev: triton-cpu's prebuilt LLVM links against them;
+# without the dev headers, CMake fails to resolve LLVM's exported targets.
 # ---------------------------------------------------------------------------
-RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
+RUN --mount=type=cache,sharing=locked,target=/var/cache/apt \
+    --mount=type=cache,sharing=locked,target=/var/lib/apt \
+    --mount=type=cache,sharing=locked,target=/var/cache/uv \
     --mount=type=cache,sharing=locked,target=/root/triton-cpu \
     --mount=type=cache,sharing=locked,target=/root/.triton_home \
     if [ "${TRITON_CPU}" = "1" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends \
+            zlib1g-dev \
+            libxml2-dev && \
         VIRTUAL_ENV="${VENV}" \
         TRITON_CPU_SRC=/root/triton-cpu \
         TRITON_HOME=/root/.triton_home \
