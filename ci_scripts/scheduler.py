@@ -165,12 +165,14 @@ class Scheduler:
         timeout_s: float,
         cooldown_s: float,
         dry_run: bool = False,
+        set_qaic_visible_devices: bool = False,
     ):
         self.jobs = jobs
         self.device_pool = DevicePool(device_ids, cooldown_s=cooldown_s)
         self.output_dir = output_dir
         self.timeout_s = timeout_s
         self.dry_run = dry_run
+        self.set_qaic_visible_devices = set_qaic_visible_devices
 
         self.cond = threading.Condition()
         self.print_lock = threading.Lock()
@@ -289,6 +291,7 @@ class Scheduler:
 
         try:
             job_dir.mkdir(parents=True, exist_ok=True)
+            pytest_args = list(job.base_args)
             cmd = [
                 "python3",
                 "-m",
@@ -301,12 +304,21 @@ class Scheduler:
                 *job.nodeids,
                 "--device-id",
                 ",".join(str(d) for d in job.device_ids),
-                *job.base_args,
+                *pytest_args,
             ]
+            job_env = None
+            if self.set_qaic_visible_devices:
+                job_env = os.environ.copy()
+                job_env["QAIC_VISIBLE_DEVICES"] = ",".join(
+                    str(device_id) for device_id in job.device_ids
+                )
 
             with open(log_path, "wb") as log_file:
                 process = subprocess.Popen(
-                    cmd, stdout=log_file, stderr=subprocess.STDOUT
+                    cmd,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    env=job_env,
                 )
                 try:
                     job.return_code = process.wait(timeout=self.timeout_s)
@@ -429,6 +441,14 @@ def main() -> int:
             f"(default: {_DEFAULT_TIMEOUT_S})"
         ),
     )
+    parser.add_argument(
+        "--set-qaic-visible-devices",
+        action="store_true",
+        help=(
+            "set QAIC_VISIBLE_DEVICES to each job's assigned physical IDs "
+            "before its pytest subprocess starts"
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -444,6 +464,7 @@ def main() -> int:
         timeout_s=args.timeout,
         cooldown_s=_DEFAULT_COOLDOWN_S,
         dry_run=args.dry_run,
+        set_qaic_visible_devices=args.set_qaic_visible_devices,
     )
     run_start = time.monotonic()
     summary = scheduler.run()

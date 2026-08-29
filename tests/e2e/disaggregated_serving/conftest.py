@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 import regex as re
 
-from ..conftest import _closest_marker_for_node, _device_pool, _free_port
+from ..conftest import _closest_marker_for_node, _device_pool, _free_port, _marker_kwargs
 from .utils import check_port_status
 
 
@@ -75,7 +75,7 @@ def _disagg_test_config(request, pytestconfig, host, port, device_pool_ids):
             "num_decode_workers, prefill_device_group_size, decode_device_group_size, "
             "prefill_max_num_seqs"
         )
-    kwargs = marker.kwargs
+    kwargs = _marker_kwargs(marker)
     required = (
         "model_name",
         "seq_len",
