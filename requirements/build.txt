@@ -1,0 +1,13 @@
+# ------------------------------------------------------------------
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause-Clear
+# ------------------------------------------------------------------
+
+# Build-toolchain deps, always installed for --no-build-isolation installs
+# of vllm and vllm-qaic. Keep setuptools/wheel in sync with pyproject.toml's
+# [build-system].requires (TOML can't include this file directly).
+setuptools>=77.0.3,<80.0.0
+setuptools-scm
+setuptools-rust
+wheel
+cmake>=3.26

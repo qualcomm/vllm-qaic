@@ -150,7 +150,7 @@ if [ "${VLLM_BUILD_RUST:-0}" = "1" ]; then
 fi
 
 # vllm build deps — always needed for --no-build-isolation
-${PIP} install "setuptools>=77.0.3,<80.0.0" setuptools-scm setuptools-rust wheel "cmake>=3.26"
+${PIP} install -r "${SCRIPT_DIR}/../requirements/build.txt"
 
 if [ "${MODE}" = "aot" ]; then
     if ${PYTHON} -c "import importlib.metadata; importlib.metadata.version('torch-qaic')" 2>/dev/null; then

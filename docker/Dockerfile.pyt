@@ -211,6 +211,7 @@ ARG VLLM_BUILD_RUST="0"
 # symlinks into it, and a cache mount's contents vanish when the RUN ends,
 # leaving a dangling symlink in the venv for every later layer.
 # ---------------------------------------------------------------------------
+COPY requirements/build.txt /src/vllm-qaic/requirements/build.txt
 RUN --mount=type=cache,sharing=locked,target=/var/cache/apt \
     --mount=type=cache,sharing=locked,target=/var/lib/apt \
     --mount=type=cache,sharing=locked,target=/var/cache/uv \
@@ -220,12 +221,7 @@ RUN --mount=type=cache,sharing=locked,target=/var/cache/apt \
         git && \
     uv python install ${PYTHON_VERSION} && \
     uv venv ${VENV} --python ${PYTHON_VERSION} --seed && \
-    PATH="${VENV}/bin:${PATH}" uv pip install \
-        "setuptools>=77.0.3,<80.0.0" \
-        setuptools-scm \
-        setuptools-rust \
-        wheel \
-        "cmake>=3.26"
+    PATH="${VENV}/bin:${PATH}" uv pip install -r /src/vllm-qaic/requirements/build.txt
 
 ENV PATH="${VENV}/bin:${PATH}" \
     VIRTUAL_ENV="${VENV}"
@@ -294,8 +290,7 @@ RUN --mount=type=cache,sharing=locked,target=/usr/local/cargo/registry \
 COPY requirements/vllm_dependency_pyt.txt /src/vllm-qaic/requirements/vllm_dependency_pyt.txt
 RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
     uv pip install -r /src/vllm-qaic/requirements/vllm_dependency_pyt.txt && \
-    uv pip install \
-        "setuptools>=77.0.3,<80.0.0" setuptools-scm setuptools-rust wheel "cmake>=3.26" && \
+    uv pip install -r /src/vllm-qaic/requirements/build.txt && \
     TORCH_DEVICE_BACKEND_AUTOLOAD=0 \
     VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE_PYT}" uv pip install \
         --no-build-isolation --no-deps /src/vllm && \

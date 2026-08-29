@@ -1,4 +1,6 @@
 [build-system]
+# Keep setuptools/wheel versions in sync with requirements/build.txt — PEP 518
+# requires this list to be a static literal, so it can't include that file.
 requires = [
     "setuptools>=77.0.3,<80.0.0",
     "setuptools-scm>=8.0",
