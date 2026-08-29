@@ -381,4 +381,3 @@ All version constants are defined in [`scripts/utility.sh`](../scripts/utility.s
 | `VLLM_QAIC_SDK_PATH` | `/opt/qti-aic/integrations/vllm_qaic` | SDK path for pre-built vllm-qaic wheels |
 
 ¹ Defined in `scripts/install_triton_cpu.sh`, not `utility.sh`.
-
