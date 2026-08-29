@@ -368,13 +368,13 @@ All version constants are defined in [`scripts/utility.sh`](../scripts/utility.s
 | `TORCH_VERSION_PYT` | `2.11.0+cpu` | CPU torch for PYT |
 | `TORCHVISION_VERSION_PYT` | `0.26.0+cpu` | torchvision for PYT (keep in sync with torch) |
 | `TORCHAUDIO_VERSION_PYT` | `2.11.0+cpu` | torchaudio for PYT (keep in sync with torch) |
-| `QEFF_BRANCH` | `release/v1.22.0` | QEfficient branch/tag |
+| `QEFF_BRANCH` | `main` | QEfficient branch/tag |
 | `TORCH_QAIC_VERSION` | `0.1.0` | torch_qaic wheel version |
 | `VLLM_TARGET_DEVICE_AOT` | `empty` | vLLM build target for AOT mode |
 | `VLLM_TARGET_DEVICE_PYT` | `empty` | vLLM build target for PYT mode |
 | `TRITON_CPU` | `0` | Set to `1` to enable triton-cpu backend (AOT SpD) |
 | `TRITON_CPU_COMMIT` | `e60f448f...` | Pinned triton-cpu commit hash |
-| `TRITON_CPU_SRC` | `$HOME/triton-cpu` | Clone destination for triton-cpu source |
+| `TRITON_CPU_SRC` | `<repo>/.build/triton-cpu` | Clone destination for triton-cpu source |
 | `TRITON_CPU_COMPILE_MAX_JOBS` | `4` | Parallel build jobs for triton-cpu compilation |
 | `TRITON_CPU_SKIP_DISK_CHECK`¹ | `0` | Set to `1` to skip the 10 GB disk-space pre-flight check |
 | `TORCH_QAIC_BASE_PATH` | `/opt/qti-aic/integrations/torch_qaic` | SDK path for torch_qaic wheels |
