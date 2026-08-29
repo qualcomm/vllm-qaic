@@ -385,10 +385,11 @@ ENV PATH="${VENV}/bin:${PATH}" \
     VLLM_PLUGINS="qaic"
 
 # ===========================================================================
-# DEV — editable install of vllm-qaic for fast iteration.
+# DEV — editable installs of vllm and vllm-qaic for fast iteration.
 # torch_qaic is a binary SDK wheel — no editable override needed.
-# vllm source is re-cloned (pyt-base deletes it after install) and kept for
-# reference; vllm-qaic source dir is kept for its editable install.
+# vllm:       re-cloned and reinstalled editable (pyt-base's non-editable
+#             install is uninstalled first).
+# vllm-qaic:  source dir kept for its editable install.
 # ===========================================================================
 FROM pyt-base AS dev-builder
 
@@ -396,9 +397,17 @@ ARG VENV="/opt/venv-pyt"
 ARG VLLM_VERSION="0.23.0"
 ARG VLLM_QAIC_VERSION="1.22"
 ARG QAIC_DEVICE_ARCH="v68"
+ARG VLLM_TARGET_DEVICE_PYT="empty"
 
-RUN git clone --branch "v${VLLM_VERSION}" --depth 1 \
-        https://github.com/vllm-project/vllm.git /src/vllm
+# vllm editable — re-clone (pyt-base deleted its source after the
+# non-editable install), uninstall that copy, reinstall -e.
+RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
+    git clone --branch "v${VLLM_VERSION}" --depth 1 \
+        https://github.com/vllm-project/vllm.git /src/vllm && \
+    uv pip uninstall vllm --quiet 2>/dev/null || true && \
+    TORCH_DEVICE_BACKEND_AUTOLOAD=0 \
+    VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE_PYT}" uv pip install \
+        --no-build-isolation --no-deps -e /src/vllm
 
 COPY . /src/vllm-qaic
 RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \

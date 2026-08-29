@@ -411,11 +411,12 @@ ENV PATH="${VENV}/bin:${PATH}" \
     VLLM_PLUGINS="qaic"
 
 # ===========================================================================
-# DEV — editable installs of QEfficient and vllm-qaic for fast iteration.
+# DEV — editable installs of QEfficient, vllm, and vllm-qaic for fast
+# iteration.
 # QEfficient: QEFF_PR > QEFF_BRANCH (cloned, editable).
 # vllm-qaic:  always from build context (COPY .), editable.
-# vllm:       re-cloned for reference (aot-base deletes it after the
-#             non-editable install; already present in the venv).
+# vllm:       re-cloned and reinstalled editable (aot-base's non-editable
+#             install is uninstalled first).
 # Source dirs are kept in the final image (editable installs need them).
 # ===========================================================================
 FROM aot-base AS dev-builder
@@ -425,6 +426,7 @@ ARG VLLM_VERSION="0.23.0"
 ARG VLLM_QAIC_VERSION="1.22"
 ARG QEFF_BRANCH="release/v1.22.0"
 ARG QEFF_PR=""
+ARG VLLM_TARGET_DEVICE_AOT="empty"
 
 # Step 4a: QEfficient editable — clone source, uninstall non-editable, reinstall -e.
 RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
@@ -441,10 +443,14 @@ RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
     uv pip uninstall qefficient --quiet 2>/dev/null || true && \
     uv pip install -e /src/qefficient --no-build-isolation
 
-# Step 4b: re-clone vllm source (deleted from aot-base after install) so
-# dev keeps a copy for reference; not reinstalled, already in the venv.
-RUN git clone --branch "v${VLLM_VERSION}" --depth 1 \
-        https://github.com/vllm-project/vllm.git /src/vllm
+# Step 4b: vllm editable — re-clone (aot-base deleted its source after the
+# non-editable install), uninstall that copy, reinstall -e.
+RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
+    git clone --branch "v${VLLM_VERSION}" --depth 1 \
+        https://github.com/vllm-project/vllm.git /src/vllm && \
+    uv pip uninstall vllm --quiet 2>/dev/null || true && \
+    VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE_AOT}" uv pip install \
+        --no-build-isolation --no-deps -e /src/vllm
 
 # Step 4c: vllm-qaic editable — always from build context.
 # This is the last COPY so it is the only layer invalidated by source edits.
