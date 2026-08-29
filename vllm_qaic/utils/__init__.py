@@ -13,5 +13,4 @@ QAIC_QUANTIZATION_LIST = [
     "fp8",
     "compressed-tensors",
     "mxfp4",
-    "gpt_oss_mxfp4",
 ]
