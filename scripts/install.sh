@@ -24,11 +24,9 @@
 # Environment overrides:
 #   TRANSFORMERS_VERSION_AOT   If set, pins transformers version after qefficient install
 #   TRANSFORMERS_VERSION_PYT   If set, pins transformers version after torch_qaic install
-#   VLLM_BUILD_RUST            If "1", clones vllm from source and builds its
-#                              experimental Rust OpenAI-compatible frontend
-#                              (rust/, build_rust.sh) before installing, instead
-#                              of installing straight from the git+URL. Requires
-#                              a Rust toolchain (cargo) on PATH — see rustup.rs.
+#   VLLM_BUILD_RUST            If "1", builds vllm's experimental Rust
+#                              OpenAI-compatible frontend from source instead
+#                              of installing from the git+URL.
 
 set -euo pipefail
 
@@ -135,17 +133,11 @@ echo "    TRITON_CPU=1 TRITON_CPU_SRC=/data/triton-cpu ./scripts/install.sh aot"
 echo "========================================================"
 echo ""
 
-# Resolve the vllm install target: either the published git tag (default), or
-# a local source checkout with the experimental Rust frontend built in
-# (VLLM_BUILD_RUST=1). Used by both aot and pyt below.
+# vllm install target: published git tag, or a local Rust-enabled checkout
+# when VLLM_BUILD_RUST=1. Used by both aot and pyt below.
 VLLM_INSTALL_TARGET="vllm @ git+https://github.com/vllm-project/vllm.git@v${VLLM_VERSION}"
 if [ "${VLLM_BUILD_RUST:-0}" = "1" ]; then
     echo "=== Building vllm Rust frontend (VLLM_BUILD_RUST=1) ==="
-    if ! command -v cargo >/dev/null 2>&1; then
-        echo "ERROR: VLLM_BUILD_RUST=1 requires a Rust toolchain (cargo not found on PATH)." >&2
-        echo "       Install one via https://rustup.rs and re-run." >&2
-        exit 1
-    fi
     VLLM_SRC_DIR="$(dirname "${REPO_ROOT}")/vllm"
     if [ ! -d "${VLLM_SRC_DIR}/.git" ]; then
         git clone https://github.com/vllm-project/vllm.git "${VLLM_SRC_DIR}"

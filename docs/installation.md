@@ -113,9 +113,9 @@ TRITON_CPU=1 TRITON_CPU_SRC=/path/with/more/space/triton-cpu ./scripts/install.s
 TRITON_CPU=1 TRITON_CPU_SKIP_DISK_CHECK=1 ./scripts/install.sh aot
 
 # Build vllm's experimental Rust OpenAI-compatible frontend (rust/, build_rust.sh)
-# from source instead of installing vllm from the published git tag. Requires a
-# Rust toolchain (cargo) on PATH — install one via https://rustup.rs, or via
-# conda-forge (`conda install -c conda-forge rust`) into an env already on PATH.
+# from source instead of installing vllm from the published git tag.
+# build_rust.sh bootstraps its own rustup toolchain automatically — no
+# pre-existing Rust install needed, just network access.
 # Applies to both aot and pyt; clones/reuses a vllm checkout as a sibling of the
 # vllm-qaic repo (`../vllm`) and checks out the pinned VLLM_VERSION tag.
 VLLM_BUILD_RUST=1 ./scripts/install.sh aot
@@ -168,7 +168,7 @@ pip install -r requirements/vllm_dependency_aot.txt
 #   (empty target: no C++ compilation, no torch in wheel METADATA)
 VLLM_TARGET_DEVICE=empty pip install \
     --no-build-isolation --no-deps \
-    "vllm @ git+https://github.com/vllm-project/vllm.git@v0.15.0"
+    "vllm @ git+https://github.com/vllm-project/vllm.git@v0.23.0"
 
 # 3. vllm-qaic from source
 TORCH_QAIC_INSTALLED=0 pip install --no-build-isolation ./vllm-qaic
@@ -361,12 +361,14 @@ All version constants are defined in [`scripts/utility.sh`](../scripts/utility.s
 
 | Constant | Value | Description |
 |---|---|---|
-| `VLLM_VERSION` | `0.15.0` | vLLM release tag |
+| `VLLM_VERSION` | `0.23.0` | vLLM release tag |
+| `VLLM_QAIC_VERSION` | `1.22` | vllm-qaic SDK/version tag (used in wheel tag and version suffix) |
 | `TORCH_VERSION_AOT` | `2.7.0+cpu` | CPU torch for AOT (matches QEfficient exact pin) |
+| `TORCHVISION_VERSION_AOT` | `0.22.0+cpu` | torchvision for AOT (keep in sync with torch) |
 | `TORCH_VERSION_PYT` | `2.11.0+cpu` | CPU torch for PYT |
 | `TORCHVISION_VERSION_PYT` | `0.26.0+cpu` | torchvision for PYT (keep in sync with torch) |
 | `TORCHAUDIO_VERSION_PYT` | `2.11.0+cpu` | torchaudio for PYT (keep in sync with torch) |
-| `QEFF_BRANCH` | `main` | QEfficient branch/tag |
+| `QEFF_BRANCH` | `release/v1.22.0` | QEfficient branch/tag |
 | `TORCH_QAIC_VERSION` | `0.1.0` | torch_qaic wheel version |
 | `VLLM_TARGET_DEVICE_AOT` | `empty` | vLLM build target for AOT mode |
 | `VLLM_TARGET_DEVICE_PYT` | `empty` | vLLM build target for PYT mode |
@@ -374,6 +376,9 @@ All version constants are defined in [`scripts/utility.sh`](../scripts/utility.s
 | `TRITON_CPU_COMMIT` | `e60f448f...` | Pinned triton-cpu commit hash |
 | `TRITON_CPU_SRC` | `$HOME/triton-cpu` | Clone destination for triton-cpu source |
 | `TRITON_CPU_COMPILE_MAX_JOBS` | `4` | Parallel build jobs for triton-cpu compilation |
-| `TRITON_CPU_SKIP_DISK_CHECK` | `0` | Set to `1` to skip the 10 GB disk-space pre-flight check |
+| `TRITON_CPU_SKIP_DISK_CHECK`¹ | `0` | Set to `1` to skip the 10 GB disk-space pre-flight check |
 | `TORCH_QAIC_BASE_PATH` | `/opt/qti-aic/integrations/torch_qaic` | SDK path for torch_qaic wheels |
 | `VLLM_QAIC_SDK_PATH` | `/opt/qti-aic/integrations/vllm_qaic` | SDK path for pre-built vllm-qaic wheels |
+
+¹ Defined in `scripts/install_triton_cpu.sh`, not `utility.sh`.
+
