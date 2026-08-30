@@ -27,48 +27,43 @@
 #
 # Build commands
 # --------------
-# Run from the directory ABOVE this repo (context must contain vllm-qaic/
-# as a subdirectory — every COPY below is relative to it):
-#
 #   # Standalone base (push to registry for reuse):
-#   docker build --target aot-base -f vllm-qaic/docker/Dockerfile.aot -t vllm-qaic-aot-base:1.22 .
+#   docker build --target aot-base -t vllm-qaic-aot-base:1.22 .
 #
 #   # Release (default pins):
-#   docker build --target release -f vllm-qaic/docker/Dockerfile.aot -t vllm-qaic-aot:1.22 .
+#   docker build --target release -t vllm-qaic-aot:1.22 .
 #
 #   # Release (override version):
-#   docker build --target release -f vllm-qaic/docker/Dockerfile.aot \
+#   docker build --target release \
 #     --build-arg VLLM_QAIC_GIT_REF=v1.22 \
 #     --build-arg QEFF_BRANCH=release/v1.22.0 \
 #     -t vllm-qaic-aot:1.22 .
 #
 #   # CI (current checkout):
-#   docker build --target ci -f vllm-qaic/docker/Dockerfile.aot -t vllm-qaic-aot:ci .
+#   docker build --target ci -t vllm-qaic-aot:ci .
 #
 #   # CI (specific PR):
-#   docker build --target ci -f vllm-qaic/docker/Dockerfile.aot \
-#     --build-arg VLLM_QAIC_PR=42 -t vllm-qaic-aot:ci-pr-42 .
+#   docker build --target ci --build-arg VLLM_QAIC_PR=42 -t vllm-qaic-aot:ci-pr-42 .
 #
 #   # CI (specific branch):
-#   docker build --target ci -f vllm-qaic/docker/Dockerfile.aot \
+#   docker build --target ci \
 #     --build-arg VLLM_QAIC_BRANCH=feature/my-branch \
 #     -t vllm-qaic-aot:ci-branch .
 #
 #   # Dev (default branches, editable installs):
-#   docker build --target dev -f vllm-qaic/docker/Dockerfile.aot -t vllm-qaic-aot:dev .
+#   docker build --target dev -t vllm-qaic-aot:dev .
 #
 #   # Dev (specific QEfficient PR):
-#   docker build --target dev -f vllm-qaic/docker/Dockerfile.aot \
-#     --build-arg QEFF_PR=456 -t vllm-qaic-aot:dev .
+#   docker build --target dev --build-arg QEFF_PR=456 -t vllm-qaic-aot:dev .
 #
 #   # Wheel (export to ./dist/aot):
-#   docker buildx build --target wheel -f vllm-qaic/docker/Dockerfile.aot \
-#     -t vllm-qaic-aot-wheel --output type=local,dest=./dist/aot .
+#   docker buildx build --target wheel -t vllm-qaic-aot-wheel \
+#     --output type=local,dest=./dist/aot .
 #
 #   # Any target — also build vllm's experimental Rust OpenAI frontend
 #   # (vllm-rs). See docs/installation.md for known caveats.
-#   docker build --target release -f vllm-qaic/docker/Dockerfile.aot \
-#     --build-arg VLLM_BUILD_RUST=1 -t vllm-qaic-aot:1.22-rust .
+#   docker build --target release --build-arg VLLM_BUILD_RUST=1 \
+#     -t vllm-qaic-aot:1.22-rust .
 #
 # The BASE_IMAGE must have the QAIC Platform and Apps SDKs installed
 # (i.e. /opt/qti-aic/ present) so that vllm-qaic can load at runtime.
@@ -242,7 +237,7 @@ ARG VLLM_BRANCH=""
 # symlinks into it, and a cache mount's contents vanish when the RUN ends,
 # leaving a dangling symlink in the venv for every later layer.
 # ---------------------------------------------------------------------------
-COPY vllm-qaic/requirements/build.txt /src/vllm-qaic/requirements/build.txt
+COPY requirements/build.txt /src/vllm-qaic/requirements/build.txt
 RUN --mount=type=cache,sharing=locked,target=/var/cache/apt \
     --mount=type=cache,sharing=locked,target=/var/lib/apt \
     --mount=type=cache,sharing=locked,target=/var/cache/uv \
@@ -264,7 +259,7 @@ ENV PATH="${VENV}/bin:${PATH}" \
 # a QEFF_BRANCH bump doesn't invalidate the expensive triton-cpu build below.
 # Must use python -m pip (uv refuses +local version labels like 2.7.0+cpu).
 # ---------------------------------------------------------------------------
-COPY vllm-qaic/scripts/utility.sh vllm-qaic/scripts/install_triton_cpu.sh /src/vllm-qaic/scripts/
+COPY scripts/utility.sh scripts/install_triton_cpu.sh /src/vllm-qaic/scripts/
 RUN python -m pip install --quiet \
         --index-url https://download.pytorch.org/whl/cpu \
         "torch==${TORCH_VERSION_AOT}" \
@@ -350,7 +345,7 @@ RUN --mount=type=cache,sharing=locked,target=/usr/local/cargo/registry \
 # (Layer 5a, optionally Rust-enabled by 5b), then delete the clone — release
 # and ci never COPY /src/vllm into their final image; dev re-clones it below.
 # ---------------------------------------------------------------------------
-COPY vllm-qaic/requirements/vllm_dependency_aot.txt /src/vllm-qaic/requirements/vllm_dependency_aot.txt
+COPY requirements/vllm_dependency_aot.txt /src/vllm-qaic/requirements/vllm_dependency_aot.txt
 RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
     uv pip install -r /src/vllm-qaic/requirements/build.txt && \
     uv pip install -r /src/vllm-qaic/requirements/vllm_dependency_aot.txt && \
@@ -373,7 +368,7 @@ ARG VLLM_QAIC_GIT_REF="main"
 
 # Clone the pinned git ref, overlay our fixed setup.py (which supports
 # VLLM_VERSION_OVERRIDE and has simplified get_qaic_sdk_version), then install.
-COPY vllm-qaic/setup.py /src/vllm-qaic-setup.py
+COPY setup.py /src/vllm-qaic-setup.py
 RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
     git clone --branch "${VLLM_QAIC_GIT_REF}" --depth 1 \
         https://github.com/qualcomm/vllm-qaic.git /src/vllm-qaic-release && \
@@ -405,7 +400,7 @@ ARG VLLM_QAIC_VERSION="1.22"
 ARG VLLM_QAIC_PR=""
 ARG VLLM_QAIC_BRANCH=""
 
-COPY vllm-qaic /src/vllm-qaic
+COPY . /src/vllm-qaic
 RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
     if [ -n "${VLLM_QAIC_PR}" ]; then \
         echo "=== CI: vllm-qaic from PR #${VLLM_QAIC_PR} ===" && \
@@ -493,7 +488,7 @@ RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
 
 # Step 4c: vllm-qaic editable — always from build context.
 # This is the last COPY so it is the only layer invalidated by source edits.
-COPY vllm-qaic /src/vllm-qaic
+COPY . /src/vllm-qaic
 RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
     TORCH_QAIC_INSTALLED=0 \
     VLLM_VERSION_OVERRIDE="${VLLM_VERSION}+aot${VLLM_QAIC_VERSION}" \
@@ -517,7 +512,7 @@ COPY --from=dev-builder /opt/uv-python /opt/uv-python
 COPY --from=dev-builder /src/qefficient /src/qefficient
 COPY --from=dev-builder /src/vllm /src/vllm
 COPY --from=dev-builder /src/vllm-qaic /src/vllm-qaic
-COPY vllm-qaic/docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 ENV PATH="${VENV}/bin:${PATH}" \
@@ -540,7 +535,7 @@ FROM aot-base AS wheel-builder
 ARG VLLM_VERSION="0.23.0"
 ARG VLLM_QAIC_VERSION="1.22"
 
-COPY vllm-qaic /src/vllm-qaic
+COPY . /src/vllm-qaic
 RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
     TORCH_QAIC_INSTALLED=0 \
     VLLM_VERSION_OVERRIDE="${VLLM_VERSION}+aot${VLLM_QAIC_VERSION}" \

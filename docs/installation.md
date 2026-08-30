@@ -283,36 +283,34 @@ All `ARG`s are global (declared before the first `FROM`) and re-declared inside 
 
 ### Build commands
 
-Run from the directory **above** this repo — build context must contain `vllm-qaic/` as a subdirectory:
-
 ```bash
 # Release (default pins)
-docker build --target release -f vllm-qaic/docker/Dockerfile.aot -t vllm-qaic-aot:1.22 .
-docker build --target release -f vllm-qaic/docker/Dockerfile.pyt -t vllm-qaic-pyt:1.22 .
+docker build --target release -f docker/Dockerfile.aot -t vllm-qaic-aot:1.22 .
+docker build --target release -f docker/Dockerfile.pyt -t vllm-qaic-pyt:1.22 .
 
 # Release (override version / device arch)
-docker build --target release -f vllm-qaic/docker/Dockerfile.aot \
+docker build --target release -f docker/Dockerfile.aot \
   --build-arg VLLM_QAIC_GIT_REF=v1.23 --build-arg QEFF_BRANCH=release/v1.23.0 \
   -t vllm-qaic-aot:1.23 .
-docker build --target release -f vllm-qaic/docker/Dockerfile.pyt \
+docker build --target release -f docker/Dockerfile.pyt \
   --build-arg QAIC_DEVICE_ARCH=v81 -t vllm-qaic-pyt:1.22-v81 .
 
 # CI (current checkout)
-docker build --target ci -f vllm-qaic/docker/Dockerfile.aot -t vllm-qaic-aot:ci .
-docker build --target ci -f vllm-qaic/docker/Dockerfile.pyt -t vllm-qaic-pyt:ci .
+docker build --target ci -f docker/Dockerfile.aot -t vllm-qaic-aot:ci .
+docker build --target ci -f docker/Dockerfile.pyt -t vllm-qaic-pyt:ci .
 
 # CI (specific PR or branch)
-docker build --target ci -f vllm-qaic/docker/Dockerfile.aot --build-arg VLLM_QAIC_PR=42 -t vllm-qaic-aot:ci-pr-42 .
-docker build --target ci -f vllm-qaic/docker/Dockerfile.pyt --build-arg VLLM_QAIC_BRANCH=feature/my-branch -t vllm-qaic-pyt:ci-branch .
+docker build --target ci -f docker/Dockerfile.aot --build-arg VLLM_QAIC_PR=42 -t vllm-qaic-aot:ci-pr-42 .
+docker build --target ci -f docker/Dockerfile.pyt --build-arg VLLM_QAIC_BRANCH=feature/my-branch -t vllm-qaic-pyt:ci-branch .
 
 # Any target — install vllm itself from a PR or branch instead of the pinned tag
-docker build --target release -f vllm-qaic/docker/Dockerfile.aot --build-arg VLLM_PR=12345 -t vllm-qaic-aot:vllm-pr-12345 .
-docker build --target dev -f vllm-qaic/docker/Dockerfile.pyt --build-arg VLLM_BRANCH=some-feature-branch -t vllm-qaic-pyt:dev .
+docker build --target release -f docker/Dockerfile.aot --build-arg VLLM_PR=12345 -t vllm-qaic-aot:vllm-pr-12345 .
+docker build --target dev -f docker/Dockerfile.pyt --build-arg VLLM_BRANCH=some-feature-branch -t vllm-qaic-pyt:dev .
 
 # Dev (editable install; AOT also supports overriding the QEfficient ref)
-docker build --target dev -f vllm-qaic/docker/Dockerfile.aot -t vllm-qaic-aot:dev .
-docker build --target dev -f vllm-qaic/docker/Dockerfile.aot --build-arg QEFF_PR=456 -t vllm-qaic-aot:dev .
-docker build --target dev -f vllm-qaic/docker/Dockerfile.pyt -t vllm-qaic-pyt:dev .
+docker build --target dev -f docker/Dockerfile.aot -t vllm-qaic-aot:dev .
+docker build --target dev -f docker/Dockerfile.aot --build-arg QEFF_PR=456 -t vllm-qaic-aot:dev .
+docker build --target dev -f docker/Dockerfile.pyt -t vllm-qaic-pyt:dev .
 ```
 
 The `BASE_IMAGE` used by any target must have the QAIC Platform and Apps SDKs installed (`/opt/qti-aic/` present) so vllm-qaic can load at runtime; override with `--build-arg BASE_IMAGE=...`.

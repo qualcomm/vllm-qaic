@@ -37,37 +37,34 @@
 #
 # Build commands
 # --------------
-# Run from the directory ABOVE this repo (context must contain vllm-qaic/
-# as a subdirectory — every COPY below is relative to it):
-#
 #   # Standalone base:
-#   docker build --target pyt-base -f vllm-qaic/docker/Dockerfile.pyt -t vllm-qaic-pyt-base:1.22 .
+#   docker build --target pyt-base -t vllm-qaic-pyt-base:1.22 .
 #
 #   # Release (default pins):
-#   docker build --target release -f vllm-qaic/docker/Dockerfile.pyt -t vllm-qaic-pyt:1.22 .
+#   docker build --target release -f docker/Dockerfile.pyt -t vllm-qaic-pyt:1.22 .
 #
 #   # Release (AI200 device):
-#   docker build --target release -f vllm-qaic/docker/Dockerfile.pyt \
+#   docker build --target release -f docker/Dockerfile.pyt \
 #     --build-arg QAIC_DEVICE_ARCH=v81 -t vllm-qaic-pyt:1.22-v81 .
 #
 #   # CI (current checkout):
-#   docker build --target ci -f vllm-qaic/docker/Dockerfile.pyt -t vllm-qaic-pyt:ci .
+#   docker build --target ci -f docker/Dockerfile.pyt -t vllm-qaic-pyt:ci .
 #
 #   # CI (specific PR):
-#   docker build --target ci -f vllm-qaic/docker/Dockerfile.pyt \
+#   docker build --target ci -f docker/Dockerfile.pyt \
 #     --build-arg VLLM_QAIC_PR=42 -t vllm-qaic-pyt:ci-pr-42 .
 #
 #   # Dev (editable vllm-qaic):
-#   docker build --target dev -f vllm-qaic/docker/Dockerfile.pyt -t vllm-qaic-pyt:dev .
+#   docker build --target dev -f docker/Dockerfile.pyt -t vllm-qaic-pyt:dev .
 #
 #   # Wheel (specific python version + device arch, export to ./dist/pyt/py311):
-#   docker buildx build --target wheel -f vllm-qaic/docker/Dockerfile.pyt \
+#   docker buildx build --target wheel -f docker/Dockerfile.pyt \
 #     --build-arg PYTHON_VERSION=3.11 --build-arg QAIC_DEVICE_ARCH=v81 \
 #     --output type=local,dest=./dist/pyt/py311 .
 #
 #   # Any target — also build vllm's experimental Rust OpenAI frontend
 #   # (vllm-rs). See docs/installation.md for known caveats.
-#   docker build --target release -f vllm-qaic/docker/Dockerfile.pyt \
+#   docker build --target release -f docker/Dockerfile.pyt \
 #     --build-arg VLLM_BUILD_RUST=1 -t vllm-qaic-pyt:1.22-rust .
 #
 # The BASE_IMAGE must have the QAIC Platform and Apps SDKs installed
@@ -223,7 +220,7 @@ ARG VLLM_BRANCH=""
 # symlinks into it, and a cache mount's contents vanish when the RUN ends,
 # leaving a dangling symlink in the venv for every later layer.
 # ---------------------------------------------------------------------------
-COPY vllm-qaic/requirements/build.txt /src/vllm-qaic/requirements/build.txt
+COPY requirements/build.txt /src/vllm-qaic/requirements/build.txt
 RUN --mount=type=cache,sharing=locked,target=/var/cache/apt \
     --mount=type=cache,sharing=locked,target=/var/lib/apt \
     --mount=type=cache,sharing=locked,target=/var/cache/uv \
@@ -243,7 +240,7 @@ ENV PATH="${VENV}/bin:${PATH}" \
 # Must use python -m pip (uv refuses +local version labels like 2.10.0+cpu).
 # torch_qaic validates at import that torch is CPU-only; install torch first.
 # ---------------------------------------------------------------------------
-COPY vllm-qaic/scripts/utility.sh /src/vllm-qaic/scripts/utility.sh
+COPY scripts/utility.sh /src/vllm-qaic/scripts/utility.sh
 RUN python -m pip install --quiet \
         --index-url https://download.pytorch.org/whl/cpu \
         "torch==${TORCH_VERSION_PYT}" \
@@ -310,7 +307,7 @@ RUN --mount=type=cache,sharing=locked,target=/usr/local/cargo/registry \
 # this build environment. Scoped to this RUN only — real containers still
 # want torch_qaic auto-loaded at runtime.
 # ---------------------------------------------------------------------------
-COPY vllm-qaic/requirements/vllm_dependency_pyt.txt /src/vllm-qaic/requirements/vllm_dependency_pyt.txt
+COPY requirements/vllm_dependency_pyt.txt /src/vllm-qaic/requirements/vllm_dependency_pyt.txt
 RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
     uv pip install -r /src/vllm-qaic/requirements/vllm_dependency_pyt.txt && \
     uv pip install -r /src/vllm-qaic/requirements/build.txt && \
@@ -333,7 +330,7 @@ ARG VLLM_QAIC_VERSION="1.22"
 ARG VLLM_QAIC_GIT_REF="v0.23.0"
 ARG QAIC_DEVICE_ARCH="v68"
 
-COPY vllm-qaic/setup.py /src/vllm-qaic-setup.py
+COPY setup.py /src/vllm-qaic-setup.py
 RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
     git clone --branch "${VLLM_QAIC_GIT_REF}" --depth 1 \
         https://github.com/qualcomm/vllm-qaic.git /src/vllm-qaic-release && \
@@ -368,7 +365,7 @@ ARG VLLM_QAIC_PR=""
 ARG VLLM_QAIC_BRANCH=""
 ARG QAIC_DEVICE_ARCH="v68"
 
-COPY vllm-qaic /src/vllm-qaic
+COPY . /src/vllm-qaic
 RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
     if [ -n "${VLLM_QAIC_PR}" ]; then \
         echo "=== CI: vllm-qaic from PR #${VLLM_QAIC_PR} ===" && \
@@ -439,7 +436,7 @@ RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
     VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE_PYT}" uv pip install \
         --no-build-isolation --no-deps -e /src/vllm
 
-COPY vllm-qaic /src/vllm-qaic
+COPY . /src/vllm-qaic
 RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
     QAIC_DEVICE_ARCH="${QAIC_DEVICE_ARCH}" \
     VLLM_VERSION_OVERRIDE="${VLLM_VERSION}+pyt${VLLM_QAIC_VERSION}" \
@@ -462,7 +459,7 @@ COPY --from=dev-builder ${VENV} ${VENV}
 COPY --from=dev-builder /opt/uv-python /opt/uv-python
 COPY --from=dev-builder /src/vllm /src/vllm
 COPY --from=dev-builder /src/vllm-qaic /src/vllm-qaic
-COPY vllm-qaic/docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 ENV PATH="${VENV}/bin:${PATH}" \
@@ -488,7 +485,7 @@ ARG VLLM_VERSION="0.23.0"
 ARG VLLM_QAIC_VERSION="1.22"
 ARG QAIC_DEVICE_ARCH="v68"
 
-COPY vllm-qaic /src/vllm-qaic
+COPY . /src/vllm-qaic
 RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
     QAIC_DEVICE_ARCH="${QAIC_DEVICE_ARCH}" \
     VLLM_VERSION_OVERRIDE="${VLLM_VERSION}+pyt${VLLM_QAIC_VERSION}" \
