@@ -47,6 +47,9 @@ EOM
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "${SCRIPT_DIR}")"
 DOCKER_DIR="${REPO_ROOT}/docker"
+# Build context is the directory ABOVE the repo — every COPY in the
+# Dockerfiles is now relative to a vllm-qaic/ subdirectory of the context.
+BUILD_CONTEXT="$(dirname "${REPO_ROOT}")"
 
 # Defaults
 BUILD_TARGET="both"
@@ -120,7 +123,7 @@ build_aot_wheel() {
         --build-arg PYTHON_VERSION="${PYTHON_VERSION}" \
         "${BASE_IMAGE_ARGS[@]}" \
         --output "type=local,dest=${OUT_DIR}/aot" \
-        "${REPO_ROOT}"
+        "${BUILD_CONTEXT}"
 }
 
 build_pyt_wheel() {
@@ -131,7 +134,7 @@ build_pyt_wheel() {
         --build-arg QAIC_DEVICE_ARCH="${DEVICE_ARCH}" \
         "${BASE_IMAGE_ARGS[@]}" \
         --output "type=local,dest=${OUT_DIR}/pyt/${PYVER_TAG}" \
-        "${REPO_ROOT}"
+        "${BUILD_CONTEXT}"
 }
 
 case "${BUILD_TARGET}" in
