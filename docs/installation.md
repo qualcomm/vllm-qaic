@@ -250,7 +250,7 @@ All `ARG`s are global (declared before the first `FROM`) and re-declared inside 
 | `TRITON_CPU` | `1` | Set to `1` to build the triton-cpu backend (AOT SpD); Docker defaults ON, unlike `install.sh`'s default OFF |
 | `TRITON_CPU_COMMIT` | `e60f448f8f197073b75d6d3e77347414a5db3ee7` | Pinned triton-cpu commit hash |
 | `TRITON_CPU_COMPILE_MAX_JOBS` | `4` | Parallel build jobs for triton-cpu compilation |
-| `VLLM_BUILD_RUST` | `0` | Set to `1` to build vLLM's experimental Rust OpenAI frontend (`vllm-rs`) |
+| `VLLM_BUILD_RUST` | `1` | Set to `1` to build vLLM's experimental Rust OpenAI frontend (`vllm-rs`) |
 | `VLLM_QAIC_GIT_REF` | `v0.23.0` | `release` target: vllm-qaic git tag/branch to clone |
 | `VLLM_QAIC_PR` | *(empty)* | `ci` target: PR number to fetch (takes priority over `VLLM_QAIC_BRANCH`) |
 | `VLLM_QAIC_BRANCH` | *(empty)* | `ci` target: branch to fetch |
@@ -273,7 +273,7 @@ All `ARG`s are global (declared before the first `FROM`) and re-declared inside 
 | `VLLM_TARGET_DEVICE_PYT` | `empty` | vLLM build target device (`empty` = no C++ compilation) |
 | `TORCH_QAIC_BASE_PATH` | `/opt/qti-aic/integrations/torch_qaic` | SDK path containing `torch_qaic` wheels inside `BASE_IMAGE` |
 | `QAIC_DEVICE_ARCH` | `v68` | `v68` = AI 100 series, `v81` = AI 200 series (includes BF16 kernels); controls which Hexagon kernel C++ sources compile |
-| `VLLM_BUILD_RUST` | `0` | Set to `1` to build vLLM's experimental Rust OpenAI frontend (`vllm-rs`) |
+| `VLLM_BUILD_RUST` | `1` | Set to `1` to build vLLM's experimental Rust OpenAI frontend (`vllm-rs`) |
 | `VLLM_QAIC_GIT_REF` | `v0.23.0` | `release` target: vllm-qaic git tag/branch to clone |
 | `VLLM_QAIC_PR` | *(empty)* | `ci` target: PR number to fetch (takes priority over `VLLM_QAIC_BRANCH`) |
 | `VLLM_QAIC_BRANCH` | *(empty)* | `ci` target: branch to fetch |

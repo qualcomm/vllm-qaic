@@ -109,9 +109,9 @@ ARG TRITON_CPU_COMMIT="e60f448f8f197073b75d6d3e77347414a5db3ee7"
 ARG TRITON_CPU_COMPILE_MAX_JOBS="4"
 
 # ---------------------------------------------------------------------------
-# rust frontend — experimental (see docs/installation.md); default OFF.
+# rust frontend — experimental (see docs/installation.md); default ON.
 # ---------------------------------------------------------------------------
-ARG VLLM_BUILD_RUST="0"
+ARG VLLM_BUILD_RUST="1"
 
 # ---------------------------------------------------------------------------
 # Release-specific
@@ -217,7 +217,7 @@ ARG VLLM_TARGET_DEVICE_AOT="empty"
 ARG TRITON_CPU="1"
 ARG TRITON_CPU_COMMIT="e60f448f8f197073b75d6d3e77347414a5db3ee7"
 ARG TRITON_CPU_COMPILE_MAX_JOBS="4"
-ARG VLLM_BUILD_RUST="0"
+ARG VLLM_BUILD_RUST="1"
 
 # ---------------------------------------------------------------------------
 # Layer 1 — infra: system packages + uv-managed python + build tools (merged)

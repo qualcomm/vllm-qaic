@@ -109,9 +109,9 @@ ARG TORCH_QAIC_BASE_PATH="/opt/qti-aic/integrations/torch_qaic"
 ARG QAIC_DEVICE_ARCH="v68"
 
 # ---------------------------------------------------------------------------
-# rust frontend — experimental (see docs/installation.md); default OFF.
+# rust frontend — experimental (see docs/installation.md); default ON.
 # ---------------------------------------------------------------------------
-ARG VLLM_BUILD_RUST="0"
+ARG VLLM_BUILD_RUST="1"
 
 # ---------------------------------------------------------------------------
 # Release-specific
@@ -198,7 +198,7 @@ ARG TORCHAUDIO_VERSION_PYT="2.11.0+cpu"
 ARG VLLM_TARGET_DEVICE_PYT="empty"
 ARG TORCH_QAIC_BASE_PATH="/opt/qti-aic/integrations/torch_qaic"
 ARG QAIC_DEVICE_ARCH="v68"
-ARG VLLM_BUILD_RUST="0"
+ARG VLLM_BUILD_RUST="1"
 
 # ---------------------------------------------------------------------------
 # Layer 1 — infra: system packages + uv-managed python + build tools (merged)
