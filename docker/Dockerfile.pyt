@@ -114,6 +114,13 @@ ARG QAIC_DEVICE_ARCH="v68"
 ARG VLLM_BUILD_RUST="1"
 
 # ---------------------------------------------------------------------------
+# vllm source override (any target) — priority: VLLM_PR > VLLM_BRANCH > the
+# pinned VLLM_VERSION tag.
+# ---------------------------------------------------------------------------
+ARG VLLM_PR=""
+ARG VLLM_BRANCH=""
+
+# ---------------------------------------------------------------------------
 # Release-specific
 # ---------------------------------------------------------------------------
 ARG VLLM_QAIC_GIT_REF="v0.23.0"
@@ -199,6 +206,8 @@ ARG VLLM_TARGET_DEVICE_PYT="empty"
 ARG TORCH_QAIC_BASE_PATH="/opt/qti-aic/integrations/torch_qaic"
 ARG QAIC_DEVICE_ARCH="v68"
 ARG VLLM_BUILD_RUST="1"
+ARG VLLM_PR=""
+ARG VLLM_BRANCH=""
 
 # ---------------------------------------------------------------------------
 # Layer 1 — infra: system packages + uv-managed python + build tools (merged)
@@ -248,14 +257,25 @@ RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
     uv pip install "${TORCH_QAIC_BASE_PATH}/${PYVER}"/torch_qaic-*.whl
 
 # ---------------------------------------------------------------------------
-# Layer 4a — clone vllm at the pinned tag; vllm is always installed from this
-# local checkout (never git+URL). Rust build deps installed only when needed.
-# Kept separate from the build step below — cache-mounting into a not-yet-
-# cloned /src/vllm makes BuildKit pre-create the path, and git clone then
-# fails ("already exists").
+# Layer 4a — clone vllm; vllm is always installed from this local checkout
+# (never git+URL). Priority: VLLM_PR > VLLM_BRANCH > pinned VLLM_VERSION tag.
+# Rust build deps installed only when needed. Kept separate from the build
+# step below — cache-mounting into a not-yet-cloned /src/vllm makes BuildKit
+# pre-create the path, and git clone then fails ("already exists").
 # ---------------------------------------------------------------------------
-RUN git clone --branch "v${VLLM_VERSION}" --depth 1 \
-        https://github.com/vllm-project/vllm.git /src/vllm && \
+RUN if [ -n "${VLLM_PR}" ]; then \
+        echo "=== vllm from PR #${VLLM_PR} ===" && \
+        git clone https://github.com/vllm-project/vllm.git /src/vllm && \
+        git -C /src/vllm fetch origin "refs/pull/${VLLM_PR}/head" && \
+        git -C /src/vllm checkout FETCH_HEAD; \
+    elif [ -n "${VLLM_BRANCH}" ]; then \
+        echo "=== vllm from branch ${VLLM_BRANCH} ===" && \
+        git clone --branch "${VLLM_BRANCH}" --depth 1 \
+            https://github.com/vllm-project/vllm.git /src/vllm; \
+    else \
+        git clone --branch "v${VLLM_VERSION}" --depth 1 \
+            https://github.com/vllm-project/vllm.git /src/vllm; \
+    fi && \
     if [ "${VLLM_BUILD_RUST}" = "1" ]; then \
         apt-get update && apt-get install -y --no-install-recommends \
             pkg-config perl protobuf-compiler libprotobuf-dev; \
@@ -393,12 +413,24 @@ ARG VLLM_VERSION="0.23.0"
 ARG VLLM_QAIC_VERSION="1.22"
 ARG QAIC_DEVICE_ARCH="v68"
 ARG VLLM_TARGET_DEVICE_PYT="empty"
+ARG VLLM_PR=""
+ARG VLLM_BRANCH=""
 
 # vllm editable — re-clone (pyt-base deleted its source after the
-# non-editable install), uninstall that copy, reinstall -e.
+# non-editable install; same VLLM_PR/VLLM_BRANCH priority), uninstall that
+# copy, reinstall -e.
 RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
-    git clone --branch "v${VLLM_VERSION}" --depth 1 \
-        https://github.com/vllm-project/vllm.git /src/vllm && \
+    if [ -n "${VLLM_PR}" ]; then \
+        git clone https://github.com/vllm-project/vllm.git /src/vllm && \
+        git -C /src/vllm fetch origin "refs/pull/${VLLM_PR}/head" && \
+        git -C /src/vllm checkout FETCH_HEAD; \
+    elif [ -n "${VLLM_BRANCH}" ]; then \
+        git clone --branch "${VLLM_BRANCH}" --depth 1 \
+            https://github.com/vllm-project/vllm.git /src/vllm; \
+    else \
+        git clone --branch "v${VLLM_VERSION}" --depth 1 \
+            https://github.com/vllm-project/vllm.git /src/vllm; \
+    fi && \
     uv pip uninstall vllm --quiet 2>/dev/null || true && \
     TORCH_DEVICE_BACKEND_AUTOLOAD=0 \
     VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE_PYT}" uv pip install \

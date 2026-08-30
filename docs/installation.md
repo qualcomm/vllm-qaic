@@ -242,6 +242,8 @@ All `ARG`s are global (declared before the first `FROM`) and re-declared inside 
 | `PYTHON_VERSION` | `3.12` | Python version (`3.10`/`3.11`/`3.12`), provisioned via `uv python install` |
 | `RUST_VERSION` | `1.90` | Pinned Rust toolchain image tag (`rust:<ver>-slim`); only used when `VLLM_BUILD_RUST=1` |
 | `VLLM_VERSION` | `0.23.0` | vLLM release tag to install |
+| `VLLM_PR` | *(empty)* | Any target: vLLM PR number to fetch (takes priority over `VLLM_BRANCH` and `VLLM_VERSION`) |
+| `VLLM_BRANCH` | *(empty)* | Any target: vLLM branch to clone instead of the pinned `VLLM_VERSION` tag |
 | `VLLM_QAIC_VERSION` | `1.22` | vllm-qaic SDK/version tag (wheel tag/version suffix) |
 | `QEFF_BRANCH` | `release/v1.22.0` | QEfficient branch/tag to install |
 | `TORCH_VERSION_AOT` | `2.7.0+cpu` | CPU torch version for AOT |
@@ -265,6 +267,8 @@ All `ARG`s are global (declared before the first `FROM`) and re-declared inside 
 | `PYTHON_VERSION` | `3.12` | Python version (`3.10`/`3.11`/`3.12`), provisioned via `uv python install` |
 | `RUST_VERSION` | `1.90` | Pinned Rust toolchain image tag (`rust:<ver>-slim`); only used when `VLLM_BUILD_RUST=1` |
 | `VLLM_VERSION` | `0.23.0` | vLLM release tag to install |
+| `VLLM_PR` | *(empty)* | Any target: vLLM PR number to fetch (takes priority over `VLLM_BRANCH` and `VLLM_VERSION`) |
+| `VLLM_BRANCH` | *(empty)* | Any target: vLLM branch to clone instead of the pinned `VLLM_VERSION` tag |
 | `VLLM_QAIC_VERSION` | `1.22` | vllm-qaic SDK/version tag (wheel tag/version suffix) |
 | `TORCH_VERSION_PYT` | `2.11.0+cpu` | CPU torch version for PYT |
 | `TORCHVISION_VERSION_PYT` | `0.26.0+cpu` | torchvision version for PYT |
@@ -298,6 +302,10 @@ docker build --target ci -f docker/Dockerfile.pyt -t vllm-qaic-pyt:ci .
 # CI (specific PR or branch)
 docker build --target ci -f docker/Dockerfile.aot --build-arg VLLM_QAIC_PR=42 -t vllm-qaic-aot:ci-pr-42 .
 docker build --target ci -f docker/Dockerfile.pyt --build-arg VLLM_QAIC_BRANCH=feature/my-branch -t vllm-qaic-pyt:ci-branch .
+
+# Any target — install vllm itself from a PR or branch instead of the pinned tag
+docker build --target release -f docker/Dockerfile.aot --build-arg VLLM_PR=12345 -t vllm-qaic-aot:vllm-pr-12345 .
+docker build --target dev -f docker/Dockerfile.pyt --build-arg VLLM_BRANCH=some-feature-branch -t vllm-qaic-pyt:dev .
 
 # Dev (editable install; AOT also supports overriding the QEfficient ref)
 docker build --target dev -f docker/Dockerfile.aot -t vllm-qaic-aot:dev .
