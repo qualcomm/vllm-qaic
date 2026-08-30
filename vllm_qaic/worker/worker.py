@@ -201,7 +201,6 @@ class QaicWorkerPyt(QaicWorker):
             distributed_init_method=distributed_init_method,
             is_driver_worker=is_driver_worker,
         )
-        assert self.model_config.enforce_eager
         self.parallel_config.disable_custom_all_reduce = True
         self.profiler_config = vllm_config.profiler_config
 
@@ -482,9 +481,8 @@ class QaicWorkerPyt(QaicWorker):
         kernel_warmup(self)
 
         cuda_graph_memory_bytes = 0
-        # FIXME need better handling of AoT v/s torch compile mode when
-        # that needs to be supported
-        # if not self.model_config.enforce_eager:
+
+        # if not current_platform.is_aot:
         #     cuda_graph_memory_bytes = self.model_runner.capture_model()
 
         if self.cache_config.kv_cache_memory_bytes is None and hasattr(
