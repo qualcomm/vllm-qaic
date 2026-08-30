@@ -239,6 +239,8 @@ pip install --no-build-isolation ./vllm-qaic
 
 `release`/`ci` both install non-editably and differ only in *where* vllm-qaic's source comes from. `dev` is the only target with an editable install and the only one that ships source directories (`/src/vllm-qaic`, plus `/src/qefficient` for AOT) and a `sudo`+`entrypoint.sh` layer for interactive use — `release`/`ci` are meant to run as immutable images under whatever user the orchestrator picks, not as UID-mapped interactive containers.
 
+`ci` and `dev` additionally install `requirements/test.txt` (pytest, ruff, mypy, etc.) so tests can run directly inside the image; `release`/`wheel` don't, since they're meant to be lean runtime/distribution artifacts.
+
 `PYTHON_VERSION` (default `3.12`; also `3.10`/`3.11`) is threaded through every target via `aot-base`/`pyt-base`, provisioned with `uv python install` rather than apt so non-default versions work regardless of the base image's own Python.
 
 ### Build args

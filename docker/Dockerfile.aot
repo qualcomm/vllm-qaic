@@ -419,7 +419,8 @@ RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
     fi && \
     TORCH_QAIC_INSTALLED=0 \
     VLLM_VERSION_OVERRIDE="${VLLM_VERSION}+aot${VLLM_QAIC_VERSION}" \
-    uv pip install --no-build-isolation "${SRC}"
+    uv pip install --no-build-isolation "${SRC}" && \
+    uv pip install -r "${SRC}/requirements/test.txt"
 
 # hadolint ignore=DL3006
 FROM ${BASE_IMAGE} AS ci
@@ -492,7 +493,8 @@ COPY . /src/vllm-qaic
 RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
     TORCH_QAIC_INSTALLED=0 \
     VLLM_VERSION_OVERRIDE="${VLLM_VERSION}+aot${VLLM_QAIC_VERSION}" \
-    uv pip install --no-build-isolation -e /src/vllm-qaic
+    uv pip install --no-build-isolation -e /src/vllm-qaic && \
+    uv pip install -r /src/vllm-qaic/requirements/test.txt
 
 # hadolint ignore=DL3006
 FROM ${BASE_IMAGE} AS dev
