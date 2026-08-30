@@ -246,7 +246,6 @@ All `ARG`s are global (declared before the first `FROM`) and re-declared inside 
 | `QEFF_BRANCH` | `release/v1.22.0` | QEfficient branch/tag to install |
 | `TORCH_VERSION_AOT` | `2.7.0+cpu` | CPU torch version for AOT |
 | `TORCHVISION_VERSION_AOT` | `0.22.0+cpu` | torchvision version for AOT |
-| `VLLM_TARGET_DEVICE_AOT` | `empty` | vLLM build target device (`empty` = no C++ compilation) |
 | `TRITON_CPU` | `1` | Set to `1` to build the triton-cpu backend (AOT SpD); Docker defaults ON, unlike `install.sh`'s default OFF |
 | `TRITON_CPU_COMMIT` | `e60f448f8f197073b75d6d3e77347414a5db3ee7` | Pinned triton-cpu commit hash |
 | `TRITON_CPU_COMPILE_MAX_JOBS` | `4` | Parallel build jobs for triton-cpu compilation |

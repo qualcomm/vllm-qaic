@@ -35,9 +35,9 @@
 #
 #   # Release (override version):
 #   docker build --target release \
-#     --build-arg VLLM_QAIC_GIT_REF=v1.23 \
-#     --build-arg QEFF_BRANCH=release/v1.23.0 \
-#     -t vllm-qaic-aot:1.23 .
+#     --build-arg VLLM_QAIC_GIT_REF=v1.22 \
+#     --build-arg QEFF_BRANCH=release/v1.22.0 \
+#     -t vllm-qaic-aot:1.22 .
 #
 #   # CI (current checkout):
 #   docker build --target ci -t vllm-qaic-aot:ci .
@@ -344,7 +344,7 @@ FROM aot-base AS release-builder
 ARG VENV="/opt/venv-aot"
 ARG VLLM_VERSION="0.23.0"
 ARG VLLM_QAIC_VERSION="1.22"
-ARG VLLM_QAIC_GIT_REF="v0.23.0"
+ARG VLLM_QAIC_GIT_REF="main"
 
 # Clone the pinned git ref, overlay our fixed setup.py (which supports
 # VLLM_VERSION_OVERRIDE and has simplified get_qaic_sdk_version), then install.
