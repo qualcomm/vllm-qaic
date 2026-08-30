@@ -115,14 +115,27 @@ TRITON_CPU=1 TRITON_CPU_SKIP_DISK_CHECK=1 ./scripts/install.sh aot
 
 # Build vllm's experimental Rust OpenAI-compatible frontend (rust/, build_rust.sh)
 # from source instead of installing vllm from the published git tag.
-# build_rust.sh bootstraps its own rustup toolchain automatically — no
-# pre-existing Rust install needed, just network access.
+# Requires a Rust toolchain (cargo) on PATH — see "Installing Rust" below.
 # Applies to both aot and pyt; clones/reuses a vllm checkout as a sibling of the
 # vllm-qaic repo (`../vllm`) and checks out the pinned VLLM_VERSION tag.
 VLLM_BUILD_RUST=1 ./scripts/install.sh aot
 
 # Force wheel install from a custom SDK path
 VLLM_QAIC_INSTALL_SOURCE=wheel VLLM_QAIC_SDK_PATH=/path/to/sdk ./scripts/install.sh pyt
+```
+
+**Installing Rust:** `VLLM_BUILD_RUST=1` requires `cargo` on `PATH` — `install.sh` checks for it up front and exits with an error if it's missing, rather than installing it for you. Install via [rustup](https://rustup.rs):
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source "$HOME/.cargo/env"
+cargo --version   # confirm it's on PATH before re-running install.sh
+```
+
+Or via conda-forge, if you'd rather keep it inside an existing conda env:
+
+```bash
+conda install -c conda-forge rust
 ```
 
 **Using the Rust frontend after installing with `VLLM_BUILD_RUST=1`:** it's opt-in at *serve* time too — the standard `vllm serve` entrypoint still runs the Python frontend unless `VLLM_USE_RUST_FRONTEND=1` is set:

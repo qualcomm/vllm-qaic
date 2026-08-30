@@ -26,7 +26,9 @@
 #   TRANSFORMERS_VERSION_PYT   If set, pins transformers version after torch_qaic install
 #   VLLM_BUILD_RUST            If "1", builds vllm's experimental Rust
 #                              OpenAI-compatible frontend from source instead
-#                              of installing from the git+URL.
+#                              of installing from the git+URL. Requires a
+#                              Rust toolchain (cargo) on PATH — install one
+#                              via https://rustup.rs before running.
 
 set -euo pipefail
 
@@ -138,6 +140,11 @@ echo ""
 VLLM_INSTALL_TARGET="vllm @ git+https://github.com/vllm-project/vllm.git@v${VLLM_VERSION}"
 if [ "${VLLM_BUILD_RUST:-0}" = "1" ]; then
     echo "=== Building vllm Rust frontend (VLLM_BUILD_RUST=1) ==="
+    if ! command -v cargo >/dev/null 2>&1; then
+        echo "ERROR: VLLM_BUILD_RUST=1 requires a Rust toolchain (cargo not found on PATH)." >&2
+        echo "       Install one via https://rustup.rs and re-run." >&2
+        exit 1
+    fi
     VLLM_SRC_DIR="$(dirname "${REPO_ROOT}")/vllm"
     if [ ! -d "${VLLM_SRC_DIR}/.git" ]; then
         git clone https://github.com/vllm-project/vllm.git "${VLLM_SRC_DIR}"
