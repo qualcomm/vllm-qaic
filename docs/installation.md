@@ -271,6 +271,7 @@ All `ARG`s are global (declared before the first `FROM`) and re-declared inside 
 | `VLLM_QAIC_PR` | *(empty)* | `ci` target: PR number to fetch (takes priority over `VLLM_QAIC_BRANCH`) |
 | `VLLM_QAIC_BRANCH` | *(empty)* | `ci` target: branch to fetch |
 | `QEFF_PR` | *(empty)* | `dev` target: QEfficient PR to install editable (overrides `QEFF_BRANCH`) |
+| `WHEEL_NAME` | *(empty)* | `wheel` target: rename the built wheel to this filename before exporting it (empty = `uv build`'s own name). See [Overriding the wheel filename](#overriding-the-wheel-filename) |
 
 **`docker/Dockerfile.pyt`**
 
@@ -295,6 +296,7 @@ All `ARG`s are global (declared before the first `FROM`) and re-declared inside 
 | `VLLM_QAIC_GIT_REF` | `v0.23.0` | `release` target: vllm-qaic git tag/branch to clone |
 | `VLLM_QAIC_PR` | *(empty)* | `ci` target: PR number to fetch (takes priority over `VLLM_QAIC_BRANCH`) |
 | `VLLM_QAIC_BRANCH` | *(empty)* | `ci` target: branch to fetch |
+| `WHEEL_NAME` | *(empty)* | `wheel` target: rename the built wheel to this filename before exporting it (empty = `uv build`'s own name). See [Overriding the wheel filename](#overriding-the-wheel-filename) |
 
 ### Build commands
 
@@ -372,6 +374,27 @@ Output locations:
 |---|---|
 | AOT | `dist/aot/vllm_qaic-*aot*-py3-none-any.whl` |
 | PYT | `dist/pyt/py312/vllm_qaic-*pyt*-cp312-cp312-linux_x86_64.whl` |
+
+#### Overriding the wheel filename
+
+`--wheel-name` replaces the filename `uv build` would generate. The script forwards it to the Dockerfile's `wheel` stage as the `WHEEL_NAME` build-arg, and that stage renames the wheel before BuildKit exports it — so the file that lands in `--outdir` already carries the custom name:
+
+```bash
+# AOT wheel as dist/aot/vllm_qaic-1.22.0+aot-py3-none-any.whl
+./scripts/build_wheels.sh aot --outdir ./dist \
+    --wheel-name vllm_qaic-1.22.0+aot-py3-none-any.whl
+
+# PYT wheel as dist/pyt/py312/vllm_qaic-1.22.0+pyt-cp312-cp312-linux_x86_64.whl
+./scripts/build_wheels.sh pyt --outdir ./dist \
+    --wheel-name vllm_qaic-1.22.0+pyt-cp312-cp312-linux_x86_64.whl
+```
+
+Notes:
+
+- **Requires an explicit `aot` or `pyt` target.** One filename cannot name two wheels, so `--wheel-name` is rejected with `both` — including the implicit default when no target is given.
+- Must be a bare filename ending in `.whl` (letters, digits, `.`, `_`, `+`, `-`). The directory still comes from `--outdir`.
+- Only the filename changes; the `.dist-info` inside the wheel still carries the real `vllm_qaic` name and version. pip reads the distribution, version and compatibility tags off the filename and requires the distribution to match that metadata. The script warns (but still builds) when the name isn't a valid wheel filename — `<distribution>-<version>[-<build>]-<pytag>-<abitag>-<plattag>.whl`, no `-` inside a field and a build tag starting with a digit — or when its distribution part isn't `vllm_qaic`. Such a wheel is fine as an archived artifact but `pip install` will reject it.
+- A renamed wheel no longer matches the `vllm_qaic-*aot*.whl` / `vllm_qaic-*pyt*.whl` globs used by `install.sh` and by the manual `pip install` commands below. Install it by its explicit path, or keep an `*aot*`/`*pyt*` substring in the name.
 
 ### Step 2a — Install from wheel using `install.sh`
 
