@@ -35,11 +35,23 @@ def _run_generation(method: str, qid: int) -> list[list[int]]:
     env[QaicPlatform.device_control_env_var] = str(qid)
     with tempfile.TemporaryDirectory() as temp_dir:
         output_path = Path(temp_dir) / "token_ids.json"
-        subprocess.run(
+        result = subprocess.run(
             [sys.executable, str(_RUNNER_SCRIPT), method, str(output_path)],
-            check=True,
+            capture_output=True,
+            text=True,
             env=env,
         )
+        if result.returncode != 0:
+            # subprocess.run(check=True) would raise CalledProcessError without
+            # the child's stdout/stderr, turning a real engine failure into an
+            # opaque exit-1. Surface the captured output so the actual QAIC/vLLM
+            # traceback is visible in pytest.
+            pytest.fail(
+                f"child generation ({method}, qid={qid}) failed with exit "
+                f"{result.returncode}.\n"
+                f"--- stdout ---\n{result.stdout}\n"
+                f"--- stderr ---\n{result.stderr}"
+            )
         return json.loads(output_path.read_text())
 
 
