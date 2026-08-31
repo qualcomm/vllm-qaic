@@ -4,6 +4,7 @@
 # ------------------------------------------------------------------
 """Shared disaggregated-serving test helpers"""
 
+import json
 import logging
 import os
 import signal
@@ -63,6 +64,35 @@ def _free_ports(host: str, count: int) -> list[int]:
         if candidate not in ports:
             ports.append(candidate)
     return ports
+
+
+def _build_speculative_config_json(spd_method: str, kwargs: dict) -> dict:
+    """Build the --decode-speculative-config JSON for qaic_disagg.
+
+    Uses the current vLLM SpeculativeConfig schema (``method`` + ``model``).
+    The older ``speculative_model`` key is silently dropped by pydantic, which
+    then rejects ``num_speculative_tokens`` as "provided but without
+    speculative model", so it must not be used.
+    """
+    spec_config = {
+        "method": spd_method,
+        "num_speculative_tokens": kwargs.get("num_speculative_tokens", 3),
+    }
+    if spd_method == "ngram":
+        spec_config["model"] = "ngram"
+        if kwargs.get("ngram_prompt_lookup_max"):
+            spec_config["prompt_lookup_max"] = kwargs["ngram_prompt_lookup_max"]
+        if kwargs.get("ngram_prompt_lookup_min"):
+            spec_config["prompt_lookup_min"] = kwargs["ngram_prompt_lookup_min"]
+    elif spd_method == "suffix":
+        spec_config["model"] = "suffix"
+    elif spd_method == "draft_model":
+        if not kwargs.get("speculative_model"):
+            raise ValueError(
+                "draft_model SpD requires qaic_test_config(speculative_model=...)"
+            )
+        spec_config["model"] = kwargs["speculative_model"]
+    return spec_config
 
 
 @pytest.fixture(scope="class")
@@ -135,8 +165,9 @@ def _disagg_test_config(request, pytestconfig, host, port, device_pool_ids):
         "decode_devices": decode_devices,
         "prefill_max_num_seqs": kwargs["prefill_max_num_seqs"],
         "client_request_timeout": pytestconfig.getoption("client_request_timeout"),
-        "disaggregated_startup_timeout": pytestconfig.getoption(
-            "disaggregated_startup_timeout"
+        "disaggregated_startup_timeout": kwargs.get(
+            "disaggregated_startup_timeout",
+            pytestconfig.getoption("disaggregated_startup_timeout"),
         ),
         "disaggregated_server_port": port,
         "num_prefill_workers": num_prefill_workers,
@@ -150,6 +181,18 @@ def _disagg_test_config(request, pytestconfig, host, port, device_pool_ids):
         str(p) for p in _free_ports(host, num_decode_workers)
     )
     config["kv_handoff_port"] = _free_port(host)
+
+    # Optional speculative-decoding + kv-store-size overrides. Absent from
+    # `kwargs` for every non-SpD consumer (e.g. TestDisaggregatedServingBasic),
+    # so `speculative_config_json`/`kv_store_size` stay None and `disagg_server`
+    # appends no extra CLI flags for those tests.
+    speculative_method = kwargs.get("speculative_method")
+    config["speculative_config_json"] = (
+        json.dumps(_build_speculative_config_json(speculative_method, kwargs))
+        if speculative_method is not None
+        else None
+    )
+    config["kv_store_size"] = kwargs.get("kv_store_size")
     return config
 
 
@@ -193,6 +236,12 @@ def disagg_server(request, _disagg_test_config):
         f"--prefill-long-prefill-token-threshold={seq_len}",
         f"--kv-handOff-port={kv_handoff_port}",
     ]
+    if test_config["speculative_config_json"] is not None:
+        commands.append(
+            f"--decode-speculative-config={test_config['speculative_config_json']}"
+        )
+    if test_config["kv_store_size"] is not None:
+        commands.append(f"--kv-store-size={test_config['kv_store_size']}")
 
     test_config["constant_factor"] = (
         decode_bsz * test_config["num_decode_workers"]
