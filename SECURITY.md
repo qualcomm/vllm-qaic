@@ -1,5 +1,4 @@
-How to Report a Potential Vulnerability?
-========================================
+# How to Report a Potential Vulnerability?
 
 If you would like to report a public issue (for example, one with a released
 CVE number), please report it as a
@@ -12,6 +11,7 @@ via our [Product Security team](mailto:product-security@qualcomm.com) or
 see our
 [Report a Bug](https://www.qualcomm.com/company/product-security/report-a-bug)
 page. Please include the following details while reporting a vulnerability:
+
 - Description of the vulnerability
 - Steps to reproduce
 - Affected versions

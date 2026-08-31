@@ -29,7 +29,6 @@ from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm_qaic.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, SupportedTask
 from vllm.utils.import_utils import PlaceholderModule
@@ -118,7 +117,7 @@ class QaicAsyncPoolingModelRunnerOutput(AsyncModelRunnerOutput):
     def __init__(
         self,
         model_runner: QaicModelRunnerAoT,
-        pending_prefill_exec_queue: Queue,
+        pending_prefill_exec_queue: Queue | None,
         num_scheduled_tokens: int,
         num_scheduled_tokens_np: np.ndarray,
         kv_connector_output: KVConnectorOutput,
@@ -206,7 +205,7 @@ class QaicAsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
             sampler_output = mr._make_sampler_output(
                 torch.zeros((len(self._input_batch_req_ids), 1), dtype=torch.int64)
             )
-            # 3. Discard samped tokens for partial prefills
+            # 3. Discard sampled tokens for partial prefills
             kv_connector_output = self._kv_connector_output
             discard_sampled_tokens_req_indices = np.nonzero(
                 state.discard_request_mask_np
@@ -393,6 +392,10 @@ class QaicModelRunnerAoT(GPUModelRunner):
     Manages separate decode / prefill execution objects, async scheduling,
     and disaggregated-serving KV transfer.
     """
+
+    # Declared on the parent GPUModelRunner (untyped to this checker); annotate
+    # so reads during __init__ do not trigger [has-type].
+    use_async_scheduling: bool
 
     # Widen drafter type to include the QAIC-specific proposer. The parent
     # GPUModelRunner declares it without QaicDraftModelProposer; assigning
@@ -624,22 +627,22 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 prev_draft_token_indices.extend(range(start, start + draft_len))
                 indices_match &= prev_index == flattened_index
                 max_flattened_index = max(max_flattened_index, flattened_index)
-        num_commmon_tokens = len(sample_flattened_indices)
-        if num_commmon_tokens == 0:
+        num_common_tokens = len(sample_flattened_indices)
+        if num_common_tokens == 0:
             # No requests in common with the previous iteration
             # So input_ids.cpu will have all the input ids.
             return
-        if indices_match and max_flattened_index == (num_commmon_tokens - 1):
+        if indices_match and max_flattened_index == (num_common_tokens - 1):
             # Common-case optimization: the batch is unchanged
             # and no reordering happened.
             # The indices are both the same permutation of 0..N-1 so
             # we can copy directly using a single slice.
-            self.input_ids.cpu[:num_commmon_tokens].copy_(
-                prev_sampled_token_ids[:num_commmon_tokens, 0],
+            self.input_ids.cpu[:num_common_tokens].copy_(
+                prev_sampled_token_ids[:num_common_tokens, 0],
                 non_blocking=True,
             )
             if self.enable_prompt_embeds:
-                self.is_token_ids.cpu[:num_commmon_tokens] = True
+                self.is_token_ids.cpu[:num_common_tokens] = True
             return
         # Upload the index tensors asynchronously so the scatter can be non-blocking.
         sampled_tokens_index_tensor = torch.tensor(
@@ -698,7 +701,9 @@ class QaicModelRunnerAoT(GPUModelRunner):
         num_scheduled_tokens_np: np.ndarray,
         kv_connector_output: KVConnectorOutput | None,
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
-        if not self.model.is_qaic_pooler and self.model.task != "classify":  # for CPU based embed pooling, use GPU model runner's _pool
+        if (
+            not self.model.is_qaic_pooler and self.model.task != "classify"
+        ):  # for CPU based embed pooling, use GPU model runner's _pool
             # Force synchronous path: AsyncGPUPoolingModelRunnerOutput requires
             # CUDA streams which are not available on QAIC hardware.  The QAIC
             # async scheduling for pooling is handled at a higher level by
@@ -736,7 +741,9 @@ class QaicModelRunnerAoT(GPUModelRunner):
         finished_mask_qaicpooler = [
             seq_len == prompt_len
             for seq_len, prompt_len in zip(
-                seq_lens_qaicpooler, pooling_metadata_qaicpooler.prompt_lens
+                seq_lens_qaicpooler,
+                pooling_metadata_qaicpooler.prompt_lens,
+                strict=False,
             )
         ]
 
@@ -934,9 +941,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
         # upcast to float32 before sampling in _compute_hidden_states_and_logits.
         _dtype = getattr(self.model, "logits_dtype", np.float32)  # type: ignore[has-type]
         if num_decode_tokens > 1:
-            return np.empty(
-                (batch_size, num_decode_tokens, vocab_size), dtype=_dtype
-            )
+            return np.empty((batch_size, num_decode_tokens, vocab_size), dtype=_dtype)
         if self.model.logits_ndim == 3:  # type: ignore[has-type]
             return np.empty((batch_size, 1, vocab_size), dtype=_dtype)
         return np.empty((batch_size, vocab_size), dtype=_dtype)

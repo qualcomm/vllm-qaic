@@ -96,7 +96,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 <div class="grid cards" markdown>
 
--   :rocket:{ .lg .middle } **Quick Start**
+- :rocket:{ .lg .middle } **Quick Start**
 
     ---
 
@@ -104,7 +104,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
     [:octicons-arrow-right-24: Quickstart](getting_started/quickstart.md)
 
--   :bar_chart:{ .lg .middle } **Support Matrix**
+- :bar_chart:{ .lg .middle } **Support Matrix**
 
     ---
 
@@ -112,7 +112,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
     [:octicons-arrow-right-24: Support Matrix](user_guide/features/index.md)
 
--   :brain:{ .lg .middle } **Supported Models**
+- :brain:{ .lg .middle } **Supported Models**
 
     ---
 
@@ -120,7 +120,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
     [:octicons-arrow-right-24: AOT Models](user_guide/models/supported_models_aot.md) · [:octicons-arrow-right-24: Eager Models](user_guide/models/supported_models_eager.md)
 
--   :zap:{ .lg .middle } **Features**
+- :zap:{ .lg .middle } **Features**
 
     ---
 
@@ -128,7 +128,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
     [:octicons-arrow-right-24: Features](user_guide/features/speculative_decoding.md)
 
--   :gear:{ .lg .middle } **Configuration**
+- :gear:{ .lg .middle } **Configuration**
 
     ---
 
@@ -136,7 +136,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
     [:octicons-arrow-right-24: Configuration](user_guide/configuration/engine_args.md)
 
--   :construction_worker:{ .lg .middle } **Developer Guide**
+- :construction_worker:{ .lg .middle } **Developer Guide**
 
     ---
 

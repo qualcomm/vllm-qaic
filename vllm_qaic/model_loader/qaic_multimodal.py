@@ -126,8 +126,10 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
             for k, v in self.mm_input_info.items():
                 if k == "input_features":
                     _shape = v[0].copy()
-                    _shape[-1] = 1 # Feature vector during decode is 1
-                    self.default_mm_kwargs["input_features"] = np.empty(_shape, dtype=v[1])
+                    _shape[-1] = 1  # Feature vector during decode is 1
+                    self.default_mm_kwargs["input_features"] = np.empty(
+                        _shape, dtype=v[1]
+                    )
             self.decode_batch_inputs.update(self.default_mm_kwargs)
 
     def _to_np(self, t, dtype: np.dtype | None = None) -> np.ndarray | list[np.ndarray]:
@@ -364,7 +366,8 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
             else:
                 raise ValueError(f"Unsupported pixel_values type {type(pixel_values)}")
         elif "input_features" in kwargs:
-            # Audio model. Currently only whisper is supported with a single audio input.
+            # Audio model. Currently only whisper is supported with a single
+            # audio input.
             num_mm_inputs = 1
         else:
             raise ValueError(f"Unsupported multimodal inputs {kwargs.keys()}")

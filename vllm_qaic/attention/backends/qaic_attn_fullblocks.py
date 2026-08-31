@@ -151,7 +151,6 @@ class QAicAttentionMetadataBuilder(AttentionMetadataBuilder[QAicAttentionMetadat
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> QAicAttentionMetadata:
-        num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
         max_seq_len = common_attn_metadata.max_seq_len
@@ -176,7 +175,6 @@ class QAicAttentionMetadataBuilder(AttentionMetadataBuilder[QAicAttentionMetadat
                 decode_threshold=self.reorder_batch_threshold,
                 require_uniform=True,
             )
-            num_reqs = num_decodes
             seq_lens = seq_lens[:num_decodes]
             query_start_loc = query_start_loc[: num_decodes + 1]
             block_table_tensor = block_table_tensor[:num_decodes]
@@ -360,13 +358,12 @@ class QAicAttentionBackendImpl(AttentionImpl):
             )
         return output
 
-    def write_to_paged_cache(
-        self, key, value, key_cache, value_cache, slot_mapping
-    ):
+    def write_to_paged_cache(self, key, value, key_cache, value_cache, slot_mapping):
         """
         write key and value into key_cache and value_cache based on the slot mapping
 
-        key_cache and value cache are shaped : [num_blocks, block_size, num_heads, head_dim]
+        key_cache and value cache are shaped:
+        [num_blocks, block_size, num_heads, head_dim]
         key and value are shaped: [num_tokens, num_heads, head_dim]
         """
         block_size = key_cache.shape[1]
@@ -426,7 +423,6 @@ class QAicAttentionBackendImpl(AttentionImpl):
             # FIXME key cache can be shaped like below's output from the start itself
             seq_len = seq_lens[seq_id]
             physical_block_indices = block_table[seq_id]
-            seq_arange = torch.arange(seq_len)
             num_valid_blocks = -1 * (-seq_len // block_size)
             block_ids = physical_block_indices[:num_valid_blocks]
             key = key_cache[block_ids]
@@ -435,8 +431,6 @@ class QAicAttentionBackendImpl(AttentionImpl):
             value = value.view(-1, value.shape[2], value.shape[3])
             key = key[:seq_len]
             value = value[:seq_len]
-            qlen = sdpa_start_loc[seq_id + 1] - sdpa_start_loc[seq_id]
-            kvlen = key.shape[0]
             key = key.movedim(0, key.dim() - 2)
             value = value.movedim(0, value.dim() - 2)
 
@@ -444,7 +438,6 @@ class QAicAttentionBackendImpl(AttentionImpl):
                 key = key.repeat_interleave(self.num_queries_per_kv, dim=-3)
                 value = value.repeat_interleave(self.num_queries_per_kv, dim=-3)
 
-            causal_attn = self.attn_type == AttentionType.DECODER
             mask = attn_masks[seq_id]
             start_q = sdpa_start_loc[seq_id]
             end_q = sdpa_start_loc[seq_id + 1]
@@ -476,6 +469,7 @@ class QAicAttentionBackendImpl(AttentionImpl):
     ) -> torch.Tensor:
         sdpa_start_loc = attn_metadata.sdpa_start_loc
         num_decode_tokens = attn_metadata.num_decode_tokens
+        assert sdpa_start_loc is not None
         sdpa_start_loc = sdpa_start_loc[num_decode_tokens:] - num_decode_tokens
 
         if self.alibi_slopes is not None:
