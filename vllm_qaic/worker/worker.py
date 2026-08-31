@@ -225,6 +225,25 @@ class QaicWorkerPyt(QaicWorker):
 
         register_qaic_customop()
 
+        # Install the eager-mode rejection-sampler shim here, in the worker
+        # process, where profile_run and all sampling actually execute. Under
+        # V1 multiprocessing the worker is separate from the API-server/launcher
+        # process, so a monkeypatch installed from the platform hook would not
+        # be in effect here. Only speculative decoding needs it (mirrors
+        # QaicWorkerAoT._install_aot_rejection_sampler); non-SpD eager runs are
+        # left untouched. install() is idempotent.
+        #
+        # vllm_qaic.patch rebinds the top-k/top-p sampler (PyTorch by default)
+        # at import; import it explicitly so that holds in this process too.
+        from vllm_qaic import patch  # noqa: F401
+
+        if self.speculative_config is not None:
+            from vllm_qaic.v1.sample.rejection_sampler_shim import (
+                install as install_rejection_sampler_shim,
+            )
+
+            install_rejection_sampler_shim()
+
     def annotate_profile(self, scheduler_output):
         # adapted from v1/worker/gpu_worker.py
         # add trace annotation so that we can easily distinguish
