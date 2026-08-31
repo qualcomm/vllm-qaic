@@ -25,11 +25,13 @@ class QaicPlatform(QaicPlatformBase):
         # Adapt the patch here.
         from vllm_qaic import patch  # noqa: F401
 
-        # Install PyTorch rejection-sampler shim for PYT (eager) mode.
-        # AOT mode uses Triton-free paths and does not need this.
-        if not cls.is_aot:
-            from vllm_qaic.v1.sample.rejection_sampler_shim import install
-            install()
+        # NOTE: the eager-mode sampler shims (rejection sampler + top-k/top-p)
+        # are installed in QaicWorkerPyt.__init__, NOT here. This method runs in
+        # the API-server/launcher process while sampling executes in the
+        # EngineCore worker process (a separate process under V1
+        # multiprocessing), where a monkeypatch installed here would not be in
+        # effect. Installing in the worker covers both the in-process LLM()
+        # path and the `vllm serve` path.
 
         if parser is not None:  # For synchronous vLLM engine
             # disable prefix caching as QAIC backend plugin does not support it
@@ -54,6 +56,4 @@ class QaicPlatform(QaicPlatformBase):
             ):
                 kv_cache_dtype_action.choices.append(QAIC_KV_CACHE_DTYPE)
 
-        from vllm_qaic.quantization.quant_config import (  # noqa: F401
-            QaicQuantConfig,
-        )
+        from vllm_qaic.quantization.quant_config import QaicQuantConfig  # noqa: F401

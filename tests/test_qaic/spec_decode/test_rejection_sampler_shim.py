@@ -1,3 +1,7 @@
+# ------------------------------------------------------------------
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause-Clear
+# ------------------------------------------------------------------
 """Unit tests for the eager-mode speculative-decoding sampler shim.
 
 Run with ``pytest -s`` so QAIC runtime diagnostics remain visible::
@@ -446,9 +450,12 @@ def test_default_and_legacy_selector_patch_triton_objects_in_subprocess(
         shim.install()
         assert shim._selected_implementation() == "triton"
         assert rejection_sampler.expand_kernel is triton_sampler.expand_kernel
-        assert rejection_sampler.rejection_greedy_sample_kernel is triton_sampler.rejection_greedy_sample_kernel
-        assert rejection_sampler.rejection_random_sample_kernel is triton_sampler.rejection_random_sample_kernel
-        assert rejection_sampler.sample_recovered_tokens_kernel is shim.sample_recovered_tokens_kernel
+        assert (rejection_sampler.rejection_greedy_sample_kernel
+                is triton_sampler.rejection_greedy_sample_kernel)
+        assert (rejection_sampler.rejection_random_sample_kernel
+                is triton_sampler.rejection_random_sample_kernel)
+        assert (rejection_sampler.sample_recovered_tokens_kernel
+                is shim.sample_recovered_tokens_kernel)
         assert rejection_sampler.generate_uniform_probs is shim.generate_uniform_probs
         """,
     )

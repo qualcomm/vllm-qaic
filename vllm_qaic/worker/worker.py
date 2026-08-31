@@ -213,6 +213,26 @@ class QaicWorkerPyt(QaicWorker):
 
         register_qaic_customop()
 
+        # Install the eager-mode sampler shims here, in the worker process.
+        # This is the process where profile_run and all sampling actually
+        # execute. Under V1 multiprocessing the worker is separate from the
+        # API-server/launcher process that runs
+        # QaicPlatform.pre_register_and_update(), so a monkeypatch installed
+        # there would not be in effect here. Installing in the worker covers
+        # both the in-process LLM() path and the `vllm serve` path, so it is the
+        # single install point. Without these, profile_run hits the upstream
+        # Hexagon-incompatible Triton topk/topp kernel and the fp64 uniform-prob
+        # path. install() is idempotent.
+        from vllm_qaic.v1.sample.rejection_sampler_shim import (
+            install as install_rejection_sampler_shim,
+        )
+        from vllm_qaic.v1.sample.topk_topp_sampler_shim import (
+            install as install_topk_topp_shim,
+        )
+
+        install_rejection_sampler_shim()
+        install_topk_topp_shim()
+
     def annotate_profile(self, scheduler_output):
         # adapted from v1/worker/gpu_worker.py
         # add trace annotation so that we can easily distinguish
