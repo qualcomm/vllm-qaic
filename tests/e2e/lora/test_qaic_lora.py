@@ -26,8 +26,8 @@ ADAPTER_ID_1 = "jashing/tinyllama-energy-lora"
 
 @pytest.mark.qaic_test_config(
     model_name=BASE_MODEL_NAME,
-    seq_len=64,
-    ctx_len=32,
+    seq_len=32,
+    ctx_len=64,
     decode_bsz=2,
     dtype="mxfp6",
     kv_dtype="mxint8",
