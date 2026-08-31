@@ -7,7 +7,7 @@
 
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any, TypeAlias
 
 import torch
 from packaging.version import Version as _Version
@@ -84,6 +84,7 @@ from vllm.multimodal.parse import (
 )
 from vllm.multimodal.processing import InputProcessingContext
 from vllm.multimodal.processing.processor import (
+    BaseMultiModalProcessor,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
@@ -100,6 +101,7 @@ Gemma4ForConditionalGeneration.get_placeholder_str = classmethod(
         "image" if modality == "image_embeds" else modality, i
     )
 )
+
 
 class QaicGemma3MultiModalProcessor(Gemma3MultiModalProcessor):
     def _call_hf_processor(
@@ -564,9 +566,15 @@ class QaicQwen2_5_VLProcessingInfo(
         )
 
 
-class _QaicQwenVLMergedEmbedsFieldsMixin:
+if TYPE_CHECKING:
+    _MergedEmbedsFieldsMixinBase: TypeAlias = BaseMultiModalProcessor
+else:
+    _MergedEmbedsFieldsMixinBase = object
+
+
+class _QaicQwenVLMergedEmbedsFieldsMixin(_MergedEmbedsFieldsMixinBase):
     """Convert `image_grid_thw` from 3-D to 2-D for Qwen-VL models.
-    
+
     In `qaic_disagg`, `_merge_embeds` adds a leading batch dim to
     `image_grid_thw` ([N, 3] -> [1, N, 3]) and calls `_get_mm_fields_config`
     directly, so `prod(-1)` is 2-D and `flat_from_sizes` raises "size_per_item
