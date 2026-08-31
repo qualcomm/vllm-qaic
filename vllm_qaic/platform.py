@@ -25,14 +25,6 @@ class QaicPlatform(QaicPlatformBase):
         # Adapt the patch here.
         from vllm_qaic import patch  # noqa: F401
 
-        # NOTE: the eager-mode sampler shims (rejection sampler + top-k/top-p)
-        # are installed in QaicWorkerPyt.__init__, NOT here. This method runs in
-        # the API-server/launcher process while sampling executes in the
-        # EngineCore worker process (a separate process under V1
-        # multiprocessing), where a monkeypatch installed here would not be in
-        # effect. Installing in the worker covers both the in-process LLM()
-        # path and the `vllm serve` path.
-
         if parser is not None:  # For synchronous vLLM engine
             # disable prefix caching as QAIC backend plugin does not support it
             parser.set_defaults(enable_prefix_caching=False)

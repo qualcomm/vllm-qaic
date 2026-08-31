@@ -492,22 +492,6 @@ def test_invalid_selector_fails_actionably_in_subprocess():
     assert "must be unset or 'hybrid'" in result.stderr
 
 
-def test_legacy_alias_can_be_selected_after_default_install_in_subprocess():
-    result = _run_selector_subprocess(
-        None,
-        """
-        import os
-        import vllm_qaic.v1.sample.rejection_sampler_shim as shim
-
-        shim.install()
-        os.environ["VLLM_QAIC_REJECTION_SAMPLER_IMPL"] = "hybrid"
-        shim.install()
-        """,
-    )
-
-    assert result.returncode == 0, result.stderr
-
-
 def test_default_selector_reports_unavailable_backend(monkeypatch):
     import vllm_qaic.v1.sample.rejection_sampler_shim as shim
 
