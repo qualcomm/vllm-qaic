@@ -600,6 +600,25 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 )
         return
 
+    def _inject_pa_prefill_inputs(
+        self,
+        chunk_inputs: dict,
+        batch_idx: int,
+        block_table: np.ndarray | None,
+        slot_id: np.ndarray | None,
+        req_index: int,
+    ) -> None:
+        if not self.paged_attention:
+            return
+        if block_table is not None and slot_id is not None:
+            chunk_inputs["block_table"] = block_table[
+                req_index : req_index + 1
+            ].reshape(1, self.num_gpu_blocks_per_batch)
+            chunk_inputs["slot_id"] = slot_id[req_index : req_index + 1]
+        else:
+            chunk_inputs["block_table"] = batch_idx
+            chunk_inputs["slot_id"] = 0
+
     def _run_pipeline_prefill(
         self,
         input_ids: np.ndarray,
@@ -713,17 +732,9 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     if logits is not None:
                         chunk_inputs["logits"] = logits[index : index + 1]
 
-                if self.paged_attention:
-                    if block_table is not None and slot_id is not None:
-                        req_block_table = block_table[index : index + 1].reshape(
-                            1, self.num_gpu_blocks_per_batch
-                        )
-                        chunk_inputs["block_table"] = req_block_table
-                        req_slot_id = slot_id[index : index + 1]
-                        chunk_inputs["slot_id"] = req_slot_id
-                    else:
-                        chunk_inputs["block_table"] = batch_index
-                        chunk_inputs["slot_id"] = 0
+                self._inject_pa_prefill_inputs(
+                    chunk_inputs, batch_index, block_table, slot_id, index
+                )
 
                 if pending_exec_count == self.session.prefill_num_execObj:
                     if callback:
@@ -816,17 +827,9 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 chunk_inputs["lora_ids"] = lora_index
             if mm_kwargs_list and (mm_kwargs := mm_kwargs_list[i]):
                 chunk_inputs.update(mm_kwargs)
-            if self.paged_attention:
-                if block_table is not None and slot_id is not None:
-                    req_block_table = block_table[i : i + 1].reshape(
-                        1, self.num_gpu_blocks_per_batch
-                    )
-                    chunk_inputs["block_table"] = req_block_table
-                    req_slot_id = slot_id[i : i + 1]
-                    chunk_inputs["slot_id"] = req_slot_id
-                else:
-                    chunk_inputs["block_table"] = batch_index
-                    chunk_inputs["slot_id"] = 0
+            self._inject_pa_prefill_inputs(
+                chunk_inputs, batch_indices[i], block_table, slot_id, i
+            )
             # chunk the request
             n_chunks: int = iids.shape[-1] // self.prefill_seq_len
 

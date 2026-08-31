@@ -305,14 +305,7 @@ class QaicPlatform(Platform):
                         model_config.max_model_len
                     )  # reset to "no-op" default
                     cache_config.mamba_cache_mode = "none"  # reset to disabled
-                    if vllm_config.kv_transfer_config:
-                        cache_config.block_size = vllm_config.additional_config.get(
-                            "override_qaic_config", {}
-                        ).get("kv_block_size")
-                    else:
-                        cache_config.block_size = vllm_config.additional_config.get(
-                            "override_qaic_config", {}
-                        ).get("prefill_seq_len")
+                    cache_config.block_size = cls._pa_block_size(vllm_config)
                 elif (
                     model_config.is_multimodal_model and model_config.is_encoder_decoder
                 ):
@@ -474,6 +467,13 @@ class QaicPlatform(Platform):
                 )
 
     @classmethod
+    def _pa_block_size(cls, vllm_config) -> int:
+        override = vllm_config.additional_config.get("override_qaic_config", {})
+        if vllm_config.kv_transfer_config:
+            return override.get("kv_block_size")
+        return override.get("prefill_seq_len")
+
+    @classmethod
     def is_pin_memory_available(cls) -> bool:
         logger.warning("Pin memory is not supported on Qaic.")
         return False
@@ -548,16 +548,11 @@ class QaicPlatform(Platform):
                 scheduler_config.max_num_seqs
                 * scheduler_config.long_prefill_token_threshold
             )
-            cache_config = vllm_config.cache_config
-            if cache_config and cache_config.enable_prefix_caching:
-                if vllm_config.kv_transfer_config:
-                    cache_config.block_size = vllm_config.additional_config.get(
-                        "override_qaic_config", {}
-                    ).get("kv_block_size")
-                else:
-                    cache_config.block_size = vllm_config.additional_config.get(
-                        "override_qaic_config", {}
-                    ).get("prefill_seq_len")
+            if (
+                vllm_config.cache_config
+                and vllm_config.cache_config.enable_prefix_caching
+            ):
+                vllm_config.cache_config.block_size = cls._pa_block_size(vllm_config)
             if "override_qaic_config" not in vllm_config.additional_config:
                 additional_config["override_qaic_config"] = {}
             additional_config["override_qaic_config"].update(

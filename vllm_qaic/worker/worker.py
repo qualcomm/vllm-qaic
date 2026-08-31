@@ -630,6 +630,15 @@ class QaicWorkerPyt(QaicWorker):
 
 
 class QaicWorkerAoT(QaicWorker):
+    def _compute_num_gpu_blocks(self) -> int:
+        if self.cache_config.enable_prefix_caching:
+            blocks_per_seq = (
+                self.cache_config.num_gpu_blocks_override
+                or self.model_config.max_model_len // self.cache_config.block_size
+            )
+            return self.scheduler_config.max_num_seqs * blocks_per_seq + 1
+        return self.scheduler_config.max_num_seqs + 1
+
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_cpu_blocks = num_cpu_blocks
         # disable sliding window
@@ -643,30 +652,10 @@ class QaicWorkerAoT(QaicWorker):
 
         if not self.cache_config.enable_prefix_caching:
             self.cache_config.num_gpu_blocks = num_gpu_blocks
-            # Sanity check: AOT requires exact block count; eager is flexible
-            assert (
-                self.model_config.enforce_eager
-                or num_gpu_blocks == self.scheduler_config.max_num_seqs + 1
-            )
+            assert num_gpu_blocks == self.scheduler_config.max_num_seqs + 1
             return
-        elif (
-            not self.model_config.enforce_eager
-            and self.cache_config.enable_prefix_caching
-        ):
-            if self.cache_config.num_gpu_blocks_override:
-                self.cache_config.num_gpu_blocks = (
-                    self.scheduler_config.max_num_seqs
-                    * self.cache_config.num_gpu_blocks_override
-                    + 1
-                )
-            else:
-                # For prefix caching, we need to calculate the number of GPU blocks
-                # based on the max model length and block size.
-                self.cache_config.num_gpu_blocks = (
-                    self.scheduler_config.max_num_seqs
-                    * (self.model_config.max_model_len // self.cache_config.block_size)
-                    + 1
-                )
+        else:
+            self.cache_config.num_gpu_blocks = self._compute_num_gpu_blocks()
 
     def init_device(self):
         """Initialize qaic device
@@ -726,24 +715,7 @@ class QaicWorkerAoT(QaicWorker):
         pass
 
     def determine_available_memory(self) -> int:
-        if self.vllm_config.cache_config.enable_prefix_caching:
-            if self.cache_config.num_gpu_blocks_override:
-                num_gpu_blocks = (
-                    self.scheduler_config.max_num_seqs
-                    * self.cache_config.num_gpu_blocks_override
-                    + 1
-                )
-            else:
-                num_gpu_blocks = (
-                    self.scheduler_config.max_num_seqs
-                    * (
-                        self.vllm_config.model_config.max_model_len
-                        // self.cache_config.block_size
-                    )
-                    + 1
-                )
-        else:
-            num_gpu_blocks = self.scheduler_config.max_num_seqs + 1
+        num_gpu_blocks = self._compute_num_gpu_blocks()
         # adapted from get_uniform_page_size
         page_sizes = set(
             layer.page_size_bytes for layer in self.get_kv_cache_spec().values()
