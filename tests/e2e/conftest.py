@@ -519,12 +519,19 @@ def qaic_model(
     device_group_size = _resolve_qaic_test_config_value(
         request, pytestconfig, "device_group_size", default=1
     )
+    enable_prefix_caching = _resolve_qaic_test_config_value(
+        request, pytestconfig, "enable_prefix_caching", default=False
+    )
 
     ids = _device_pool.acquire(device_pool_ids, num_device_groups * device_group_size)
     try:
+        qaic_cfg = (
+            dict(override_qaic_config) if override_qaic_config is not None else {}
+        )
+        qaic_cfg["prefill_seq_len"] = seq_len
         additional_config = {
             "device_group": ids,
-            "override_qaic_config": override_qaic_config,
+            "override_qaic_config": qaic_cfg,
         }
         if draft_override_qaic_config is not None:
             additional_config["draft_override_qaic_config"] = draft_override_qaic_config
@@ -537,10 +544,9 @@ def qaic_model(
             model_name,
             max_num_seqs=decode_bsz,
             max_model_len=ctx_len,
-            long_prefill_token_threshold=seq_len,
             quantization=dtype,
             kv_cache_dtype=kv_dtype,
-            enable_prefix_caching=False,
+            enable_prefix_caching=enable_prefix_caching,
             async_scheduling=False,
             speculative_config=speculative_config,
             enable_lora=enable_lora,
@@ -566,9 +572,23 @@ def pytest_collection_modifyitems(session, config, items):
         if device_pool_size is not None
         else len(config.getoption("device_id"))
     )
+    cli_prefix_cache = config.getoption("enable_prefix_caching", default=None)
     for item in items:
         marker = item.get_closest_marker("qaic_test_config")
         kwargs = marker.kwargs if marker is not None else {}
+        if (
+            cli_prefix_cache is not None
+            and "enable_prefix_caching" in kwargs
+            and kwargs["enable_prefix_caching"] != cli_prefix_cache
+        ):
+            item.add_marker(
+                pytest.mark.skip(
+                    reason=(
+                        f"--prefix-cache={cli_prefix_cache} set; skipping "
+                        f"enable_prefix_caching={kwargs['enable_prefix_caching']} test"
+                    )
+                )
+            )
         num_device_groups = kwargs.get("num_device_groups", 1)
         device_group_size = kwargs.get("device_group_size", 1)
         required = num_device_groups * device_group_size
