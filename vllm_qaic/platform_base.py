@@ -275,9 +275,15 @@ class QaicPlatform(Platform):
             and not model_config.is_multimodal_model
         ):
             # QAIC pooling QPCs are compiled with seq_len == max_model_len.
-            # Set both explicitly here (AOT and eager) so prefill_seq_len is correct.
+            # Disable chunked prefill and pin prefill_seq_len to max_model_len via
+            # override_qaic_config (the single source of truth for prefill chunking).
             scheduler_config.enable_chunked_prefill = False
-            scheduler_config.long_prefill_token_threshold = model_config.max_model_len
+            if additional_config is None:
+                additional_config = vllm_config.additional_config = {}
+            additional_config.setdefault("override_qaic_config", {})
+            additional_config["override_qaic_config"]["prefill_seq_len"] = (
+                model_config.max_model_len
+            )
 
         if not cls.is_aot:
             assert vllm_config.kv_transfer_config is None, (
@@ -322,18 +328,14 @@ class QaicPlatform(Platform):
                     model_config.hf_config, "max_source_positions", 1500
                 )
             else:
+                # Prefill chunk length comes solely from
+                # override_qaic_config["prefill_seq_len"]; when unset, default to
+                # min(128, max_model_len). The prior long_prefill_token_threshold
+                # input has been removed.
                 __prefill_seq_len = override_qaic_config.get("prefill_seq_len", 0)
                 if not __prefill_seq_len:
-                    if scheduler_config.long_prefill_token_threshold == 0:
-                        __prefill_seq_len = min(128, model_config.max_model_len)
-                    else:
-                        __prefill_seq_len = min(
-                            scheduler_config.long_prefill_token_threshold,
-                            model_config.max_model_len,
-                        )
+                    __prefill_seq_len = min(128, model_config.max_model_len)
                 if not scheduler_config.enable_chunked_prefill:
-                    # TODO: long_prefill_token_threshold should not be set when
-                    # chunked prefill is disabled
                     logger.warning_once(
                         "Chunked prefill is disabled; chunk size=%s will be used"
                         " as prefill_seq_len.",
@@ -344,6 +346,13 @@ class QaicPlatform(Platform):
                 additional_config["override_qaic_config"].update(
                     {"prefill_seq_len": __prefill_seq_len}
                 )
+                # Drive the vLLM scheduler prefill chunk from prefill_seq_len so
+                # each prefill step feeds at most prefill_seq_len tokens. This
+                # matches the QPC vision_embeds binding (sized to prefill_seq_len)
+                # and prevents the mm-embedding gather from overflowing/cropping.
+                # (Replaces the removed --*-long-prefill-token-threshold flag.)
+                if not isinstance(__prefill_seq_len, (list, tuple)):
+                    scheduler_config.long_prefill_token_threshold = __prefill_seq_len
                 # max_num_batched_tokens.  QAIC's _prepare_qaic_inputs expands each
                 # decode request's token count from 1 → (1 + num_spec_tokens), but the
                 # scheduler counts decode requests as 1 token each when enforcing the
