@@ -142,6 +142,11 @@ class QaicECConnector(ECConnectorBase):
             A bool where value is True if cache exist for
             the media
         """
+        # Only the consumer loads from the ECStore. The producer must always
+        # encode; reporting a hit here would make the scheduler skip encoding
+        # while the producer's transient encoder_cache stays empty.
+        if self.is_producer:
+            return False
         req_pkt = QaicECHandOffGetReq(
             timestamp=time.perf_counter(), mm_hash=identifier, rank=self.ec_rank
         )
