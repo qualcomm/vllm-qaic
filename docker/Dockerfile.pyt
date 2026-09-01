@@ -62,6 +62,12 @@
 #     --build-arg PYTHON_VERSION=3.11 --build-arg QAIC_DEVICE_ARCH=v81 \
 #     --output type=local,dest=./dist/pyt/py311 .
 #
+#   # Wheel with an overridden filename:
+#   docker buildx build --target wheel -f docker/Dockerfile.pyt \
+#     --build-arg PYTHON_VERSION=3.11 \
+#     --build-arg WHEEL_NAME=vllm_qaic-1.22.0+pyt-cp311-cp311-linux_x86_64.whl \
+#     --output type=local,dest=./dist/pyt/py311 .
+#
 #   # Any target — also build vllm's experimental Rust OpenAI frontend
 #   # (vllm-rs). See docs/installation.md for known caveats.
 #   docker build --target release -f docker/Dockerfile.pyt \
@@ -130,6 +136,12 @@ ARG VLLM_QAIC_GIT_REF="v0.23.0"
 # ---------------------------------------------------------------------------
 ARG VLLM_QAIC_PR=""
 ARG VLLM_QAIC_BRANCH=""
+
+# ---------------------------------------------------------------------------
+# Wheel-specific — WHEEL_NAME renames the built wheel before it is exported
+# (empty = keep uv build's own name).
+# ---------------------------------------------------------------------------
+ARG WHEEL_NAME=""
 
 # ---------------------------------------------------------------------------
 # Pinned uv binary — FROM supports ARG substitution, COPY --from does not.
@@ -480,18 +492,42 @@ CMD ["bash"]
 #   docker buildx build --target wheel -f docker/Dockerfile.pyt \
 #     --build-arg PYTHON_VERSION=3.11 --build-arg QAIC_DEVICE_ARCH=v81 \
 #     --output type=local,dest=./dist/pyt/py311 .
+#
+#   # Custom wheel filename:
+#   docker buildx build --target wheel -f docker/Dockerfile.pyt \
+#     --build-arg WHEEL_NAME=vllm_qaic-1.22.0+pyt-cp311-cp311-linux_x86_64.whl \
+#     --output type=local,dest=./dist/pyt/py311 .
 # ===========================================================================
 FROM pyt-base AS wheel-builder
 
 ARG VLLM_VERSION="0.23.0"
 ARG VLLM_QAIC_VERSION="1.22"
 ARG QAIC_DEVICE_ARCH="v68"
+ARG WHEEL_NAME=""
 
+# WHEEL_NAME rename: the wheel's own name comes from setup.py's package name
+# and version, so overriding the filename is a post-build mv. Only the filename
+# changes — the .dist-info inside still carries the real name/version. pip reads
+# the distribution and compatibility tags off the filename and requires the
+# distribution to match that metadata, so an arbitrary name exports fine but
+# may not be installable; scripts/build_wheels.sh warns about names pip would
+# reject. Failing when /out has no wheel keeps a silent no-op rename from
+# exporting an unrenamed artifact.
 COPY . /src/vllm-qaic
 RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
     QAIC_DEVICE_ARCH="${QAIC_DEVICE_ARCH}" \
     VLLM_VERSION_OVERRIDE="${VLLM_VERSION}+pyt${VLLM_QAIC_VERSION}" \
-    uv build --wheel --no-build-isolation --out-dir /out /src/vllm-qaic
+    uv build --wheel --no-build-isolation --out-dir /out /src/vllm-qaic && \
+    if [ -n "${WHEEL_NAME}" ]; then \
+        built="$(find /out -maxdepth 1 -name '*.whl' -print -quit)"; \
+        if [ -z "${built}" ]; then \
+            echo "ERROR: no wheel found in /out to rename" >&2; exit 1; \
+        fi; \
+        if [ "${built}" != "/out/${WHEEL_NAME}" ]; then \
+            mv "${built}" "/out/${WHEEL_NAME}" && \
+            echo "=== Wheel renamed: $(basename "${built}") -> ${WHEEL_NAME} ==="; \
+        fi; \
+    fi
 
 FROM scratch AS wheel
 COPY --from=wheel-builder /out /
