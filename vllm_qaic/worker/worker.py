@@ -213,6 +213,18 @@ class QaicWorkerPyt(QaicWorker):
 
         register_qaic_customop()
 
+        # Install sampler shims in the worker, where profiling and sampling run.
+        # The installers are idempotent.
+        from vllm_qaic.v1.sample.rejection_sampler_shim import (
+            install as install_rejection_sampler_shim,
+        )
+        from vllm_qaic.v1.sample.topk_topp_sampler_shim import (
+            install as install_topk_topp_shim,
+        )
+
+        install_rejection_sampler_shim()
+        install_topk_topp_shim()
+
     def annotate_profile(self, scheduler_output):
         # adapted from v1/worker/gpu_worker.py
         # add trace annotation so that we can easily distinguish

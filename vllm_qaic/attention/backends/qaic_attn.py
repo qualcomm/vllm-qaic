@@ -13,7 +13,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm_qaic.logger import init_logger
-from vllm.platforms import CpuArchEnum, current_platform
+from vllm.platforms import CpuArchEnum
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
@@ -145,7 +145,7 @@ class QAicAttentionMetadataBuilder(AttentionMetadataBuilder[QAicAttentionMetadat
         self.block_size = vllm_config.cache_config.block_size
 
     def update_req_ids(self, req_ids: list[str]) -> None:
-        """Called by the model runner before build() to supply the current batch's request IDs."""
+        """Supply current batch request IDs before metadata build()."""
         self.current_req_ids = req_ids
 
     def build(
@@ -154,7 +154,6 @@ class QAicAttentionMetadataBuilder(AttentionMetadataBuilder[QAicAttentionMetadat
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> QAicAttentionMetadata:
-        num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
         max_seq_len = common_attn_metadata.max_seq_len
@@ -171,16 +170,15 @@ class QAicAttentionMetadataBuilder(AttentionMetadataBuilder[QAicAttentionMetadat
             # Decoder, need reorder and truncate
             assert self.reorder_batch_threshold
             (
-                num_decodes,
-                num_prefills,
+                _num_decodes,
+                _num_prefills,
                 num_decode_tokens,
-                num_prefill_tokens,
+                _num_prefill_tokens,
             ) = split_decodes_and_prefills(
                 common_attn_metadata,
                 decode_threshold=self.reorder_batch_threshold,
                 require_uniform=True,
             )
-            num_reqs = num_decodes + num_prefills
 
         scheduler_metadata = None
 
@@ -402,13 +400,26 @@ class QAicAttentionBackendImpl(AttentionImpl):
                 else:
                     kv_k, kv_v, cached = self._kv_cache[req_id]
 
-                # Fresh prefill: num_new == seq_len means this is a full context fill.
-                if num_new == seq_len:
-                    cached = 0
+                # Place newly produced tokens at their logical positions in the
+                # post-step sequence. This supports speculative-decoding
+                # rejection/rollback where seq_len can move backwards and we
+                # must overwrite stale KV tail entries instead of append-only.
+                write_start = seq_len - num_new
+                if write_start < 0:
+                    raise ValueError(
+                        f"Invalid decode metadata for request {req_id}: "
+                        f"seq_len={seq_len}, num_new={num_new}"
+                    )
+                if write_start > cached:
+                    raise ValueError(
+                        f"Non-contiguous KV update for request {req_id}: "
+                        f"write_start={write_start}, cached={cached}, "
+                        f"seq_len={seq_len}, num_new={num_new}"
+                    )
 
-                kv_k[cached : cached + num_new] = k_i
-                kv_v[cached : cached + num_new] = v_i
-                new_cached = cached + num_new
+                kv_k[write_start:seq_len] = k_i
+                kv_v[write_start:seq_len] = v_i
+                new_cached = seq_len
                 self._kv_cache[req_id] = (kv_k, kv_v, new_cached)
             else:
                 # KV sharing: read existing cache without updating.

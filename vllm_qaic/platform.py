@@ -48,6 +48,4 @@ class QaicPlatform(QaicPlatformBase):
             ):
                 kv_cache_dtype_action.choices.append(QAIC_KV_CACHE_DTYPE)
 
-        from vllm_qaic.quantization.quant_config import (  # noqa: F401
-            QaicQuantConfig,
-        )
+        from vllm_qaic.quantization.quant_config import QaicQuantConfig  # noqa: F401

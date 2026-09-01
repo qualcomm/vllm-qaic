@@ -32,9 +32,9 @@ pip install "setuptools>=77.0.3,<80.0.0" setuptools-scm wheel "cmake>=3.26"
 # 1. CPU torch FIRST (torch_qaic requires CPU-only torch)
 python -m pip install \
     --index-url https://download.pytorch.org/whl/cpu \
-    "torch==2.10.0+cpu" \
-    "torchvision==0.25.0+cpu" \
-    "torchaudio==2.10.0+cpu"
+    "torch==2.11.0+cpu" \
+    "torchvision==0.26.0+cpu" \
+    "torchaudio==2.11.0+cpu"
 
 # 2. torch_qaic (from SDK installer output)
 pip install /opt/qti-aic/integrations/torch_qaic/py312/torch_qaic-*.whl
@@ -58,7 +58,7 @@ pip install --no-build-isolation ./vllm-qaic
 | Component | Version |
 |-----------|---------|
 | vLLM | 0.15.0 (vllm-cpu) |
-| torch | 2.10.0+cpu |
-| torchvision | 0.25.0+cpu |
+| torch | 2.11.0+cpu |
+| torchvision | 0.26.0+cpu |
 | torch_qaic | 0.1.0 |
 | QAIC SDK | >= 1.22.0 |

@@ -11,7 +11,7 @@ After installation, verify your environment is correctly set up.
 # Check torch is CPU-only
 python -c "import torch; print(torch.__version__)"
 # AOT expected: 2.7.0+cpu
-# PYT expected: 2.10.0+cpu
+# PYT expected: 2.11.0+cpu
 
 # Verify vllm-qaic plugin loads
 python -c "import vllm_qaic; print('vllm_qaic OK')"
