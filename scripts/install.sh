@@ -35,69 +35,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/utility.sh"
 
-ensure_vllm_distribution() {
-    if ${PYTHON} - <<'PY' 2>/dev/null
-import importlib.metadata
-importlib.metadata.version("vllm")
-PY
-    then
-        return 0
-    fi
-
-    echo "WARN: 'vllm' distribution metadata not found in active environment."
-    echo "      Attempting remediation: install vllm==${VLLM_VERSION} (no deps)."
-
-    if ! ${PIP} install --no-deps "vllm==${VLLM_VERSION}"; then
-        echo "WARN: remediation install failed."
-    fi
-
-    if ! ${PYTHON} - <<'PY' 2>/dev/null
-import importlib.metadata
-importlib.metadata.version("vllm")
-PY
-    then
-        echo "ERROR: vllm metadata is still missing after installation steps." >&2
-        echo "       The 'vllm' CLI will fail at startup without this metadata." >&2
-        echo "       Fix manually in this environment, e.g.:" >&2
-        echo "         python -m pip install --no-deps \"vllm==${VLLM_VERSION}\"" >&2
-        exit 1
-    fi
-}
-
-configure_hexagon_build_env() {
-    # torch_qaic build utils consume HEXAGON_TOOLS_DIR, not HEXAGON_TOOLS.
-    if [ -z "${HEXAGON_TOOLS_DIR:-}" ] && [ -n "${HEXAGON_TOOLS:-}" ]; then
-        export HEXAGON_TOOLS_DIR="${HEXAGON_TOOLS}"
-    fi
-
-    # Auto-discover host build-tools toolchain if /opt path is unavailable.
-    if [ -z "${HEXAGON_TOOLS_DIR:-}" ] || [ ! -x "${HEXAGON_TOOLS_DIR}/bin/hexagon-clang++" ]; then
-        for cand in \
-            "/prj/crd/austin/validation/scratch/users/${USER}/pytorch/pytorch_build_tools/hexagon_tools-21.0.02/Tools" \
-            "/prj/crd/austin/validation/scratch/users/${USER}/pytorch/pytorch_build_tools/hexagon_tools/Tools" \
-            "/opt/qti-aic/dev/hexagon_tools" \
-        ; do
-            if [ -x "${cand}/bin/hexagon-clang++" ]; then
-                export HEXAGON_TOOLS_DIR="${cand}"
-                break
-            fi
-        done
-    fi
-
-    if [ -n "${HEXAGON_TOOLS_DIR:-}" ] && [ -x "${HEXAGON_TOOLS_DIR}/bin/hexagon-clang++" ]; then
-        echo "INFO: Using HEXAGON_TOOLS_DIR=${HEXAGON_TOOLS_DIR}"
-    else
-        echo "WARN: hexagon-clang++ not found. Set HEXAGON_TOOLS_DIR (or HEXAGON_TOOLS) before install if vllm-qaic build fails." >&2
-    fi
-}
-
-has_torch_qaic_installed() {
-    ${PYTHON} - <<'PY' >/dev/null 2>&1
-import importlib.metadata
-importlib.metadata.version("torch_qaic")
-PY
-}
-
 MODE="${1:-aot}"
 shift || true
 if [[ $# -gt 0 ]]; then
@@ -255,10 +192,8 @@ if [ "${MODE}" = "aot" ]; then
     VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE_AOT}" ${PIP} install \
         --no-build-isolation --no-deps \
         "${VLLM_INSTALL_TARGET}"
-    ensure_vllm_distribution
 
     echo "=== Step 3: vllm-qaic-aot ==="
-    configure_hexagon_build_env
     if [ "${INSTALL_SOURCE}" = "source" ]; then
         TORCH_QAIC_INSTALLED=0 ${PIP} install --no-build-isolation "${REPO_ROOT}"
     else
@@ -288,17 +223,7 @@ elif [ "${MODE}" = "pyt" ]; then
         "torchaudio==${TORCHAUDIO_VERSION_PYT}"
 
     echo "=== Step 1b: torch_qaic ==="
-    if compgen -G "${TORCH_QAIC_WHEEL_DIR}/torch_qaic-*.whl" > /dev/null; then
-        ${PIP} install "${TORCH_QAIC_WHEEL_DIR}"/torch_qaic-*.whl
-    elif has_torch_qaic_installed; then
-        echo "WARN: No torch_qaic wheel found at ${TORCH_QAIC_WHEEL_DIR}, but torch_qaic is already installed in this environment."
-        echo "      Reusing existing torch_qaic install."
-    else
-        echo "ERROR: torch_qaic wheel not found at ${TORCH_QAIC_WHEEL_DIR} and torch_qaic is not installed." >&2
-        echo "       Set TORCH_QAIC_BASE_PATH to a directory containing ${PYVER}/torch_qaic-*.whl," >&2
-        echo "       or install torch_qaic in the active environment first." >&2
-        exit 1
-    fi
+    ${PIP} install "${TORCH_QAIC_WHEEL_DIR}"/torch_qaic-*.whl
 
     # Optional transformers pin
     if [ -n "${TRANSFORMERS_VERSION_PYT:-}" ]; then
@@ -313,10 +238,8 @@ elif [ "${MODE}" = "pyt" ]; then
     VLLM_TARGET_DEVICE=${VLLM_TARGET_DEVICE_PYT} ${PIP} install \
         --no-build-isolation --no-deps \
         "${VLLM_INSTALL_TARGET}"
-    ensure_vllm_distribution
 
     echo "=== Step 3: vllm-qaic-pyt ==="
-    configure_hexagon_build_env
     if [ "${INSTALL_SOURCE}" = "source" ]; then
         ${PIP} install --no-build-isolation "${REPO_ROOT}"
     else
