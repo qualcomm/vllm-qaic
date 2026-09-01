@@ -1276,7 +1276,10 @@ class QaicModelRunnerAoT(GPUModelRunner):
                     self.num_decodes : self.input_batch.num_reqs
                 ]
                 # DFlash: bind per-chunk TLM hidden-state buffers for the DLM.
-                _dflash_hidden_chunks = None
+                # Reuse the cached buffers (grown on demand) instead of
+                # reallocating them each prefill; the proposer drains and copies
+                # them out every step before the next prefill, so reuse is safe.
+                tlm_prefill_hidden_chunks = None
                 if _dflash_prefill:
                     _n_chunks = self.model.num_prefill_chunks(prefill_cum_sum)
                     _hidden_size = self.model_config.get_hidden_size()
@@ -1284,10 +1287,11 @@ class QaicModelRunnerAoT(GPUModelRunner):
                     # Must match the QPC's hidden_states binding dtype (float16 for
                     # mxfp6/mxint8 models) or setData rejects the buffer.
                     _hs_dtype = self._dflash_hidden_dtype
-                    _dflash_hidden_chunks = [
-                        np.zeros((1, _pfl, _hidden_size), dtype=_hs_dtype)
-                        for _ in range(_n_chunks)
-                    ]
+                    while len(self._tlm_prefill_hidden_chunks) < _n_chunks:
+                        self._tlm_prefill_hidden_chunks.append(
+                            np.zeros((1, _pfl, _hidden_size), dtype=_hs_dtype)
+                        )
+                    tlm_prefill_hidden_chunks = self._tlm_prefill_hidden_chunks
                 pending_prefill_exec_queue = self.model(
                     input_ids=prefill_input_ids,
                     positions=prefill_positions,
@@ -1301,7 +1305,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
                     callback=callback,
                     lora_ids=prefill_lora_ids,
                     num_prompt_tokens_prefill=num_prompt_tokens_prefill,
-                    dflash_hidden_chunks=_dflash_hidden_chunks,
+                    tlm_prefill_hidden_chunks=tlm_prefill_hidden_chunks,
                 )
                 if _dflash_prefill:
                     # Prefill is sync for DFlash; per-chunk hidden buffers are now filled.
@@ -1314,7 +1318,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
                         prefill_block_ids,
                         prefill_is_partial,
                         hidden_states_prefill,
-                        _dflash_hidden_chunks,
+                        tlm_prefill_hidden_chunks,
                         prefill_req_ids,
                     )
 
@@ -1632,6 +1636,9 @@ class QaicModelRunnerAoT(GPUModelRunner):
         self._tlm_hidden_buf = np.zeros(
             (decode_bsz, block_size, hidden_size), dtype=self._dflash_hidden_dtype
         )
+        # Reusable per-chunk TLM prefill hidden-state buffers, grown on demand
+        # in the prefill path (see execute loop) to avoid reallocating each step.
+        self._tlm_prefill_hidden_chunks: list[np.ndarray] = []
 
     def load_model(self, *args, **kwargs) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
