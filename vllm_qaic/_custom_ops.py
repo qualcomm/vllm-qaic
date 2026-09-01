@@ -17,6 +17,7 @@ _rms_norm_kernel = _qaic_custom_ops.rms_norm_dispatch
 _NSP_COUNT = current_platform.get_num_cores()
 _THREAD_COUNT = current_platform.get_num_hvx_threads()
 
+
 def rms_norm_hexagon(
     attn_out: torch.Tensor,  # previous layer's output (acts as the residual)
     x: torch.Tensor,  # current layer's input
@@ -29,19 +30,21 @@ def rms_norm_hexagon(
       new_residual = attn_out + x   (stored in FP16 by the kernel)
       normed = new_residual / rms(new_residual) * weight
     """
-    out = torch.empty_like(attn_out)
-    dst = torch.empty_like(attn_out)
+    is_bf16 = attn_out.dtype == torch.bfloat16
+    out_dtype = torch.float32 if is_bf16 else attn_out.dtype
+    out = torch.empty(attn_out.shape, dtype=out_dtype, device=attn_out.device)
+    dst = torch.empty(attn_out.shape, dtype=out_dtype, device=attn_out.device)
     # Launch grid: [_NSP_COUNT cores, _THREAD_COUNT HVX threads per core]
     _rms_norm_kernel[_NSP_COUNT, _THREAD_COUNT](
         attn_out,
         x,
         weight,
-        out,      # written as residual by the kernel
-        dst,      # written as normed output by the kernel
+        out,  # written as residual by the kernel
+        dst,  # written as normed output by the kernel
         float(epsilon),
         attn_out.shape[-1],
         attn_out.numel(),
-        int(attn_out.dtype == torch.bfloat16),
+        int(is_bf16),
     )
 
     return dst, out
