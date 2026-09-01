@@ -2174,10 +2174,9 @@ def _get_qaic_compile_config(
     if vllm_config.cache_config.enable_prefix_caching:
         # Add num_kv_blocks through qaic_config
         if vllm_config.kv_transfer_config:
-            num_kv_blocks = cdiv(
-                vllm_config.model_config.max_model_len, cfg["kv_block_size"]
-            )
-            vllm_config.cache_config.block_size = cfg["kv_block_size"]
+            kv_block_size = cfg.pop("kv_block_size")
+            num_kv_blocks = cdiv(vllm_config.model_config.max_model_len, kv_block_size)
+            vllm_config.cache_config.block_size = kv_block_size
         else:
             num_kv_blocks = cdiv(
                 vllm_config.model_config.max_model_len, cfg["prefill_seq_len"]
