@@ -7,9 +7,22 @@
 # Adapted from examples/qaic_spd.py — DFlash (Diffusion-LM draft) SpD.
 
 import gc
+import json
 import random
 
+from huggingface_hub import hf_hub_download
 from vllm import LLM, SamplingParams
+
+
+def _dflash_block_size(dlm_repo: str) -> int:
+    """DLM block_size (== num_speculative_tokens) read from the checkpoint config."""
+    cfg_path = hf_hub_download(repo_id=dlm_repo, filename="config.json")
+    with open(cfg_path) as f:
+        cfg = json.load(f)
+    bs = cfg.get("block_size") or cfg.get("dflash_config", {}).get("block_size")
+    if bs is None:
+        raise ValueError(f"no block_size in {dlm_repo}/config.json")
+    return int(bs)
 
 
 def main() -> None:
@@ -26,13 +39,14 @@ def main() -> None:
     # QPC parameters
     ctx_len = 4096
     seq_len = 128  # TLM prefill_seq_len (multiple of block_size)
-    block_size = 16  # DFlash DLM block_size == num_speculative_tokens
     decode_bsz = 4
 
     device_group = [0, 1, 2, 3]
 
     tlm_repo = "Qwen/Qwen3-4B"
     dlm_repo = "z-lab/Qwen3-4B-DFlash-b16"
+    # block_size (== num_speculative_tokens) is a property of the DLM checkpoint.
+    block_size = _dflash_block_size(dlm_repo)
 
     print(
         f"DFlash SpD run (TLM={tlm_repo} -> DLM={dlm_repo}, "
