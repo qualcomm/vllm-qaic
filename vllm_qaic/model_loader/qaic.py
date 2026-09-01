@@ -148,13 +148,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self.ctx_len = model_config.max_model_len
         self.decode_bsz = vllm_config.scheduler_config.max_num_seqs
         self.full_batch_size = vllm_config.scheduler_config.max_num_seqs
-        self._vllm_config = vllm_config
-        self.num_gpu_blocks_per_batch = None
-        if vllm_config.cache_config.enable_prefix_caching:
-            self.num_gpu_blocks = None
-        else:
-            self.num_gpu_blocks = self.decode_bsz
         self.paged_attention = bool(vllm_config.cache_config.enable_prefix_caching)
+        self._cache_config = vllm_config.cache_config
         self.prefill_bsz = 1
         self.lora_mode = bool(vllm_config.lora_config)
         self.last_decode = False
@@ -377,15 +372,14 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self.stages: int = stages if stages is not None else 1
         self.disagg_serving_en = kv_transfer_role is not None
         self.disagg_producer_en = kv_transfer_role == "kv_producer"
-
-        # block_size is now populated (set during cache initialisation)
-        cache_config = self._vllm_config.cache_config
-        self.num_gpu_blocks_per_batch = self.ctx_len // cache_config.block_size
+        self.num_gpu_blocks_per_batch = cdiv(
+            self.ctx_len, self._cache_config.block_size
+        )
         if self.paged_attention:
             self.num_gpu_blocks = (
-                cache_config.num_gpu_blocks_override
-                if cache_config.num_gpu_blocks_override
-                else self.ctx_len // cache_config.block_size
+                self._cache_config.num_gpu_blocks_override
+                if self._cache_config.num_gpu_blocks_override
+                else cdiv(self.ctx_len, self._cache_config.block_size)
             )
         else:
             self.num_gpu_blocks = self.decode_bsz
@@ -2180,13 +2174,13 @@ def _get_qaic_compile_config(
     if vllm_config.cache_config.enable_prefix_caching:
         # Add num_kv_blocks through qaic_config
         if vllm_config.kv_transfer_config:
-            num_kv_blocks = (
-                vllm_config.model_config.max_model_len // cfg["kv_block_size"]
+            num_kv_blocks = cdiv(
+                vllm_config.model_config.max_model_len, cfg["kv_block_size"]
             )
             vllm_config.cache_config.block_size = cfg["kv_block_size"]
         else:
-            num_kv_blocks = (
-                vllm_config.model_config.max_model_len // cfg["prefill_seq_len"]
+            num_kv_blocks = cdiv(
+                vllm_config.model_config.max_model_len, cfg["prefill_seq_len"]
             )
             vllm_config.cache_config.block_size = cfg["prefill_seq_len"]
         logger.info("Num KV Blocks: %s", num_kv_blocks)

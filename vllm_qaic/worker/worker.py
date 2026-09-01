@@ -40,6 +40,7 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.network_utils import get_distributed_init_method, get_ip, get_open_port
 from vllm.utils.torch_utils import set_random_seed
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.sched.output import GrammarOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (
@@ -632,9 +633,8 @@ class QaicWorkerPyt(QaicWorker):
 class QaicWorkerAoT(QaicWorker):
     def _compute_num_gpu_blocks(self) -> int:
         if self.cache_config.enable_prefix_caching:
-            blocks_per_seq = (
-                self.cache_config.num_gpu_blocks_override
-                or self.model_config.max_model_len // self.cache_config.block_size
+            blocks_per_seq = self.cache_config.num_gpu_blocks_override or cdiv(
+                self.model_config.max_model_len, self.cache_config.block_size
             )
             return self.scheduler_config.max_num_seqs * blocks_per_seq + 1
         return self.scheduler_config.max_num_seqs + 1
