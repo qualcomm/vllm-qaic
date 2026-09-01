@@ -30,7 +30,6 @@ from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm_qaic.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, SupportedTask
 from vllm.utils.import_utils import PlaceholderModule
@@ -737,7 +736,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
         finished_mask_qaicpooler = [
             seq_len == prompt_len
             for seq_len, prompt_len in zip(
-                seq_lens_qaicpooler, pooling_metadata_qaicpooler.prompt_lens
+                seq_lens_qaicpooler, pooling_metadata_qaicpooler.prompt_lens, strict=False
             )
         ]
 
@@ -1068,12 +1067,21 @@ class QaicModelRunnerAoT(GPUModelRunner):
                     "after execute_model() returns None."
                 )
 
-            self._update_states(scheduler_output)
-
             if self.model.is_vision_encoder:
-                # This is referencing to gpu_model_runner
-                # if has_ec_transfer() and get_ec_transfer().is_producer
+                # Defer freeing encoder_cache until after the encoder runs, and
+                # skip hashes (re)scheduled this same step, so a just-encoded
+                # entry isn't dropped before _gather_mm_embeddings reads it.
+                saved_free_hashes = list(scheduler_output.free_encoder_mm_hashes)
+                scheduler_output.free_encoder_mm_hashes.clear()
+                self._update_states(scheduler_output)
+                scheduled_mm_hashes, _, _ = self._batch_mm_inputs_from_scheduler(
+                    scheduler_output
+                )
+                scheduled_mm_hashes = set(scheduled_mm_hashes)
                 self._execute_mm_encoder(scheduler_output)
+                for mm_hash in saved_free_hashes:
+                    if mm_hash not in scheduled_mm_hashes:
+                        self.encoder_cache.pop(mm_hash, None)
                 # Gather the encoder outputs that _execute_mm_encoder placed in
                 # the encoder cache; pass all req_ids since every request in this
                 # batch is a vision-encoder pooling request.
@@ -1083,6 +1091,8 @@ class QaicModelRunnerAoT(GPUModelRunner):
                     for_pooling_output=True,
                 )
                 return self.make_encoder_model_runner_output(mm_embeds)
+
+            self._update_states(scheduler_output)
 
             if not num_scheduled_tokens:
                 if not has_kv_transfer_group():
