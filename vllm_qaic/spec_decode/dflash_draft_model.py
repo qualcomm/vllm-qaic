@@ -359,12 +359,17 @@ class QaicDFlashProposer:
                 continue
 
             if st.candidates_from_prefill:
-                # Skip forward; keep cached candidates unless committing.
                 if commit:
+                    # Gate open: serve prefill-computed drafts once, then decode.
                     st.candidates_from_prefill = False
                     assert st.dlm_candidates is not None
                     draft_token_ids[i] = st.dlm_candidates[1:].tolist()
-                continue
+                    continue
+                # Gate closed: can't serve cached drafts; discard them and fall
+                # through to the discarded-decode path so the DLM KV (and
+                # position_counter) keeps tracking the TLM instead of freezing.
+                st.candidates_from_prefill = False
+                st.dlm_candidates = None
 
             n_advanced = len(accepted_seq)
             new_tlm_token = int(accepted_seq[-1])
