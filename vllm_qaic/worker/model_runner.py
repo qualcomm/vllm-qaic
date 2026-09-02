@@ -260,6 +260,7 @@ class QaicAsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         # 3. Book keep to update input batch
         (
             num_nans_in_logits,
+            _num_nans_device,
             logprobs_lists,
             valid_sampled_token_ids,
             prompt_logprobs_dict,
@@ -420,6 +421,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
 
         self.use_cuda_graph = False
         self.cascade_attn_enabled = False
+        self.pin_memory = False
 
         assert device == torch.device("cpu")
         # --- Disaggregated serving flags (must precede drafter gating) ---
@@ -1446,6 +1448,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
 
         (
             num_nans_in_logits,
+            _num_nans_device,
             logprobs_lists,
             valid_sampled_token_ids,
             prompt_logprobs_dict,
@@ -1899,13 +1902,16 @@ def _torch_cuda_wrapper():
             pass
 
     cuda_event = torch.Event
+    cuda_cuda_event = torch.cuda.Event
     cuda_stream = torch.cuda.Stream
     try:
         torch.Event = _EventPlaceholder
+        torch.cuda.Event = _EventPlaceholder
         torch.cuda.Stream = _StreamPlaceholder
         yield
     finally:
         torch.Event = cuda_event
+        torch.cuda.Event = cuda_cuda_event
         torch.cuda.Stream = cuda_stream
 
 

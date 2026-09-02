@@ -153,7 +153,7 @@ def _make_runner_chunked(make_runner, async_scheduling: bool, dg: list, seq_len:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.qaic_aot_mode
+@pytest.mark.qaic_aot_mode("QAIC eager mode does not support async scheduling")
 @pytest.mark.qaic_test_config(
     model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
     ctx_len=1024,
@@ -172,7 +172,7 @@ def test_output_consistency_database(
         _run_consistency_check(prompts, runner, runner_async, sampling_params)
 
 
-@pytest.mark.qaic_aot_mode
+@pytest.mark.qaic_aot_mode("QAIC eager mode does not support async scheduling")
 @pytest.mark.qaic_test_config(
     model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
     ctx_len=1024,

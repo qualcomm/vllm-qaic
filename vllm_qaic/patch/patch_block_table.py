@@ -14,7 +14,7 @@ This replaces it with a pure PyTorch/numpy equivalent.
 import numpy as np
 import torch
 import vllm.v1.worker.block_table
-from vllm.v1.worker.block_table import BlockTable, PAD_SLOT_ID
+from vllm.v1.worker.block_table import BlockTable, PAD_SLOT_ID, SlotMappingMode
 
 
 def _qaic_compute_slot_mapping(
@@ -23,6 +23,10 @@ def _qaic_compute_slot_mapping(
     query_start_loc: torch.Tensor,
     positions: torch.Tensor,
 ) -> None:
+    if self.slot_mapping_mode == SlotMappingMode.NONE:
+        return
+    assert self.slot_mapping_mode == SlotMappingMode.TOKEN_TO_KV_SLOT
+
     num_tokens = positions.shape[0]
     query_start_loc_np = query_start_loc.cpu().numpy()
     positions_np = positions.cpu().numpy()

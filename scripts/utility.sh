@@ -7,7 +7,7 @@
 # Source this file from other scripts: source "$(dirname "$0")/utility.sh"
 
 # === Common ===
-VLLM_VERSION="${VLLM_VERSION:-0.23.0}"
+VLLM_VERSION="${VLLM_VERSION:-0.28.0}"
 VLLM_QAIC_VERSION="${VLLM_QAIC_VERSION:-1.22}"
 
 # === AOT stack ===

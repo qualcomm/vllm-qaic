@@ -152,7 +152,7 @@ pip install -r requirements/vllm_dependency_aot.txt
 #   (empty target: no C++ compilation, no torch in wheel METADATA)
 VLLM_TARGET_DEVICE=empty pip install \
     --no-build-isolation --no-deps \
-    "vllm @ git+https://github.com/vllm-project/vllm.git@v0.15.0"
+    "vllm @ git+https://github.com/vllm-project/vllm.git@v0.28.0"
 
 # 3. vllm-qaic from source
 TORCH_QAIC_INSTALLED=0 pip install --no-build-isolation ./vllm-qaic
@@ -186,7 +186,7 @@ pip install -r requirements/vllm_dependency_pyt.txt
 #   (no C++ compilation, no torch in wheel METADATA — uv-safe)
 VLLM_TARGET_DEVICE=empty pip install \
     --no-build-isolation --no-deps \
-    "vllm @ git+https://github.com/vllm-project/vllm.git@v0.23.0"
+    "vllm @ git+https://github.com/vllm-project/vllm.git@v0.28.0"
 
 # 3. vllm-qaic from source
 pip install --no-build-isolation ./vllm-qaic
@@ -345,7 +345,7 @@ All version constants are defined in [`scripts/utility.sh`](../scripts/utility.s
 
 | Constant | Value | Description |
 |---|---|---|
-| `VLLM_VERSION` | `0.15.0` | vLLM release tag |
+| `VLLM_VERSION` | `0.28.0` | vLLM release tag |
 | `TORCH_VERSION_AOT` | `2.7.0+cpu` | CPU torch for AOT (matches QEfficient exact pin) |
 | `TORCH_VERSION_PYT` | `2.11.0+cpu` | CPU torch for PYT |
 | `TORCHVISION_VERSION_PYT` | `0.26.0+cpu` | torchvision for PYT (keep in sync with torch) |
