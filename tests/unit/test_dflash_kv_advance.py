@@ -187,3 +187,69 @@ def test_commit_true_after_commit_false_keeps_position_counter_in_sync(
     # Step 2: gate reopens, this request proposes normally.
     proposer.propose(input_batch, [[303]], batch_indices, target_hidden, commit=True)
     assert proposer._req_state["req_a"].position_counter == 8
+
+
+def test_candidates_from_prefill_frozen_on_closed_gate(block_size, decode_bsz):
+    """Regression for the prefill-desync case: a request fresh from prefill
+    (candidates_from_prefill=True) must not freeze on a commit=False step. Before
+    the fix it hit `continue` — no DLM forward, position_counter pinned — while
+    the TLM kept advancing it, so its cached drafts and KV went stale. The fix
+    discards the un-servable prefill drafts and advances the KV like any other
+    active request."""
+    proposer, session = _make_proposer(decode_bsz, block_size)
+    input_batch = _FakeInputBatch(
+        req_ids=["fresh_r"],
+        num_prompt_tokens=[10],
+        num_tokens_no_spec=[15],  # in decode phase
+    )
+    batch_indices = np.array([0], dtype=np.int64)
+    target_hidden = np.zeros((1, block_size, proposer.hidden_size), dtype=np.float32)
+
+    st = proposer._state_for("fresh_r")
+    st.position_counter = 20
+    st.candidates_from_prefill = True
+    st.dlm_candidates = np.arange(block_size, dtype=np.int64)
+
+    draft_token_ids = proposer.propose(
+        input_batch, [[101]], batch_indices, target_hidden, commit=False
+    )
+
+    assert session.run_count == 1, (
+        "commit=False on a candidates_from_prefill request must still issue the "
+        "DLM forward instead of freezing on the cached-candidates skip-path."
+    )
+    assert st.position_counter == 21, (
+        "position_counter did not advance on a closed-gate step — the DLM KV "
+        "would fall behind the TLM for a freshly-prefilled request."
+    )
+    assert st.candidates_from_prefill is False
+    assert st.dlm_candidates is None, "stale prefill drafts must be discarded"
+    assert draft_token_ids == [[]]
+
+
+def test_candidates_from_prefill_served_on_open_gate(block_size, decode_bsz):
+    """Happy path is unchanged: on a commit=True step a candidates_from_prefill
+    request serves its cached prefill drafts once (no DLM forward, position
+    frozen until the next real decode step) and clears the flag."""
+    proposer, session = _make_proposer(decode_bsz, block_size)
+    input_batch = _FakeInputBatch(
+        req_ids=["fresh_r"],
+        num_prompt_tokens=[10],
+        num_tokens_no_spec=[15],
+    )
+    batch_indices = np.array([0], dtype=np.int64)
+    target_hidden = np.zeros((1, block_size, proposer.hidden_size), dtype=np.float32)
+
+    st = proposer._state_for("fresh_r")
+    st.position_counter = 20
+    st.candidates_from_prefill = True
+    st.dlm_candidates = np.array([7, 1, 2, 3], dtype=np.int64)
+
+    draft_token_ids = proposer.propose(
+        input_batch, [[101]], batch_indices, target_hidden, commit=True
+    )
+
+    assert session.run_count == 0, "serving cached prefill drafts issues no forward"
+    assert draft_token_ids[0] == [1, 2, 3], "must offer dlm_candidates[1:]"
+    assert st.candidates_from_prefill is False
+    assert st.position_counter == 20, "the serve step does not advance the counter"
