@@ -174,7 +174,6 @@ class QaicDFlashProposer:
             pending.append(
                 {
                     "target_hidden": hidden_state_chunks[chunk_idx],
-                    "prefill_input_ids": None,
                     "prefill_positions": req_positions,
                     "prefill_cum_sum": np.array(
                         [req_n_tokens], dtype=prefill_cum_sum.dtype
@@ -199,7 +198,6 @@ class QaicDFlashProposer:
     def prefill_step(
         self,
         target_hidden: np.ndarray,
-        prefill_input_ids: np.ndarray,
         prefill_positions: np.ndarray,
         prefill_cum_sum: np.ndarray,
         batch_indices: np.ndarray,
