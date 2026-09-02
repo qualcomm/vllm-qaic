@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 # ------------------------------------------------------------------
 
+import contextlib
 import enum
 import importlib.util
 import json
@@ -551,6 +552,61 @@ def qaic_model(
             yield model
     finally:
         _device_pool.release(ids)
+
+
+@pytest.fixture
+def qaic_runner_factory(vllm_runner, device_pool_ids):
+    """Build a QAIC VllmRunner from an explicit config, acquiring/releasing its
+    device slice around a `with` block. Unlike `qaic_model` (one config off the
+    qaic_test_config marker), this lets a single test stand up several models in
+    sequence — e.g. a base model and a base+speculative model to compare — while
+    holding only one model's devices at a time."""
+
+    @contextlib.contextmanager
+    def _build(
+        model_name,
+        *,
+        speculative_config=None,
+        decode_bsz=4,
+        ctx_len=4096,
+        seq_len=128,
+        quantization=None,
+        kv_dtype="auto",
+        override_qaic_config=None,
+        draft_override_qaic_config=None,
+        num_device_groups=1,
+        device_group_size=1,
+    ):
+        ids = _device_pool.acquire(
+            device_pool_ids, num_device_groups * device_group_size
+        )
+        try:
+            additional_config = {
+                "device_group": ids,
+                "override_qaic_config": override_qaic_config or {},
+            }
+            if draft_override_qaic_config is not None:
+                additional_config["draft_override_qaic_config"] = (
+                    draft_override_qaic_config
+                )
+            runner = vllm_runner(
+                model_name,
+                max_num_seqs=decode_bsz,
+                max_model_len=ctx_len,
+                long_prefill_token_threshold=seq_len,
+                quantization=quantization,
+                kv_cache_dtype=kv_dtype,
+                enable_prefix_caching=False,
+                async_scheduling=False,
+                speculative_config=speculative_config,
+                additional_config=additional_config,
+            )
+            with runner as model:
+                yield model
+        finally:
+            _device_pool.release(ids)
+
+    return _build
 
 
 def _item_scope(item) -> str:

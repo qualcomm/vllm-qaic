@@ -107,3 +107,56 @@ class TestQaicDFlash:
             assert len(set(generations)) == 1, (
                 "Outputs from different slots for same prompt does not match!!"
             )
+
+
+# Not part of TestQaicDFlash: this stands up two models itself (base, then
+# base+DFlash) via qaic_runner_factory, so it does not use the class's single
+# dflash `qaic_model`. The marker only advertises the device count (4) so the
+# collection-time skip logic reserves enough devices.
+@pytest.mark.qaic_test_config(num_device_groups=1, device_group_size=4)
+def test_dflash_matches_base_greedy(qaic_runner_factory, sample_prompts):
+    """Lossless-equivalence check: greedy decoding from the base TLM alone must be
+    token-identical to greedy decoding from base + DFlash. DFlash only accepts a
+    draft when it equals the TLM's own argmax, so the sequences must match exactly.
+
+    Full precision (no mxfp6/mxint8 — compiler default 16-bit) keeps the TLM
+    numerically identical across both runs, so an exact match is the right bar.
+    The two models are built sequentially to hold only 4 devices at a time."""
+    prompts = list(sample_prompts)[:4]
+    max_tokens = 32
+    tlm = "Qwen/Qwen3-4B"
+    # Full-precision compile: no quantization knobs (mxfp6/mxint8 omitted).
+    tlm_override = {"num_cores": 8, "prefill_seq_len": _DFLASH_SEQ_LEN}
+
+    with qaic_runner_factory(
+        tlm,
+        speculative_config=None,
+        seq_len=_DFLASH_SEQ_LEN,
+        override_qaic_config=tlm_override,
+        device_group_size=4,
+    ) as base_model:
+        base = base_model.generate_greedy(prompts, max_tokens)
+
+    with qaic_runner_factory(
+        tlm,
+        speculative_config={
+            "method": "dflash",
+            "model": "z-lab/Qwen3-4B-DFlash-b16",
+            "num_speculative_tokens": _DFLASH_BLOCK_SIZE,
+        },
+        seq_len=_DFLASH_SEQ_LEN,
+        override_qaic_config=tlm_override,
+        draft_override_qaic_config={
+            "num_cores": 8,
+            "prefill_seq_len": _DFLASH_BLOCK_SIZE,
+        },
+        device_group_size=4,
+    ) as dflash_model:
+        spec = dflash_model.generate_greedy(prompts, max_tokens)
+
+    for i, ((base_ids, _), (spec_ids, _)) in enumerate(zip(base, spec, strict=True)):
+        assert spec_ids == base_ids, (
+            f"DFlash greedy output diverged from base greedy for prompt {i}:\n"
+            f"  base  : {base_ids}\n"
+            f"  dflash: {spec_ids}"
+        )
