@@ -256,6 +256,7 @@ All `ARG`s are global (declared before the first `FROM`) and re-declared inside 
 | `UV_VERSION` | `0.11.29` | Pinned `uv` binary version, pulled via `COPY --from` |
 | `PYTHON_VERSION` | `3.12` | Python version (`3.10`/`3.11`/`3.12`), provisioned via `uv python install` |
 | `RUST_VERSION` | `1.90` | Pinned Rust toolchain image tag (`rust:<ver>-slim`); only used when `VLLM_BUILD_RUST=1` |
+| `RUST_IMAGE` | `docker.io/library/rust:${RUST_VERSION}-slim` | Full image ref for the Rust toolchain. Override to pull from a mirror or internal registry; supplies its own tag, so it takes precedence over `RUST_VERSION` |
 | `VLLM_VERSION` | `0.23.0` | vLLM release tag to install |
 | `VLLM_PR` | *(empty)* | Any target: vLLM PR number to fetch (takes priority over `VLLM_BRANCH` and `VLLM_VERSION`) |
 | `VLLM_BRANCH` | *(empty)* | Any target: vLLM branch to clone instead of the pinned `VLLM_VERSION` tag |
@@ -282,6 +283,7 @@ All `ARG`s are global (declared before the first `FROM`) and re-declared inside 
 | `UV_VERSION` | `0.11.29` | Pinned `uv` binary version, pulled via `COPY --from` |
 | `PYTHON_VERSION` | `3.12` | Python version (`3.10`/`3.11`/`3.12`), provisioned via `uv python install` |
 | `RUST_VERSION` | `1.90` | Pinned Rust toolchain image tag (`rust:<ver>-slim`); only used when `VLLM_BUILD_RUST=1` |
+| `RUST_IMAGE` | `docker.io/library/rust:${RUST_VERSION}-slim` | Full image ref for the Rust toolchain. Override to pull from a mirror or internal registry; supplies its own tag, so it takes precedence over `RUST_VERSION` |
 | `VLLM_VERSION` | `0.23.0` | vLLM release tag to install |
 | `VLLM_PR` | *(empty)* | Any target: vLLM PR number to fetch (takes priority over `VLLM_BRANCH` and `VLLM_VERSION`) |
 | `VLLM_BRANCH` | *(empty)* | Any target: vLLM branch to clone instead of the pinned `VLLM_VERSION` tag |
@@ -374,6 +376,17 @@ Output locations:
 |---|---|
 | AOT | `dist/aot/vllm_qaic-*aot*-py3-none-any.whl` |
 | PYT | `dist/pyt/py312/vllm_qaic-*pyt*-cp312-cp312-linux_x86_64.whl` |
+
+#### Pulling the Rust toolchain from a mirror
+
+The base stage copies `cargo`/`rustup` out of a pinned `rust:<RUST_VERSION>-slim` image on Docker Hub. `--rust-image` replaces that ref, so the toolchain can come from a mirror or internal registry instead:
+
+```bash
+./scripts/build_wheels.sh both --outdir ./dist \
+    --rust-image my.registry.internal:5000/mirror/rust:1.90-slim
+```
+
+The script forwards it as the `RUST_IMAGE` build-arg (same passthrough shape as `--base-image` → `BASE_IMAGE`), and it applies to both Dockerfiles. Because the override carries its own tag, `RUST_VERSION` is ignored when it is set. The image only needs `/usr/local/cargo` and `/usr/local/rustup` at the paths the official `rust` images use — the exact toolchain version doesn't have to match `RUST_VERSION`, since `rustup` fetches whatever vllm's `rust-toolchain.toml` pins when `cargo build` runs.
 
 #### Overriding the wheel filename
 

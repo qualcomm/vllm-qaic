@@ -73,6 +73,12 @@
 #   docker build --target release -f docker/Dockerfile.pyt \
 #     --build-arg VLLM_BUILD_RUST=1 -t vllm-qaic-pyt:1.22-rust .
 #
+#   # Rust toolchain from a mirror / internal registry instead of Docker Hub:
+#   docker build --target release -f docker/Dockerfile.pyt \
+#     --build-arg VLLM_BUILD_RUST=1 \
+#     --build-arg RUST_IMAGE=my.registry.internal:5000/mirror/rust:1.90-slim \
+#     -t vllm-qaic-pyt:1.22-rust .
+#
 # The BASE_IMAGE must have the QAIC Platform and Apps SDKs installed
 # (i.e. /opt/qti-aic/ present with torch_qaic wheels).
 #
@@ -95,6 +101,11 @@ ARG VENV="/opt/venv-pyt"
 ARG UV_VERSION="0.11.29"
 ARG PYTHON_VERSION="3.12"
 ARG RUST_VERSION="1.90"
+
+# Full image ref for the Rust toolchain. Defaults to the RUST_VERSION pin on
+# Docker Hub; override to pull from a mirror or internal registry, in which case
+# RUST_VERSION is ignored (the override supplies its own tag).
+ARG RUST_IMAGE="docker.io/library/rust:${RUST_VERSION}-slim"
 
 # ---------------------------------------------------------------------------
 # Shared stack version pins — defaults mirror scripts/utility.sh.
@@ -152,10 +163,11 @@ FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
 # ---------------------------------------------------------------------------
 # Pinned Rust toolchain, COPY'd into the infra layer below. Version doesn't
 # need to match exactly — rustup auto-fetches whatever toolchain vllm's own
-# rust-toolchain.toml pins when `cargo build` runs.
+# rust-toolchain.toml pins when `cargo build` runs. RUST_IMAGE selects the ref
+# (see the ARG above) so a mirror can be used instead of Docker Hub.
 # ---------------------------------------------------------------------------
 # hadolint ignore=DL3006
-FROM docker.io/library/rust:${RUST_VERSION}-slim AS rust-toolchain
+FROM ${RUST_IMAGE} AS rust-toolchain
 
 # ===========================================================================
 # pyt-base — shared foundation for all three targets.

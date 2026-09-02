@@ -17,6 +17,7 @@
 #   ./scripts/build_wheels.sh [aot|pyt|both] [--pyver 3.10|3.11|3.12]
 #                              [--outdir <dir>] [--device-arch v68|v81]
 #                              [--base-image <image:tag>]
+#                              [--rust-image <image:tag>]
 #                              [--wheel-name <name.whl>] [--dry-run]
 
 set -euo pipefail
@@ -29,6 +30,7 @@ usage() {
 Usage: build_wheels.sh [aot|pyt|both] [--pyver 3.10|3.11|3.12]
                         [--outdir <dir>] [--device-arch v68|v81]
                         [--base-image <image:tag>]
+                        [--rust-image <image:tag>]
                         [--wheel-name <name.whl>] [--dry-run]
 
 aot|pyt|both   Wheel(s) to build (default: both).
@@ -42,6 +44,13 @@ aot|pyt|both   Wheel(s) to build (default: both).
 --base-image   Override the QAIC SDK base image (passed through as the
                BASE_IMAGE build-arg; default: each Dockerfile's own ARG
                default).
+--rust-image   Override the Rust toolchain image the base stage copies
+               cargo/rustup from (passed through as the RUST_IMAGE
+               build-arg). Use it to pull from a mirror or internal
+               registry instead of Docker Hub. Supplies its own tag, so
+               it takes precedence over the Dockerfile's RUST_VERSION.
+               Default: each Dockerfile's own ARG default,
+               docker.io/library/rust:<RUST_VERSION>-slim.
 --wheel-name   Override the generated wheel's filename (passed through as the
                WHEEL_NAME build-arg; the Dockerfile's wheel stage renames the
                wheel before exporting it). Bare filename ending in .whl — the
@@ -63,6 +72,7 @@ PYTHON_VERSION="${DEFAULT_PYTHON_VERSION}"
 OUT_DIR="${REPO_ROOT}/dist"
 DEVICE_ARCH="${DEFAULT_DEVICE_ARCH}"
 BASE_IMAGE=""
+RUST_IMAGE=""
 WHEEL_NAME=""
 DRY_RUN="OFF"
 
@@ -77,6 +87,7 @@ while [[ $# -gt 0 ]]; do
         --outdir) OUT_DIR="$2"; shift 2 ;;
         --device-arch) DEVICE_ARCH="$2"; shift 2 ;;
         --base-image) BASE_IMAGE="$2"; shift 2 ;;
+        --rust-image) RUST_IMAGE="$2"; shift 2 ;;
         --wheel-name) WHEEL_NAME="$2"; shift 2 ;;
         --dry-run) DRY_RUN="ON"; shift ;;
         -h|--help) usage; exit 1 ;;
@@ -160,6 +171,7 @@ echo "PYTHON_VERSION : ${PYTHON_VERSION}"
 echo "MODE           : ${BUILD_TARGET}"
 echo "DEVICE_ARCH    : ${DEVICE_ARCH} (pyt only)"
 echo "BASE_IMAGE     : ${BASE_IMAGE:-<Dockerfile default>}"
+echo "RUST_IMAGE     : ${RUST_IMAGE:-<Dockerfile default>}"
 echo "WHEEL_NAME     : ${WHEEL_NAME:-<uv build default>}"
 echo "OUT_DIR        : ${OUT_DIR}"
 echo "================================================================"
@@ -167,6 +179,13 @@ echo "================================================================"
 BASE_IMAGE_ARGS=()
 if [ -n "${BASE_IMAGE}" ]; then
     BASE_IMAGE_ARGS=(--build-arg "BASE_IMAGE=${BASE_IMAGE}")
+fi
+
+# Left empty unless overridden, so the Dockerfile's own RUST_IMAGE default
+# (derived from its RUST_VERSION pin) stays in effect.
+RUST_IMAGE_ARGS=()
+if [ -n "${RUST_IMAGE}" ]; then
+    RUST_IMAGE_ARGS=(--build-arg "RUST_IMAGE=${RUST_IMAGE}")
 fi
 
 # Left empty unless overridden, so the wheel stage keeps uv build's own name.
@@ -181,6 +200,7 @@ build_aot_wheel() {
     run_echo docker buildx build --target wheel -f "${DOCKER_DIR}/Dockerfile.aot" \
         --build-arg PYTHON_VERSION="${PYTHON_VERSION}" \
         "${BASE_IMAGE_ARGS[@]}" \
+        "${RUST_IMAGE_ARGS[@]}" \
         "${WHEEL_NAME_ARGS[@]}" \
         --output "type=local,dest=${OUT_DIR}/aot" \
         "${REPO_ROOT}"
@@ -193,6 +213,7 @@ build_pyt_wheel() {
         --build-arg PYTHON_VERSION="${PYTHON_VERSION}" \
         --build-arg QAIC_DEVICE_ARCH="${DEVICE_ARCH}" \
         "${BASE_IMAGE_ARGS[@]}" \
+        "${RUST_IMAGE_ARGS[@]}" \
         "${WHEEL_NAME_ARGS[@]}" \
         --output "type=local,dest=${OUT_DIR}/pyt/${PYVER_TAG}" \
         "${REPO_ROOT}"
