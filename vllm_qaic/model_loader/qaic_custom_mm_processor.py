@@ -103,6 +103,7 @@ Gemma4ForConditionalGeneration.get_placeholder_str = classmethod(
     )
 )
 
+
 class QaicGemma3MultiModalProcessor(Gemma3MultiModalProcessor):
     def _call_hf_processor(
         self,
@@ -132,7 +133,9 @@ class QaicGemma3MultiModalProcessor(Gemma3MultiModalProcessor):
 
         if (images := mm_data.get("images")) is not None:
             mm_items = self.info.parse_mm_data({"image": images}, validate=False)
-            parsed_images = mm_items.get_items("image", (ImageEmbeddingItems, ImageProcessorItems))
+            parsed_images = mm_items.get_items(
+                "image", (ImageEmbeddingItems, ImageProcessorItems)
+            )
             num_patches = [1] * len(parsed_images)
             processed_outputs["num_patches"] = torch.tensor(num_patches)
 
