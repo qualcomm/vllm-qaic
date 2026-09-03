@@ -21,7 +21,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from torch import nn
-
+from vllm.utils.func_utils import supports_kw
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
@@ -951,18 +951,21 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 )
             return kv_tensor[start_block : start_block + qpc_num_blocks].numpy()
 
-        self.kv_caches = [[] for _ in range(self.scheduler_config.max_num_seqs)]
+        self.kv_caches = [[] for _ in range(num_blocks)]
         self._paged_kv_cache_buffers = []
         for name, _ in decode_buff_map:
             layer_idx, kv_idx = binding_info[name]
             self._paged_kv_cache_buffers.append(
                 paged_view(layer_tensors[layer_idx][kv_idx], qpc_shapes[name])
             )
-        for qpc_slot in range(self.scheduler_config.max_num_seqs):
-            self.kv_caches[qpc_slot] = self._paged_kv_cache_buffers
+        
+        for physical_block in range(num_blocks):
+            self.kv_caches[physical_block] = self._paged_kv_cache_buffers
 
         self.prefill_bank = (
-            QaicPrefillBank(num_blocks) if self._uses_prefill_bank() else None
+            QaicPrefillBank(2* num_blocks +1) 
+            if self._uses_prefill_bank() 
+            else None
         )
         return kv_cache_layers
 
@@ -2133,8 +2136,10 @@ class QaicModelRunnerAoT(GPUModelRunner):
             attn_metadata=None,
             **kwargs,
         )
-        if wait_for_save:
-            kv_connector.wait_for_save(**kwargs)
+        if kwargs and supports_kw(kv_connector.wait_for_save, "kv_cache_info"):
+           kv_connector.wait_for_save(**kwargs)
+        else:
+           kv_connector.wait_for_save()
         output.finished_sending, output.finished_recving = kv_connector.get_finished(
             finished_req_ids
         )
