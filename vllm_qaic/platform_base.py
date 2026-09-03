@@ -301,16 +301,25 @@ class QaicPlatform(Platform):
                 cache_config.block_size = 16
             else:
                 if cache_config.enable_prefix_caching:
-                    cache_config.enable_prefix_caching = False
                     cache_config.mamba_block_size = (
                         model_config.max_model_len
                     )  # reset to "no-op" default
                     cache_config.mamba_cache_mode = "none"  # reset to disabled
-                    logger.warning_once(
-                        "Prefix caching is not yet supported on v1 Engine. "
-                        "Will automatically disable it."
-                    )
-                cache_config.block_size = model_config.max_model_len  # ctx_len
+                    cache_config.block_size = cls._pa_block_size(vllm_config)
+                elif (
+                    model_config.is_multimodal_model and model_config.is_encoder_decoder
+                ):
+                    cache_config.block_size = 100000
+                else:
+                    cache_config.block_size = model_config.max_model_len  # ctx_len
+
+        # disable async scheduling since Qaic does not yet support it
+        if scheduler_config.async_scheduling:
+            logger.warning(
+                "QAIC currently does not support async scheduling; "
+                "Falling back to non-async scheduling."
+            )
+            scheduler_config.async_scheduling = False
 
         if cls.is_aot:
             if model_config.hf_config.model_type == "whisper":
@@ -422,13 +431,6 @@ class QaicPlatform(Platform):
                 "serving, other SPD types such as Turbo is not yet supported "
                 "with Disaggregated serving for QAIC backend"
             )
-            assert not (
-                vllm_config.kv_transfer_config.kv_role != "kv_producer"
-                and vllm_config.cache_config.enable_prefix_caching
-            ), (
-                "Prefix caching with KV-role 'kv_consumer' or 'kv_both' not "
-                "yet supported for QAIC backend"
-            )
             if (
                 on_device_sampling_en
                 and vllm_config.kv_transfer_config.kv_role == "kv_producer"
@@ -463,6 +465,13 @@ class QaicPlatform(Platform):
                 cls._configure_multimodal_model(
                     vllm_config, model_config, scheduler_config, model_type
                 )
+
+    @classmethod
+    def _pa_block_size(cls, vllm_config) -> int:
+        override = vllm_config.additional_config.get("override_qaic_config", {})
+        if vllm_config.kv_transfer_config:
+            return override.get("kv_block_size")
+        return override.get("prefill_seq_len")
 
     @classmethod
     def is_pin_memory_available(cls) -> bool:
@@ -539,6 +548,11 @@ class QaicPlatform(Platform):
                 scheduler_config.max_num_seqs
                 * scheduler_config.long_prefill_token_threshold
             )
+            if (
+                vllm_config.cache_config
+                and vllm_config.cache_config.enable_prefix_caching
+            ):
+                vllm_config.cache_config.block_size = cls._pa_block_size(vllm_config)
             if "override_qaic_config" not in vllm_config.additional_config:
                 additional_config["override_qaic_config"] = {}
             additional_config["override_qaic_config"].update(

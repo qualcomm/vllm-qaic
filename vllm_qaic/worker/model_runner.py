@@ -815,6 +815,32 @@ class QaicModelRunnerAoT(GPUModelRunner):
             self.input_batch.block_table[0].get_numpy_array()[:num_reqs, 0] - 1
         )
 
+        if self.model.paged_attention:
+            # Compute block_table and slot_mapping from vLLM's block management
+            # block_table: (num_reqs, max_num_blocks_per_req)
+            self.block_table = (
+                self.input_batch.block_table[0].get_numpy_array()[:num_reqs].copy() - 1
+            )
+            block_size = self.cache_config.block_size
+            # Compute slot_mapping via compute_slot_mapping
+            # vLLM v0.23's expects (num_reqs, query_start_loc, positions) signature.
+            query_start_loc_np = np.concatenate(([0], cu_num_tokens[:num_reqs])).astype(
+                np.int32
+            )
+            self.input_batch.block_table.compute_slot_mapping(
+                num_reqs,
+                torch.from_numpy(query_start_loc_np),
+                torch.from_numpy(positions_np),
+            )
+            self.slot_mapping = (
+                self.input_batch.block_table[0]
+                .slot_mapping.np[:total_num_scheduled_tokens]
+                .copy()
+            )
+            # Compute per-request slot_id:
+            num_computed = self.input_batch.num_computed_tokens_cpu[:num_reqs]
+            self.slot_id = (num_computed % block_size).astype(np.int64)
+
         torch.add(
             self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs],
             torch.from_numpy(num_scheduled_tokens),
@@ -1153,6 +1179,11 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 if not self.is_kv_consumer
                 else self.batch_indices[:num_scheduled_tokens]
             )
+            if self.model.paged_attention:
+                decode_block_table: np.ndarray = self.block_table[: self.num_decodes]
+                decode_slot_ids: np.ndarray = self.slot_id[: self.num_decodes]
+            else:
+                decode_block_table, decode_slot_ids = None, None
 
             if self.max_decode_tokens > 1:
                 # mark padded positions as -1 so QAIC hardware ignores them
@@ -1189,6 +1220,15 @@ class QaicModelRunnerAoT(GPUModelRunner):
             discard_request_mask_np = self.discard_request_mask.np[
                 : self.input_batch.num_reqs
             ].copy()
+            if self.model.paged_attention:
+                prefill_block_table: np.ndarray = self.block_table[
+                    self.num_decodes : self.input_batch.num_reqs
+                ]
+                prefill_slot_ids: np.ndarray = self.slot_id[
+                    self.num_decodes : self.input_batch.num_reqs
+                ]
+            else:
+                prefill_block_table, prefill_slot_ids = None, None
 
             # mm_kwargs_list is only needed for prefill requests; skip preprocessing
             # entirely when there are no prefills or the model has no mm inputs.
@@ -1251,6 +1291,8 @@ class QaicModelRunnerAoT(GPUModelRunner):
                     logits=hidden_states_prefill,
                     kv_caches=self.kv_caches,
                     callback=callback,
+                    block_table=prefill_block_table,
+                    slot_id=prefill_slot_ids,
                     lora_ids=prefill_lora_ids,
                     num_prompt_tokens_prefill=num_prompt_tokens_prefill,
                 )
@@ -1266,6 +1308,8 @@ class QaicModelRunnerAoT(GPUModelRunner):
                     is_prompt=False,
                     logits=hidden_states_decode,
                     callback=callback,
+                    block_table=decode_block_table,
+                    slot_id=decode_slot_ids,
                     lora_ids=decode_lora_ids,
                 )
 
@@ -1573,6 +1617,17 @@ class QaicModelRunnerAoT(GPUModelRunner):
             time_after_load - time_before_load,
         )
 
+    def _make_pa_warmup_arrays(
+        self, bsz: int
+    ) -> tuple[np.ndarray | None, np.ndarray | None]:
+        if not self.model.paged_attention:
+            return None, None
+        block_table = np.arange(
+            bsz * self.model.num_gpu_blocks_per_batch, dtype=np.int64
+        ).reshape(bsz, self.model.num_gpu_blocks_per_batch)
+        slot_ids = np.zeros(bsz, dtype=np.int64)
+        return block_table, slot_ids
+
     def _qaic_dummy_run(self) -> None:
         if self.is_pooling_model:
             # TODO: check if pooler dummy run can be added
@@ -1594,6 +1649,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
         else:
             decode_positions = np.array([0] * decode_num_tokens, dtype=np.int64)
         decode_block_ids = np.arange(decode_bsz, dtype=np.int64)
+        decode_block_table, decode_slot_ids = self._make_pa_warmup_arrays(decode_bsz)
         decode_lora_ids = None
         if self.lora_config:
             decode_lora_ids = np.arange(decode_bsz, dtype=np.int64)
@@ -1613,6 +1669,8 @@ class QaicModelRunnerAoT(GPUModelRunner):
             is_prompt=False,
             logits=decode_logits,
             mm_kwargs_list=decode_mm_kwargs_list,
+            block_table=decode_block_table,
+            slot_id=decode_slot_ids,
         )
 
         # Prefill
@@ -1631,6 +1689,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
         prefill_cum_sum = np.array(
             [prefill_seq_len] * prefill_bsz, dtype=np.int64
         ).cumsum()
+        prefill_block_table, prefill_slot_ids = self._make_pa_warmup_arrays(prefill_bsz)
         prefill_lora_ids = None
         if self.lora_config:
             prefill_lora_ids = np.arange(prefill_bsz, dtype=np.int64)
@@ -1648,6 +1707,8 @@ class QaicModelRunnerAoT(GPUModelRunner):
             prefill_cum_sum=prefill_cum_sum,
             mm_kwargs_list=mm_kwargs_list,
             logits=prefill_logits,
+            block_table=prefill_block_table,
+            slot_id=prefill_slot_ids,
         )
 
         if self.use_async_scheduling:
