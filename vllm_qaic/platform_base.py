@@ -82,6 +82,10 @@ class QaicPlatform(Platform):
     @classmethod
     def get_supported_quantization(cls):
         return cls.supported_quantization
+    
+    @classmethod
+    def discover_numa_topology(cls):
+        return []
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
@@ -105,9 +109,11 @@ class QaicPlatform(Platform):
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
-        # Not Implemented for aot
+        # AOT does not expose device memory. 
+        # Return vLLM's conservative fallback instead of None,
+        # which is not comparable to the batch-size threshold.
         if isinstance(qaic, PlaceholderModule):
-            raise NotImplementedError
+            return 0
         # for eager mode single SoC
         return qaic.get_device_info(device_id).total_ddr_size_kb * 1024
 
@@ -148,7 +154,7 @@ class QaicPlatform(Platform):
     def set_device(cls, device: torch.device):
         # Not Implemented for aot
         if isinstance(qaic, PlaceholderModule):
-            raise NotImplementedError
+            return
         # for eager mode
         qaic.set_device(device)
 
