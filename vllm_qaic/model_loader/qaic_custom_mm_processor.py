@@ -8,7 +8,7 @@
 
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, Protocol, cast
 
 import torch
 from packaging.version import Version as _Version
@@ -572,6 +572,14 @@ class QaicQwen2_5_VLProcessingInfo(
         )
 
 
+class _MMFieldsConfigProvider(Protocol):
+    def _get_mm_fields_config(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]: ...
+
+
 class _QaicQwenVLMergedEmbedsFieldsMixin:
     """Convert `image_grid_thw` from 3-D to 2-D for Qwen-VL models.
 
@@ -603,7 +611,9 @@ class _QaicQwenVLMergedEmbedsFieldsMixin:
                 squeezed[key] = grid.squeeze(0)
         if squeezed is not None:
             hf_inputs = BatchFeature(squeezed)
-        return super()._get_mm_fields_config(hf_inputs, hf_processor_mm_kwargs)
+        return cast(_MMFieldsConfigProvider, super())._get_mm_fields_config(
+            hf_inputs, hf_processor_mm_kwargs
+        )
 
 
 class QaicQwen2_5_VLMultiModalProcessor(
