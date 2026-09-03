@@ -938,20 +938,16 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
 
         if self.paged_attention:
             if block_table is not None and slot_id is not None:
-                self.decode_batch_inputs["block_table"][:num_decodes] = block_table[
-                    :num_decodes
-                ]
-                self.decode_batch_inputs["slot_id"][:num_decodes] = slot_id[
-                    :num_decodes
-                ]
+                batch_inputs["block_table"][:num_decodes] = block_table[:num_decodes]
+                batch_inputs["slot_id"][:num_decodes] = slot_id[:num_decodes]
                 if num_decodes < self.decode_bsz:
-                    self.decode_batch_inputs["block_table"][num_decodes:] = -1
-                    self.decode_batch_inputs["slot_id"][num_decodes:] = 0
+                    batch_inputs["block_table"][num_decodes:] = -1
+                    batch_inputs["slot_id"][num_decodes:] = 0
             else:
-                self.decode_batch_inputs["block_table"][:num_decodes] = batch_indices
+                batch_inputs["block_table"][:num_decodes] = batch_indices
                 if num_decodes < self.decode_bsz:
-                    self.decode_batch_inputs["block_table"][num_decodes:] = -1
-                    self.decode_batch_inputs["slot_id"][num_decodes:] = 0
+                    batch_inputs["block_table"][num_decodes:] = -1
+                    batch_inputs["slot_id"][num_decodes:] = 0
 
         # For spec-decode target: include num_logits_to_keep in batch_inputs
         # so the hardware knows how many token positions to compute logits for.
