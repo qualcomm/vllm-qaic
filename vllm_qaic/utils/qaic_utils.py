@@ -9,8 +9,6 @@ from typing import TYPE_CHECKING, Any
 
 import regex as re
 import torch
-from QEfficient import QEFFAutoModelForCausalLM, QEFFAutoModelForImageTextToText
-from transformers import AutoConfig
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheSpec,
@@ -27,12 +25,8 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-def _get_attention_type(qeff_config: Any, layer_idx: int) -> str | None:
-    if hasattr(qeff_config, "text_config"):
-        cfg = qeff_config.text_config
-    else:
-        cfg = qeff_config
-
+def _get_attention_type(hf_config: Any, layer_idx: int) -> str | None:
+    cfg = hf_config.text_config if hasattr(hf_config, "text_config") else hf_config
     layer_types = getattr(cfg, "layer_types", None)
     if layer_types is None:
         return None
@@ -43,23 +37,19 @@ def _get_attention_type(qeff_config: Any, layer_idx: int) -> str | None:
     return layer_types[layer_idx]
 
 
-def _is_swa_layer(qeff_config: Any, layer_idx: int) -> int | None:
-    layer_type = _get_attention_type(qeff_config, layer_idx)
+def _is_swa_layer(hf_config: Any, layer_idx: int) -> int | None:
+    layer_type = _get_attention_type(hf_config, layer_idx)
 
     if layer_type == "sliding_attention":
-        cfg = (
-            qeff_config.text_config
-            if hasattr(qeff_config, "text_config")
-            else qeff_config
-        )
+        cfg = hf_config.text_config if hasattr(hf_config, "text_config") else hf_config
         sliding_window = cfg.sliding_window
         return int(sliding_window)
 
     return None
 
 
-def _is_mamba_type(qeff_config: Any, layer_idx: int) -> bool:
-    layer_type = _get_attention_type(qeff_config, layer_idx)
+def _is_mamba_type(hf_config: Any, layer_idx: int) -> bool:
+    layer_type = _get_attention_type(hf_config, layer_idx)
 
     return layer_type == "linear_attention"
 
@@ -97,21 +87,7 @@ def _get_kv_cache_spec(
     parallel_config = vllm_config.parallel_config
     cache_config = vllm_config.cache_config
 
-    model_name = model_config.model
-    is_multimodal = model_config.is_multimodal_model
-    config = AutoConfig.from_pretrained(
-        model_name,
-        trust_remote_code=model_config.trust_remote_code,
-        revision=model_config.revision,
-    )
-    if is_multimodal:
-        qeff_config = QEFFAutoModelForImageTextToText.from_pretrained(
-            model_name, config=config
-        ).model.config
-    else:
-        qeff_config = QEFFAutoModelForCausalLM.from_pretrained(
-            model_name, config=config
-        ).model.config
+    hf_config = vllm_config.model_config.hf_config
 
     block_size = cache_config.block_size
     num_kv_heads = model_config.get_num_kv_heads(parallel_config)
@@ -124,7 +100,7 @@ def _get_kv_cache_spec(
 
     for local_idx, layer_idx in enumerate(range(start_layer, end_layer)):
         layer_name = f"layer_{local_idx}"
-        sliding_window = _is_swa_layer(qeff_config, layer_idx)
+        sliding_window = _is_swa_layer(hf_config, layer_idx)
         if sliding_window is not None:
             kv_cache_spec[layer_name] = SlidingWindowSpec(
                 block_size=block_size,
