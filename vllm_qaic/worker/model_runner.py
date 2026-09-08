@@ -252,7 +252,7 @@ class QaicAsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
             sampler_output = mr._make_sampler_output(
                 torch.zeros((len(self._input_batch_req_ids), 1), dtype=torch.int64)
             )
-            # 3. Discard samped tokens for partial prefills
+            # 3. Discard sampled tokens for partial prefills
             kv_connector_output = self._kv_connector_output
             discard_sampled_tokens_req_indices = np.nonzero(
                 state.discard_request_mask_np
@@ -679,22 +679,22 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 prev_draft_token_indices.extend(range(start, start + draft_len))
                 indices_match &= prev_index == flattened_index
                 max_flattened_index = max(max_flattened_index, flattened_index)
-        num_commmon_tokens = len(sample_flattened_indices)
-        if num_commmon_tokens == 0:
+        num_common_tokens = len(sample_flattened_indices)
+        if num_common_tokens == 0:
             # No requests in common with the previous iteration
             # So input_ids.cpu will have all the input ids.
             return
-        if indices_match and max_flattened_index == (num_commmon_tokens - 1):
+        if indices_match and max_flattened_index == (num_common_tokens - 1):
             # Common-case optimization: the batch is unchanged
             # and no reordering happened.
             # The indices are both the same permutation of 0..N-1 so
             # we can copy directly using a single slice.
-            self.input_ids.cpu[:num_commmon_tokens].copy_(
-                prev_sampled_token_ids[:num_commmon_tokens, 0],
+            self.input_ids.cpu[:num_common_tokens].copy_(
+                prev_sampled_token_ids[:num_common_tokens, 0],
                 non_blocking=True,
             )
             if self.enable_prompt_embeds:
-                self.is_token_ids.cpu[:num_commmon_tokens] = True
+                self.is_token_ids.cpu[:num_common_tokens] = True
             return
         # Upload the index tensors asynchronously so the scatter can be non-blocking.
         sampled_tokens_index_tensor = torch.tensor(
@@ -958,14 +958,12 @@ class QaicModelRunnerAoT(GPUModelRunner):
             self._paged_kv_cache_buffers.append(
                 paged_view(layer_tensors[layer_idx][kv_idx], qpc_shapes[name])
             )
-        
+
         for physical_block in range(num_blocks):
             self.kv_caches[physical_block] = self._paged_kv_cache_buffers
 
         self.prefill_bank = (
-            QaicPrefillBank(2* num_blocks +1) 
-            if self._uses_prefill_bank() 
-            else None
+            QaicPrefillBank(2 * num_blocks + 1) if self._uses_prefill_bank() else None
         )
         return kv_cache_layers
 
@@ -1447,6 +1445,17 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 if not self.is_kv_consumer
                 else self.batch_indices[:num_scheduled_tokens]
             )
+            decode_rows = (
+                self.num_decodes
+                if not self.is_kv_consumer
+                else decode_input_ids.shape[0] // (self.active_k + 1)
+            )
+
+            if self.model.paged_attention:
+                decode_block_table: np.ndarray = self.block_table[:decode_rows]
+                decode_slot_ids: np.ndarray = self.slot_id[:decode_rows]
+            else:
+                decode_block_table, decode_slot_ids = None, None
 
             if self.max_decode_tokens > 1:
                 # mark padded positions as -1 so QAIC hardware ignores them
@@ -1526,6 +1535,9 @@ class QaicModelRunnerAoT(GPUModelRunner):
 
             if prefill_input_ids.size > 0:
                 prefill_req_ids = self.input_batch.req_ids[self.num_decodes : num_reqs]
+                qaic_prefill_slot_ids = np.arange(
+                    len(prefill_req_ids), dtype=prefill_block_ids.dtype
+                )
                 hidden_states_prefill = (
                     self.create_logits_np(len(prefill_cum_sum), self.model.vocab_size)
                     if not self.is_kv_consumer
@@ -1542,7 +1554,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 pending_prefill_exec_queue = self.model(
                     input_ids=prefill_input_ids,
                     positions=prefill_positions,
-                    batch_indices=prefill_block_ids,
+                    batch_indices=qaic_prefill_slot_ids,
                     is_prompt=True,
                     prefill_cum_sum=prefill_cum_sum,
                     mm_kwargs_list=mm_kwargs_list,
@@ -1850,6 +1862,15 @@ class QaicModelRunnerAoT(GPUModelRunner):
                     self.vllm_config,
                     self.device,
                 )
+        if self.model.paged_attention:
+            decode_block_table = np.arange(
+                self.model.decode_bsz * self.model.num_gpu_blocks_per_batch,
+                dtype=np.int64,
+            ).reshape(self.model.decode_bsz, self.model.num_gpu_blocks_per_batch)
+            decode_slot_ids = np.zeros(self.model.decode_bsz, dtype=np.int64)
+        else:
+            decode_block_table = None
+            decode_slot_ids = None
         self.kv_cache_info = (
             self.model.kv_cache_info if self.model.disagg_serving_en else None
         )
@@ -2137,9 +2158,9 @@ class QaicModelRunnerAoT(GPUModelRunner):
             **kwargs,
         )
         if kwargs and supports_kw(kv_connector.wait_for_save, "kv_cache_info"):
-           kv_connector.wait_for_save(**kwargs)
+            kv_connector.wait_for_save(**kwargs)
         else:
-           kv_connector.wait_for_save()
+            kv_connector.wait_for_save()
         output.finished_sending, output.finished_recving = kv_connector.get_finished(
             finished_req_ids
         )

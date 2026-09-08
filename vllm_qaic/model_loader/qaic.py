@@ -1071,7 +1071,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         """assert prefill and decode work by running dummy inputs
 
         also creates attention_mask and decode input buffers
-        that will be used throughout the lifeycle of worker
+        that will be used throughout the lifecycle of worker
         """
 
         # Prepare dummy run inputs
@@ -1190,6 +1190,15 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
 
             self.decode_single_inputs = decode_single_inputs
             self.decode_batch_inputs = decode_batch_inputs
+            if "block_table" in self.session.input_names:
+                self.decode_batch_inputs["block_table"] = np.full(
+                    (self.decode_bsz, self.num_gpu_blocks_per_batch),
+                    -1,
+                    dtype=np.int64,
+                )
+                self.decode_batch_inputs["slot_id"] = np.full(
+                    (self.decode_bsz,), 0, dtype=np.int64
+                )
             # Re-inject any mm kwargs (e.g. image_idx) that _load_multimodal()
             # added to decode_batch_inputs before this dict was replaced.
             if getattr(self, "default_mm_kwargs", None):
