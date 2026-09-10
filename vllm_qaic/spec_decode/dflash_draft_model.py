@@ -164,6 +164,10 @@ class QaicDFlashProposer:
         tok_start = 0
         for req_i, tok_end in enumerate(prefill_cum_sum):
             req_n_tokens = int(tok_end) - tok_start
+            # A request may span multiple TLM prefill chunks (each is
+            # tlm_prefill_seq_len tokens); the TLM emits one hidden buffer per
+            # chunk, so consume this request's whole run of chunk buffers.
+            n_chunks_req = -(-req_n_tokens // self.tlm_prefill_seq_len)  # ceil
             req_positions = prefill_positions[..., tok_start:tok_end]
             req_block_ids = prefill_block_ids[req_i : req_i + 1]
             req_logits = (
@@ -174,7 +178,9 @@ class QaicDFlashProposer:
             req_id = prefill_req_ids[req_i]
             pending.append(
                 {
-                    "target_hidden": hidden_state_chunks[chunk_idx],
+                    "target_hidden": hidden_state_chunks[
+                        chunk_idx : chunk_idx + n_chunks_req
+                    ],
                     "prefill_positions": req_positions,
                     "prefill_cum_sum": np.array(
                         [req_n_tokens], dtype=prefill_cum_sum.dtype
@@ -185,7 +191,7 @@ class QaicDFlashProposer:
                     "req_id": req_id,
                 }
             )
-            chunk_idx += 1
+            chunk_idx += n_chunks_req
             tok_start = int(tok_end)
 
         self._prefill_pending = pending
@@ -198,7 +204,7 @@ class QaicDFlashProposer:
 
     def prefill_step(
         self,
-        target_hidden: np.ndarray,
+        target_hidden: list[np.ndarray],
         prefill_positions: np.ndarray,
         prefill_cum_sum: np.ndarray,
         batch_indices: np.ndarray,
@@ -212,8 +218,13 @@ class QaicDFlashProposer:
             f"got prefill_cum_sum={prefill_cum_sum}."
         )
         n_tokens = int(prefill_cum_sum[0])
-        assert n_tokens <= self.tlm_prefill_seq_len, (
-            f"DFlash chunk size {n_tokens} exceeds TLM prefill_seq_len "
+        # target_hidden is this request's run of per-chunk TLM hidden buffers
+        # (each a (1, tlm_prefill_seq_len, hidden) array); a request spans more
+        # than one when the scheduler feeds >1 chunk in a single step.
+        n_chunks = len(target_hidden)
+        total_width = n_chunks * self.tlm_prefill_seq_len
+        assert n_tokens <= total_width, (
+            f"DFlash chunk span {n_tokens} exceeds {n_chunks} x prefill_seq_len "
             f"{self.tlm_prefill_seq_len}."
         )
 
@@ -224,11 +235,21 @@ class QaicDFlashProposer:
         active_kv_slot = int(batch_indices[0])
 
         positions_padded = np.full(
-            (self.tlm_prefill_seq_len,),
+            (total_width,),
             -1,
             dtype=np.int64,
         )
         positions_padded[:n_tokens] = prefill_positions[:n_tokens]
+        pfl = self.tlm_prefill_seq_len
+
+        def _hidden_subblock(sub_start: int) -> np.ndarray:
+            # A block never straddles a chunk boundary (tlm_prefill_seq_len is a
+            # multiple of block_size), so a sub-block lives in exactly one chunk.
+            chunk_of = sub_start // pfl
+            within = sub_start - chunk_of * pfl
+            return np.ascontiguousarray(
+                target_hidden[chunk_of][0, within : within + block_size, :]
+            )
 
         def _run_dlm_one_subblock(
             target_hidden_slice: np.ndarray,
@@ -262,7 +283,7 @@ class QaicDFlashProposer:
                 sub_start = sub_i * block_size
                 sub_end = sub_start + block_size
                 _run_dlm_one_subblock(
-                    np.ascontiguousarray(target_hidden[0, sub_start:sub_end, :]),
+                    _hidden_subblock(sub_start),
                     positions_padded[sub_start:sub_end],
                     positions_padded[sub_start:sub_end] + block_size,
                     np.full((block_size,), self.mask_token_id, dtype=np.int64),
@@ -274,16 +295,16 @@ class QaicDFlashProposer:
         last_real_idx = n_tokens - 1
         last_sub = last_real_idx // block_size
         last_pos = int(prefill_positions[last_real_idx])
-        assert last_sub < self.num_sub_blocks, (
-            f"DFlash divisibility-only path: bonus sub-block index "
-            f"{last_sub} out of range (num_sub_blocks={self.num_sub_blocks})."
+        assert last_sub < n_chunks * self.num_sub_blocks, (
+            f"DFlash bonus sub-block index {last_sub} out of range "
+            f"(total sub-blocks={n_chunks * self.num_sub_blocks})."
         )
 
         for sub_i in range(last_sub):
             sub_start = sub_i * block_size
             sub_end = sub_start + block_size
             _run_dlm_one_subblock(
-                np.ascontiguousarray(target_hidden[0, sub_start:sub_end, :]),
+                _hidden_subblock(sub_start),
                 positions_padded[sub_start:sub_end],
                 positions_padded[sub_start:sub_end] + block_size,
                 np.full((block_size,), self.mask_token_id, dtype=np.int64),
@@ -291,7 +312,7 @@ class QaicDFlashProposer:
 
         sub_start = last_sub * block_size
         sub_end = sub_start + block_size
-        target_hidden_slice = np.ascontiguousarray(target_hidden[0, sub_start:sub_end, :])
+        target_hidden_slice = _hidden_subblock(sub_start)
         position_ids_target_row = positions_padded[sub_start:sub_end]
         # DLM writes its KV at the block_size positions after the last real token.
         position_ids_row = np.arange(
