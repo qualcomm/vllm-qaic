@@ -157,9 +157,10 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         if vllm_config.speculative_config:
             self.num_spec_tokens = vllm_config.speculative_config.num_speculative_tokens
             self.max_decode_tokens += self.num_spec_tokens
-            # DFlash emits block_size logits/step (not 1+K).
+            # DFlash emits block_size logits/step (not 1+K). Public
+            # num_speculative_tokens is block_size - 1, so block_size = K + 1.
             if vllm_config.speculative_config.method == "dflash":
-                self.max_decode_tokens = self.num_spec_tokens
+                self.max_decode_tokens = self.num_spec_tokens + 1
 
         self.num_logits_to_keep: int | None = None
         self.decode_logits: dict[str, np.ndarray] | None = None
@@ -177,9 +178,10 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             if _method in ("ngram", "suffix") and self.num_spec_tokens > 0
             else [self.num_spec_tokens]
         )
-        # DFlash TLM compiles with K-1 spec tokens (bonus token in slot 0).
+        # DFlash public num_speculative_tokens already excludes the slot-0 bonus
+        # token, so the TLM decodes exactly that many spec tokens.
         if _method == "dflash" and self.num_spec_tokens > 0:
-            self.decode_ks = [self.num_spec_tokens - 1]
+            self.decode_ks = [self.num_spec_tokens]
         # active_k is updated per step by QaicModelRunner; defaults to max K.
         self.active_k: int = self.decode_ks[-1]
 
@@ -1377,10 +1379,10 @@ def _derive_dflash_config(spec_config) -> None:
             "DFlash requires block_size, target_layer_ids and mask_token_id from "
             f"the DLM config; got keys={list(dflash_cfg)}."
         )
-    if spec_config.num_speculative_tokens != block_size:
+    if spec_config.num_speculative_tokens != block_size - 1:
         raise ValueError(
-            f"DFlash requires num_speculative_tokens == DLM block_size, got "
-            f"{spec_config.num_speculative_tokens} and {block_size}."
+            f"DFlash requires num_speculative_tokens == DLM block_size - 1, got "
+            f"{spec_config.num_speculative_tokens} and block_size {block_size}."
         )
     # TLM captures hidden states after the layer fires, so ids are +1.
     tlm_hf._dflash_target_layer_ids = [i + 1 for i in target_layer_ids]
@@ -1415,8 +1417,9 @@ def load_qaic_model(
             and vllm_config.speculative_config.method == "dflash"
         ):
             vllm_config.model_config.hf_config._dflash_is_draft = True
+            # Public num_speculative_tokens is block_size - 1, so block_size = K + 1.
             vllm_config.model_config.hf_config._dflash_block_size_override = (
-                vllm_config.speculative_config.num_speculative_tokens
+                vllm_config.speculative_config.num_speculative_tokens + 1
             )
         vllm_config.speculative_config = None
 
@@ -2096,10 +2099,11 @@ def _get_qaic_compile_config(
         # where the proposer finds no matches, avoiding the wasted 5-token
         # forward pass.  For draft_model the single K is sufficient.
         if spec_cfg and spec_cfg.method == "dflash" and K:
-            # DFlash TLM: bonus token in slot 0, so K-1 spec tokens; keep all block_size logits.
-            cfg["num_speculative_tokens"] = K - 1
-            cfg["dflash_block_size"] = K
-            num_logits_to_keep = K
+            # DFlash public K is block_size - 1 (bonus token in slot 0), so the
+            # DLM block_size is K + 1; keep all block_size logits.
+            cfg["num_speculative_tokens"] = K
+            cfg["dflash_block_size"] = K + 1
+            num_logits_to_keep = K + 1
         elif spec_cfg and spec_cfg.method in ("ngram", "suffix") and K:
             cfg["num_speculative_tokens"] = [0, K]
             num_logits_to_keep = K + 1
