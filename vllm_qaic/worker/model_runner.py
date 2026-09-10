@@ -1022,9 +1022,9 @@ class QaicModelRunnerAoT(GPUModelRunner):
         """
         Reserve physical block ids for req_ids for Nixl/Mooncake
         """
-        if not self._uses_torch_view_kv_connector() or physical_block_ids.size() == 0:
+        if not self._uses_torch_view_kv_connector() or physical_block_ids.size == 0:
             return
-        if len(req_ids) != physical_block_ids.size():
+        if len(req_ids) != physical_block_ids.size:
             raise RuntimeError("Qaic Prefill Bank needs one request per physical block")
         for qpc_slot, (physical_block_id, req_id) in enumerate(
             zip(physical_block_ids, req_ids, strict=True)
