@@ -42,7 +42,7 @@ _SAMPLING_PARAMS = SamplingParams(temperature=0.0, max_tokens=16)
     speculative_config={
         "method": "dflash",
         "model": "z-lab/Qwen3-4B-DFlash-b16",
-        "num_speculative_tokens": _DFLASH_BLOCK_SIZE,
+        "num_speculative_tokens": _DFLASH_BLOCK_SIZE - 1,
     },
 )
 class TestQaicDFlash:
@@ -142,7 +142,7 @@ def test_dflash_matches_base_greedy(qaic_runner_factory, sample_prompts):
         speculative_config={
             "method": "dflash",
             "model": "z-lab/Qwen3-4B-DFlash-b16",
-            "num_speculative_tokens": _DFLASH_BLOCK_SIZE,
+            "num_speculative_tokens": _DFLASH_BLOCK_SIZE - 1,
         },
         seq_len=_DFLASH_SEQ_LEN,
         override_qaic_config=tlm_override,

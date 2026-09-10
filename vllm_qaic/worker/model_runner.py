@@ -523,8 +523,9 @@ class QaicModelRunnerAoT(GPUModelRunner):
         self.num_decode_tokens = 0
         self.max_decode_tokens = 1 + self.num_spec_tokens
         # DFlash emits block_size logits/step (not 1+K); must match QaicCausalLM.
+        # Public num_speculative_tokens is block_size - 1, so block_size = K + 1.
         if self.speculative_config and self.speculative_config.method == "dflash":
-            self.max_decode_tokens = self.num_spec_tokens
+            self.max_decode_tokens = self.num_spec_tokens + 1
         # Variable-K decode specializations: for ngram/suffix we compile two
         # kernels (K=0 and K=max_k) and select the cheapest one each step.
         _method = self.speculative_config.method if self.speculative_config else None
@@ -533,9 +534,10 @@ class QaicModelRunnerAoT(GPUModelRunner):
             if _method in ("ngram", "suffix") and self.max_decode_tokens > 1
             else [self.num_spec_tokens]
         )
-        # DFlash TLM compiles with K-1 spec tokens (bonus token in slot 0).
+        # DFlash public num_speculative_tokens already excludes the slot-0 bonus
+        # token, so the TLM decodes exactly that many spec tokens.
         if _method == "dflash" and self.num_spec_tokens > 0:
-            self.decode_ks = [self.num_spec_tokens - 1]
+            self.decode_ks = [self.num_spec_tokens]
         # active_k is updated each step; defaults to max K until first dispatch.
         self.active_k: int = self.decode_ks[-1]
         # spec dec vars
@@ -1638,7 +1640,8 @@ class QaicModelRunnerAoT(GPUModelRunner):
         """Allocate + bind the TLM decode hidden-state buffer for DFlash. The DLM
         proposer reads self._tlm_hidden_buf each decode step; _run_decode captures
         the TLM decode hidden states into it via the bound output."""
-        block_size = self.speculative_config.num_speculative_tokens
+        # Public num_speculative_tokens is block_size - 1, so block_size = K + 1.
+        block_size = self.speculative_config.num_speculative_tokens + 1
         hidden_size = self.model_config.get_hidden_size()
         decode_bsz = self.model.decode_bsz
         _hs_info = self.model.get_io_shape_and_dtype("hidden_states", is_input=False)

@@ -61,7 +61,8 @@ class QaicDFlashProposer:
         )
         self._draft_vllm_config = draft_vllm_config
         spec_config = draft_vllm_config.speculative_config
-        self.block_size: int = spec_config.num_speculative_tokens
+        # Public num_speculative_tokens is block_size - 1 (bonus token in slot 0).
+        self.block_size: int = spec_config.num_speculative_tokens + 1
         self.decode_bsz: int = draft_vllm_config.scheduler_config.max_num_seqs
 
         # Runner sets tlm_prefill_seq_len from the loaded TLM before load_model().

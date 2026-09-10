@@ -15,7 +15,7 @@ from vllm import LLM, SamplingParams
 
 
 def _dflash_block_size(dlm_repo: str) -> int:
-    """DLM block_size (== num_speculative_tokens) read from the checkpoint config."""
+    """DLM block_size (num_speculative_tokens + 1) read from the checkpoint config."""
     cfg_path = hf_hub_download(repo_id=dlm_repo, filename="config.json")
     with open(cfg_path) as f:
         cfg = json.load(f)
@@ -45,7 +45,9 @@ def main() -> None:
 
     tlm_repo = "Qwen/Qwen3-4B"
     dlm_repo = "z-lab/Qwen3-4B-DFlash-b16"
-    # block_size (== num_speculative_tokens) is a property of the DLM checkpoint.
+    # block_size is a property of the DLM checkpoint; the public API takes
+    # num_speculative_tokens = block_size - 1 (bonus token lives in slot 0),
+    # matching every other vLLM spec-decode backend.
     block_size = _dflash_block_size(dlm_repo)
 
     print(
@@ -85,7 +87,7 @@ def main() -> None:
         speculative_config={
             "method": "dflash",
             "model": dlm_repo,
-            "num_speculative_tokens": block_size,
+            "num_speculative_tokens": block_size - 1,
         },
     )
 
