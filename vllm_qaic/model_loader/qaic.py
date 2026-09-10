@@ -571,7 +571,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         logits: np.ndarray | None = None,
         num_prompt_tokens_prefill: np.ndarray | None = None,
     ):
-        pending_exec_count = 0  # in-flight executions in current batch
         # set qpc prefill state
         if self.last_decode:
             self.last_decode = False
@@ -667,7 +666,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     if logits is not None:
                         chunk_inputs["logits"] = logits[index : index + 1]
 
-                if pending_exec_count == self.session.prefill_num_execObj:
+                if self.session.prefill_available_exec_objs.empty():
                     if callback:
                         callback()
                     logger.debug(
@@ -675,8 +674,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     )
                     eid = pending_exec_queue.get(timeout=120)
                     self.complete_inf(eid, True, pipeline_prefill_en=True)
-                    pending_exec_count -= 1
-
                 # Submit Chunk to LRT Queue
                 exec_obj_idx = self.session.np_run_pipeline(
                     inputs=chunk_inputs,
@@ -689,8 +686,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     self.active_ccl[exec_obj_idx] = chosen_ccl
                 time.sleep(0.01)
                 pending_exec_queue.put(exec_obj_idx)
-                pending_exec_count += 1
-
         # wait for all chunks to finish
         if not self.use_async_scheduling:
             while not pending_exec_queue.empty():
@@ -716,7 +711,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         mm_kwargs_list: list[dict] | None = None,
     ) -> np.ndarray:
         # perform prefill (only prefill_bsz=1 is supported)
-        pending_exec_count = 0  # in-flight executions in current batch
         idx_start = 0
         for i, idx_end in enumerate(prefill_cum_sum):
             # extract indices of specific request
@@ -807,20 +801,18 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     # SpD target QPC: prefill keeps 1 logit (last token position).
                     chunk_inputs["num_logits_to_keep"] = np.array([[1]], dtype=np.int64)
 
-                if pending_exec_count == self.session.prefill_num_execObj:
+                if self.session.prefill_available_exec_objs.empty():
                     logger.debug(
                         "All execObjs allocated; waiting for pending execObj completion."
                     )
                     eid = pending_exec_queue.get()
                     self.session.complete_inf(eid, True)
-                    pending_exec_count -= 1
                 exec_obj_idx = self.session.np_run(chunk_inputs, is_prefill=True)
                 logger.debug("Ran prefill on %s", exec_obj_idx)
                 if not self.use_async_scheduling:
                     self.session.complete_inf(exec_obj_idx, True)
                 else:
                     time.sleep(0.01)
-                    pending_exec_count += 1
                     pending_exec_queue.put(exec_obj_idx)
 
         return
@@ -1009,6 +1001,10 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
     @property
     def async_scheduling_exec_timeout(self) -> int | None:
         return self.session.async_scheduling_exec_timeout
+
+    @property
+    def has_no_available_prefill_exec_objs(self) -> int:
+        return self.session.prefill_available_exec_objs.empty()
 
     def run_encode(
         self,

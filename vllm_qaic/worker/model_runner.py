@@ -922,9 +922,10 @@ class QaicModelRunnerAoT(GPUModelRunner):
     @contextmanager
     def synchronize_input_prep(self):
         if self.use_async_scheduling and self._pending_output is not None:
-            # Drain the previous batch now, in case this batch needs its
-            # exec object back before the engine calls get_output() on it.
-            self._pending_output.get_output()
+            # Drain the previous batch's exec object. For kv producer drain only if
+            # there are no available exec objs.
+            if not self.is_kv_producer or self.model.has_no_available_prefill_exec_objs:
+                self._pending_output.get_output()
 
         yield
 
@@ -1375,8 +1376,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 input_batch_req_ids=_input_batch_req_ids,
                 input_batch_req_id_to_index=_input_batch_req_id_to_index,
             )
-            if not self.is_async_kv_producer:
-                self._pending_output = async_output
+            self._pending_output = async_output
             return async_output
 
         # Unpack ephemeral state.
