@@ -133,7 +133,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
 
         self.config = config
         self.vocab_size = config.get_text_config().vocab_size
-        # `long_prefill_token_threshold` will define prefill chunk length
+        # `override_qaic_config["prefill_seq_len"]` defines the prefill chunk length
         if self.config.model_type == "whisper":
             # Encoder-decoder models have chunked prefill disabled by vllm,
             # but QAIC still requires a prefill sequence length.
