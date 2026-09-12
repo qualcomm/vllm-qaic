@@ -493,15 +493,15 @@ class QAICInferenceSession:
         self,
         kv_cache_buffers,
         slicing_parameters,
+        buff_map: list[tuple[str, int]],
         index=0,
-        buff_map: list[tuple[str, int]] | None = None,
     ):
         return self._set_data_with_slices(
             kv_cache_buffers,
             slicing_parameters,
             self.kv_slicing_spec_handle,
-            index,
             buff_map,
+            index,
         )
 
     def set_data_for_repetition_penalty(
@@ -511,8 +511,8 @@ class QAICInferenceSession:
             repetition_penalty_buffers,
             slicing_parameters,
             self.repetition_penalty_spec_handle,
-            index,
             self.repetition_penalty_map,
+            index,
         )
 
     def _set_data_with_slices(
@@ -520,20 +520,20 @@ class QAICInferenceSession:
         buffers,
         slicing_parameters,
         slicing_spec_handle,
+        buff_map: list[tuple[str, int]],
         index=0,
-        buff_map: list[tuple[str, int]] | None = None,
     ):
-        if isinstance(buffers, (list, np.ndarray)):
-            assert buff_map is not None
-            assert len(buffers) == len(buff_map) or len(buffers) + 1 == len(buff_map), (
-                "buffers must be a list of numpy arrays or a dictionary of numpy arrays"
-            )
-            slices_as_tuple_list = [
-                (name[1], buff) for name, buff in zip(buff_map, buffers, strict=False)
-            ]
-        else:
-            slices_as_tuple_list = self.get_tuple_list_from_dict(buffers)
-        status, slicingHandle = self.execObj[index].setDataWithSlices(
+        # `buffers` is always a list of numpy arrays zipped against `buff_map`
+        # (a list of (name, binding_index) tuples). Each entry registers one
+        # binding's buffer with the exec object.
+        assert len(buffers) == len(buff_map) or len(buffers) + 1 == len(buff_map), (
+            f"buffer count mismatch: got {len(buffers)} buffers "
+            f"but buff_map has {len(buff_map)} entries"
+        )
+        slices_as_tuple_list = [
+            (name[1], buff) for name, buff in zip(buff_map, buffers, strict=False)
+        ]
+        status, _ = self.execObj[index].setDataWithSlices(
             slices_as_tuple_list, slicing_spec_handle, slicing_parameters
         )
         assert status == qaicrt.QStatus.QS_SUCCESS, "Failed to setDataWithSlices"
@@ -603,8 +603,8 @@ class QAICInferenceSession:
             self.set_data_for_kv_handoff(
                 kv_cache_buffers,
                 [("batch_index", batch_index % self.full_batch_size), ("ctx_start", 0)],
-                exec_obj_idx,
                 self.prefill_buff_map[:-1],
+                exec_obj_idx,
             )
 
         self._make_inputs_contiguous(inputs)

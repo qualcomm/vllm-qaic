@@ -12,7 +12,6 @@ import numpy as np
 
 from vllm.config import VllmConfig
 from vllm_qaic.logger import init_logger
-from vllm.platforms import current_platform
 
 from vllm_qaic.model_loader.qaic import load_qaic_model
 
@@ -68,6 +67,15 @@ class QaicDraftModelProposer:
             "Loading draft model %s for QAIC speculative decoding...",
             self._draft_vllm_config.model_config.model,
         )
+        # The draft VllmConfig inherits kv_transfer_config from the decode
+        # server (via create_vllm_config_for_draft_model), which would set
+        # disagg_serving_en=True on the loaded QaicCausalLM.  That causes
+        # forward(is_prompt=True) to enter the disagg branch and assert
+        # kv_caches is not None — but the draft proposer never passes
+        # kv_caches.  The draft model has its own KV cache on separate
+        # devices and must NOT participate in KV transfer.
+        # NOTE: kv_transfer_config is cleared inside load_qaic_model() for
+        # speculative_model_type="draft" (on a shallow copy, not in-place).
         self.model = load_qaic_model(self._draft_vllm_config, "draft")
         vocab_size = self._draft_vllm_config.model_config.get_vocab_size()
         self._decode_logits = np.empty(
