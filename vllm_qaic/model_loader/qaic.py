@@ -45,7 +45,7 @@ from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
 
-from vllm_qaic.utils.qaic_utils import _clean_config
+from vllm_qaic.utils.qaic_utils import _clean_config, compute_max_decode_tokens
 
 logger = init_logger(__name__)
 
@@ -153,14 +153,11 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self.lora_mode = bool(vllm_config.lora_config)
         self.last_decode = False
         self.num_spec_tokens = 0
-        self.max_decode_tokens = 1
         if vllm_config.speculative_config:
             self.num_spec_tokens = vllm_config.speculative_config.num_speculative_tokens
-            self.max_decode_tokens += self.num_spec_tokens
-            # DFlash emits block_size logits/step (not 1+K). Public
-            # num_speculative_tokens is block_size - 1, so block_size = K + 1.
-            if vllm_config.speculative_config.method == "dflash":
-                self.max_decode_tokens = self.num_spec_tokens + 1
+        self.max_decode_tokens = compute_max_decode_tokens(
+            vllm_config.speculative_config
+        )
 
         self.num_logits_to_keep: int | None = None
         self.decode_logits: dict[str, np.ndarray] | None = None
