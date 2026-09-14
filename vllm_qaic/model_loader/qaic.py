@@ -1362,44 +1362,47 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             logger.debug("finished dummy run")
 
 
-def _derive_dflash_config(spec_config) -> None:
-    """Derive and stash DFlash cross-checkpoint config on TLM/DLM hf_configs. Idempotent."""
-    tlm_hf = spec_config.target_model_config.hf_config
-    dlm_hf = spec_config.draft_model_config.hf_config
-    if getattr(tlm_hf, "_dflash_target_layer_ids", None) is not None:
+def _derive_dflash_config(vllm_config) -> None:
+    """Derive DFlash metadata into additional_config['dflash_cfg'] (idempotent)."""
+    spec_config = vllm_config.speculative_config
+    additional_config = vllm_config.additional_config
+    if additional_config is None:
+        additional_config = {}
+        vllm_config.additional_config = additional_config
+    if "dflash_cfg" in additional_config:
         return
-    dflash_cfg = getattr(dlm_hf, "dflash_config", None)
-    if dflash_cfg is None and hasattr(dlm_hf, "to_dict"):
-        dflash_cfg = dlm_hf.to_dict().get("dflash_config")
-    if dflash_cfg is not None and hasattr(dflash_cfg, "to_dict"):
-        dflash_cfg = dflash_cfg.to_dict()
-    if not isinstance(dflash_cfg, dict):
+    dlm_hf = spec_config.draft_model_config.hf_config
+    dflash_section = getattr(dlm_hf, "dflash_config", None)
+    if dflash_section is None and hasattr(dlm_hf, "to_dict"):
+        dflash_section = dlm_hf.to_dict().get("dflash_config")
+    if dflash_section is not None and hasattr(dflash_section, "to_dict"):
+        dflash_section = dflash_section.to_dict()
+    if not isinstance(dflash_section, dict):
         raise ValueError(
             "DFlash DLM config missing 'dflash_config' section; check the DLM "
             f"checkpoint at '{spec_config.draft_model_config.model}'."
         )
-    block_size = getattr(dlm_hf, "block_size", None) or dflash_cfg.get("block_size")
-    target_layer_ids = dflash_cfg.get("target_layer_ids")
-    mask_token_id = dflash_cfg.get("mask_token_id")
+    block_size = getattr(dlm_hf, "block_size", None) or dflash_section.get("block_size")
+    target_layer_ids = dflash_section.get("target_layer_ids")
+    mask_token_id = dflash_section.get("mask_token_id")
     if block_size is None or target_layer_ids is None or mask_token_id is None:
         raise ValueError(
             "DFlash requires block_size, target_layer_ids and mask_token_id from "
-            f"the DLM config; got keys={list(dflash_cfg)}."
+            f"the DLM config; got keys={list(dflash_section)}."
         )
     if spec_config.num_speculative_tokens != block_size - 1:
         raise ValueError(
             f"DFlash requires num_speculative_tokens == DLM block_size - 1, got "
             f"{spec_config.num_speculative_tokens} and block_size {block_size}."
         )
-    # TLM captures hidden states after the layer fires, so ids are +1.
-    tlm_hf._dflash_target_layer_ids = [i + 1 for i in target_layer_ids]
-    tlm_hf._dflash_block_size = block_size
-    tlm_hf._dflash_raw_target_layer_ids = list(target_layer_ids)
-    dlm_hf._dflash_block_size = block_size
-    dlm_hf._dflash_mask_token_id = mask_token_id
-    # Cross-checkpoint repos: TLM fetches fc/hidden_norm from DLM; DLM fetches lm_head/embed from TLM.
-    tlm_hf._dflash_dlm_repo = spec_config.draft_model_config.model
-    dlm_hf._dflash_tlm_repo = spec_config.target_model_config.model
+    additional_config["dflash_cfg"] = {
+        "block_size": block_size,
+        # TLM captures hidden states after the layer fires, so ids are +1.
+        "target_layer_ids": [i + 1 for i in target_layer_ids],
+        "mask_token_id": mask_token_id,
+        "tlm_repo": spec_config.target_model_config.model,
+        "dlm_repo": spec_config.draft_model_config.model,
+    }
 
 
 def load_qaic_model(
@@ -1410,7 +1413,7 @@ def load_qaic_model(
         vllm_config.speculative_config is not None
         and vllm_config.speculative_config.method == "dflash"
     ):
-        _derive_dflash_config(vllm_config.speculative_config)
+        _derive_dflash_config(vllm_config)
 
     # Draft model must compile with max_decode_tokens=1. Clear speculative_config
     # so QaicCausalLM doesn't inherit num_spec_tokens from the target config.
@@ -1418,16 +1421,6 @@ def load_qaic_model(
         from copy import copy
 
         vllm_config = copy(vllm_config)
-        # DFlash DLM: stash draft marker + block_size before spec-config is cleared.
-        if (
-            vllm_config.speculative_config is not None
-            and vllm_config.speculative_config.method == "dflash"
-        ):
-            vllm_config.model_config.hf_config._dflash_is_draft = True
-            # Public num_speculative_tokens is block_size - 1, so block_size = K + 1.
-            vllm_config.model_config.hf_config._dflash_block_size_override = (
-                vllm_config.speculative_config.num_speculative_tokens + 1
-            )
         vllm_config.speculative_config = None
 
     # Create a model instance
@@ -1809,15 +1802,6 @@ def get_hf_model(
         and isinstance(_eagle_inner, PretrainedConfig)
         and getattr(_eagle_inner, "model_type", None) != "eagle"
     ):
-        for _attr in (
-            "_dflash_block_size",
-            "_dflash_mask_token_id",
-            "_dflash_tlm_repo",
-            "_dflash_is_draft",
-            "_dflash_block_size_override",
-        ):
-            if hasattr(hf_config, _attr):
-                setattr(_eagle_inner, _attr, getattr(hf_config, _attr))
         # Keep architectures so QEfficient dispatches on DFlashDraftModel.
         if getattr(hf_config, "architectures", None):
             _eagle_inner.architectures = hf_config.architectures
@@ -2091,14 +2075,10 @@ def _get_qaic_compile_config(
     if cfg["mos"] == -1:
         del cfg["mos"]
     num_logits_to_keep = None
-    # DFlash DLM (draft build): keyed off stashed marker; compiles prefill-only with prefill_seq_len=block_size.
-    _dflash_is_draft = getattr(
-        vllm_config.model_config.hf_config, "_dflash_is_draft", False
-    )
-    if _dflash_is_draft:
-        block_size = int(
-            vllm_config.model_config.hf_config._dflash_block_size_override
-        )
+    dflash_cfg = additional_config.get("dflash_cfg")
+    # DFlash DLM build: prefill-only with prefill_seq_len == block_size.
+    if speculative_model_type == "draft" and dflash_cfg is not None:
+        block_size = int(dflash_cfg["block_size"])
         cfg["prefill_only"] = True
         cfg["prefill_seq_len"] = block_size
         cfg["dflash_block_size"] = block_size
@@ -2180,17 +2160,17 @@ def _get_qaic_compile_config(
             qaic_config = {}
         qaic_config["speculative_model_type"] = speculative_model_type
     # DFlash cross-checkpoint injection for QEfficient DFlash transforms.
-    _model_hf = vllm_config.model_config.hf_config
-    if _dflash_is_draft:
-        if qaic_config is None:
-            qaic_config = {}
-        qaic_config["dflash_dlm"] = True
-        qaic_config["dflash_tlm_repo"] = _model_hf._dflash_tlm_repo
-    elif getattr(_model_hf, "_dflash_target_layer_ids", None) is not None:
-        if qaic_config is None:
-            qaic_config = {}
-        qaic_config["target_layer_ids"] = _model_hf._dflash_target_layer_ids
-        qaic_config["dflash_dlm_repo"] = _model_hf._dflash_dlm_repo
+    if dflash_cfg is not None:
+        if speculative_model_type == "draft":
+            if qaic_config is None:
+                qaic_config = {}
+            qaic_config["dflash_dlm"] = True
+            qaic_config["dflash_tlm_repo"] = dflash_cfg["tlm_repo"]
+        elif speculative_model_type in ("target", "turbo"):
+            if qaic_config is None:
+                qaic_config = {}
+            qaic_config["target_layer_ids"] = dflash_cfg["target_layer_ids"]
+            qaic_config["dflash_dlm_repo"] = dflash_cfg["dlm_repo"]
     # On Device Sampling
     if cfg.get("aic_include_sampler") is not None:
         if qaic_config is None:

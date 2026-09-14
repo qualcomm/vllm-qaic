@@ -20,19 +20,19 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-def _extract_mask_token_id(dlm_hf) -> int:
-    """Read mask_token_id from _dflash_mask_token_id or dflash_config."""
-    val = getattr(dlm_hf, "_dflash_mask_token_id", None)
-    if val is not None:
-        return int(val)
-    dflash_cfg = getattr(dlm_hf, "dflash_config", None)
-    if dflash_cfg is not None and not isinstance(dflash_cfg, dict):
-        dflash_cfg = dflash_cfg.to_dict()
-    if isinstance(dflash_cfg, dict) and "mask_token_id" in dflash_cfg:
+def _extract_mask_token_id(add_cfg: dict, dlm_hf) -> int:
+    """DFlash mask token id from dflash_cfg, else the DLM dflash_config section."""
+    dflash_cfg = add_cfg.get("dflash_cfg")
+    if isinstance(dflash_cfg, dict) and dflash_cfg.get("mask_token_id") is not None:
         return int(dflash_cfg["mask_token_id"])
+    dflash_section = getattr(dlm_hf, "dflash_config", None)
+    if dflash_section is not None and not isinstance(dflash_section, dict):
+        dflash_section = dflash_section.to_dict()
+    if isinstance(dflash_section, dict) and "mask_token_id" in dflash_section:
+        return int(dflash_section["mask_token_id"])
     raise ValueError(
         "DFlash: could not determine mask_token_id from the DLM config "
-        "(_dflash_mask_token_id / dflash_config.mask_token_id both missing)."
+        "(additional_config['dflash_cfg'] / dflash_config.mask_token_id both missing)."
     )
 
 
@@ -72,7 +72,7 @@ class QaicDFlashProposer:
         self.num_sub_blocks: int = 0
 
         dlm_hf = draft_vllm_config.model_config.hf_config
-        self.mask_token_id: int = _extract_mask_token_id(dlm_hf)
+        self.mask_token_id: int = _extract_mask_token_id(add_cfg, dlm_hf)
         self.hidden_size: int = draft_vllm_config.model_config.get_hidden_size()
         self.vocab_size: int = draft_vllm_config.model_config.get_vocab_size()
         self.max_model_len: int = draft_vllm_config.model_config.max_model_len
