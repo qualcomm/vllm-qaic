@@ -135,11 +135,20 @@ def _parse_device_id_pool(value: str) -> list[int]:
 
 
 def pytest_addoption(parser):
+    parser.addoption(
+        "--model-name",
+        action="store",
+        dest="model_name",
+        default=None,
+        help="Model name",
+    )
     parser.addoption("--seq-len", type=int, default=None)
     parser.addoption("--ctx-len", type=int, default=None)
     parser.addoption("--decode-bsz", type=int, default=4)
     parser.addoption("--dtype", type=str, default=None)
     parser.addoption("--kv-dtype", type=str, default="auto")
+    parser.addoption("--quantization", type=str, default=None, dest="quantization")
+    parser.addoption("--max-end-tokens", type=int, default=None, dest="max_end_tokens")
     parser.addoption("--dataset", type=str, default=None)
     parser.addoption(
         "--device-id",
@@ -160,6 +169,20 @@ def pytest_addoption(parser):
     )
     parser.addoption("--host", type=str, default="127.0.0.1")
     parser.addoption("--port", type=int, default=None)
+    parser.addoption(
+        "--device-group",
+        type=int,
+        default=None,
+        dest="device_group_size",
+        help="Number of devices per device group",
+    )
+    parser.addoption(
+        "--prefix-cache",
+        type=lambda v: v.lower() != "false",
+        default=None,
+        dest="enable_prefix_caching",
+        help="Enable prefix caching (True/False)",
+    )
     parser.addoption(
         "--override-qaic-config",
         type=_parse_override_config,
@@ -367,17 +390,21 @@ def make_runner(
         async_scheduling: bool,
         dg: list,
         enable_chunked_prefill: bool = False,
+        enable_prefix_caching: bool = False,
         block_size: int = 16,
         lora_modules: list | None = None,
         max_num_seqs: int | None = None,
         override_qaic_config: dict | None = override_qaic_config,
         quantization: str | None = dtype,
         kv_cache_dtype: str = kv_dtype,
-        long_prefill_token_threshold: int | None = None,
         **kwargs,
     ):
+        qaic_cfg = (
+            dict(override_qaic_config) if override_qaic_config is not None else {}
+        )
+        qaic_cfg["prefill_seq_len"] = seq_len
         additional_config = {
-            "override_qaic_config": override_qaic_config,
+            "override_qaic_config": qaic_cfg,
             "device_group": dg,
         }
         if lora_modules is not None:
@@ -386,15 +413,10 @@ def make_runner(
             model_name,
             max_num_seqs=max_num_seqs if max_num_seqs is not None else decode_bsz,
             max_model_len=ctx_len,
-            long_prefill_token_threshold=(
-                seq_len
-                if long_prefill_token_threshold is None
-                else long_prefill_token_threshold
-            ),
             quantization=quantization,
             kv_cache_dtype=kv_cache_dtype,
             additional_config=additional_config,
-            enable_prefix_caching=False,
+            enable_prefix_caching=enable_prefix_caching,
             async_scheduling=async_scheduling,
             disable_log_stats=False,
             enable_chunked_prefill=enable_chunked_prefill,
@@ -497,12 +519,19 @@ def qaic_model(
     device_group_size = _resolve_qaic_test_config_value(
         request, pytestconfig, "device_group_size", default=1
     )
+    enable_prefix_caching = _resolve_qaic_test_config_value(
+        request, pytestconfig, "enable_prefix_caching", default=False
+    )
 
     ids = _device_pool.acquire(device_pool_ids, num_device_groups * device_group_size)
     try:
+        qaic_cfg = (
+            dict(override_qaic_config) if override_qaic_config is not None else {}
+        )
+        qaic_cfg["prefill_seq_len"] = seq_len
         additional_config = {
             "device_group": ids,
-            "override_qaic_config": override_qaic_config,
+            "override_qaic_config": qaic_cfg,
         }
         if draft_override_qaic_config is not None:
             additional_config["draft_override_qaic_config"] = draft_override_qaic_config
@@ -515,10 +544,9 @@ def qaic_model(
             model_name,
             max_num_seqs=decode_bsz,
             max_model_len=ctx_len,
-            long_prefill_token_threshold=seq_len,
             quantization=dtype,
             kv_cache_dtype=kv_dtype,
-            enable_prefix_caching=False,
+            enable_prefix_caching=enable_prefix_caching,
             async_scheduling=False,
             speculative_config=speculative_config,
             enable_lora=enable_lora,
@@ -544,9 +572,23 @@ def pytest_collection_modifyitems(session, config, items):
         if device_pool_size is not None
         else len(config.getoption("device_id"))
     )
+    cli_prefix_cache = config.getoption("enable_prefix_caching", default=None)
     for item in items:
         marker = item.get_closest_marker("qaic_test_config")
         kwargs = marker.kwargs if marker is not None else {}
+        if (
+            cli_prefix_cache is not None
+            and "enable_prefix_caching" in kwargs
+            and kwargs["enable_prefix_caching"] != cli_prefix_cache
+        ):
+            item.add_marker(
+                pytest.mark.skip(
+                    reason=(
+                        f"--prefix-cache={cli_prefix_cache} set; skipping "
+                        f"enable_prefix_caching={kwargs['enable_prefix_caching']} test"
+                    )
+                )
+            )
         num_device_groups = kwargs.get("num_device_groups", 1)
         device_group_size = kwargs.get("device_group_size", 1)
         required = num_device_groups * device_group_size
