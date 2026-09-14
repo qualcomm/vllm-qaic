@@ -30,7 +30,7 @@ Status of vLLM features on Qualcomm Cloud AI hardware.
 | Disaggregated serving | ✅ | ❌ | xEyPzD prefill/decode split |
 | Multimodal (VLM) | ✅ | 🧪 | kv_offload architecture |
 | Embedding models | ✅ | ❌ | Pooling tasks (Score, embed, classify, rerank) |
-| Encoder-decoder | ✅ | ❌ | Whisper |
+| Encoder-decoder | ✅ | ❌ | Whisper, Cohere ASR (BS1) |
 | Tensor parallelism | ✅ | ✅ | Across QIDs |
 | Pipeline parallelism | ✅ | ❌ | Across QIDs |
 

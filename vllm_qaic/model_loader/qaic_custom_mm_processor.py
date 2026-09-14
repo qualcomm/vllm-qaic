@@ -12,7 +12,11 @@ from typing import Any
 import torch
 from packaging.version import Version as _Version
 from qwen_vl_utils import smart_resize
-from transformers import BatchFeature, Qwen2VLImageProcessorFast, TensorType
+from transformers import (
+    BatchFeature,
+    Qwen2VLImageProcessorFast,
+    TensorType,
+)
 from transformers import __version__ as _transformers_version
 from transformers.image_processing_utils import select_best_resolution
 from transformers.image_transforms import group_images_by_shape, reorder_images
@@ -100,6 +104,7 @@ Gemma4ForConditionalGeneration.get_placeholder_str = classmethod(
         "image" if modality == "image_embeds" else modality, i
     )
 )
+
 
 class QaicGemma3MultiModalProcessor(Gemma3MultiModalProcessor):
     def _call_hf_processor(
@@ -671,6 +676,19 @@ class QaicQwen3_5MoeProcessingInfo(QaicQwen3VLProcessingInfo, Qwen3_5MoeProcessi
 
 
 def register_qaic_custom_mm_processor(model_type: str):
+    if model_type == "cohere_asr":
+        from vllm_qaic.model_loader.qaic_cohere_asr_processor import (
+            QAIC_COHERE_ASR_PROCESSOR,
+        )
+
+        processor_cls, info_cls, dummy_cls, model_cls = QAIC_COHERE_ASR_PROCESSOR
+        MULTIMODAL_REGISTRY.register_processor(
+            processor_cls,
+            info=info_cls,
+            dummy_inputs=dummy_cls,
+        )(model_cls)
+        return
+
     MODEL_PROCESSOR_MAP = {
         "qwen2_5_vl": (
             QaicQwen2_5_VLMultiModalProcessor,

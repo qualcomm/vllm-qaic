@@ -684,6 +684,21 @@ class QaicWorkerAoT(QaicWorker):
 
         self._configure_thread_parallelism()
 
+        if (
+            self.model_config.is_multimodal_model
+            and self.model_config.hf_config.model_type != "whisper"
+        ):
+            # EngineCore runs in a separate process from the API server, so
+            # register the QAIC processor before it builds the multimodal
+            # budget below, matching platform_base's shared registration path.
+            from vllm_qaic.model_loader.qaic_custom_mm_processor import (
+                register_qaic_custom_mm_processor,
+            )
+
+            register_qaic_custom_mm_processor(
+                self.model_config.hf_config.model_type
+            )
+
         # Construct the model runner
         self.model_runner: QaicModelRunnerAoT = QaicModelRunnerAoT(
             self.vllm_config, self.device

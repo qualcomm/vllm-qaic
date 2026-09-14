@@ -1584,6 +1584,12 @@ class QaicModelRunnerAoT(GPUModelRunner):
             return
         if self.model.is_vision_encoder:
             return
+        if self.model.config.model_type == "cohere_asr":
+            # The generic warm-up executes decode before prefill. Cohere ASR
+            # decode requires cross-attention state produced from real encoder
+            # features, so the first request performs the valid warm-up path.
+            logger.debug("Skipping decode-first warm-up for Cohere ASR")
+            return
 
         # Decode (SpD-aware: allocate max_decode_tokens per request)
         decode_bsz = self.model.decode_bsz
@@ -1761,7 +1767,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
 
     def get_supported_generation_tasks(self) -> list[GenerationTask]:
         supported_tasks = list[GenerationTask]()
-        if self.model.config.model_type == "whisper":
+        if self.model.config.model_type in ("whisper", "cohere_asr"):
             supported_tasks.append("transcription")
         else:
             supported_tasks.append("generate")
