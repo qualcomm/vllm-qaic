@@ -7,67 +7,33 @@
 # Adapted from vllm/examples/offline_inference/vision_language.py
 
 import argparse
-from dataclasses import asdict
-from typing import NamedTuple
-
 from PIL import Image
+from vllm import LLM, SamplingParams
 
-from vllm import LLM, EngineArgs, SamplingParams
+def run_llava(questions: list[str], modality: str) -> dict:
+    if modality == "image":
+        placeholder = "<image>"
+    elif modality == "video":
+        placeholder = "<video>"
+    else:
+        raise ValueError(f"Unsupported modality: {modality}")
 
+    prompts = [
+        f"USER: {placeholder}\n{question}\nASSISTANT:" for question in questions
+    ]
 
-class ModelRequestData(NamedTuple):
-    engine_args: EngineArgs
-    prompts: list[str]
-
-
-def run_llava(questions: list[str], modality: str) -> ModelRequestData:
-    # if modality == "image":
-    #     placeholder = "<image>"
-    # elif modality == "video":
-    #     placeholder = "<video>"
-    # else:
-    #     raise ValueError(f"Unsupported modality: {modality}")
-
-    model_name = "llava-hf/llava-1.5-7b-hf"
-
-    prompts = [f"USER: <image>\n{question}\nASSISTANT:" for question in questions]
-
-    engine_args = EngineArgs(
-        model=model_name,
-        max_model_len=4096,
-        max_num_seqs=1,
-        limit_mm_per_prompt={
-            "image": {"count": 1, "width": 160, "height": 160},
-            "video": {"count": 0, "num_frames": 32, "width": 640, "height": 640},
+    return {
+        "model": "llava-hf/llava-1.5-7b-hf",
+        "prompts": prompts,
+        "engine_params": {
+            "limit_mm_per_prompt": {
+                "image": {"count": 1, "width": 160, "height": 160},
+                "video": {"count": 0, "num_frames": 32, "width": 640, "height": 640},
+            },
         },
-        hf_overrides=None,
-    )
+    }
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
-
-
-def run_qwen3_vl(questions: list[str], modality: str) -> ModelRequestData:
-    model_name = "Qwen/Qwen3-VL-4B-Instruct"
-
-    engine_args = EngineArgs(
-        model=model_name,
-        max_model_len=4096,
-        max_num_seqs=1,
-        mm_processor_kwargs={
-            "min_pixels": 28 * 28,
-            "max_pixels": 1280 * 28 * 28,
-            "fps": 1,
-        },
-        limit_mm_per_prompt={
-            "image": {"count": 1, "width": 160, "height": 160},
-            "video": {"count": 0, "num_frames": 32, "width": 640, "height": 640},
-        },
-        hf_overrides=None,
-    )
-
+def run_qwen3_vl(questions: list[str], modality: str) -> dict:
     if modality == "image":
         placeholder = "<|image_pad|>"
     elif modality == "video":
@@ -88,31 +54,23 @@ def run_qwen3_vl(questions: list[str], modality: str) -> ModelRequestData:
         for question in questions
     ]
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
-
-
-def run_qwen2_5_vl(questions: list[str], modality: str) -> ModelRequestData:
-    model_name = "Qwen/Qwen2.5-VL-3B-Instruct"
-
-    engine_args = EngineArgs(
-        model=model_name,
-        max_model_len=4096,
-        max_num_seqs=1,
-        mm_processor_kwargs={
-            "min_pixels": 28 * 28,
-            "max_pixels": 1280 * 28 * 28,
-            "fps": 1,
+    return {
+        "model": "Qwen/Qwen3-VL-4B-Instruct",
+        "prompts": prompts,
+        "engine_params": {
+            "mm_processor_kwargs": {
+                "min_pixels": 28 * 28,
+                "max_pixels": 1280 * 28 * 28,
+                "fps": 1,
+            },
+            "limit_mm_per_prompt": {
+                "image": {"count": 1, "width": 160, "height": 160},
+                "video": {"count": 0, "num_frames": 32, "width": 640, "height": 640},
+            },
         },
-        limit_mm_per_prompt={
-            "image": {"count": 1, "width": 160, "height": 160},
-            "video": {"count": 0, "num_frames": 32, "width": 640, "height": 640},
-        },
-        hf_overrides=None,
-    )
+    }
 
+def run_qwen2_5_vl(questions: list[str], modality: str) -> dict:
     if modality == "image":
         placeholder = "<|image_pad|>"
     elif modality == "video":
@@ -133,11 +91,21 @@ def run_qwen2_5_vl(questions: list[str], modality: str) -> ModelRequestData:
         for question in questions
     ]
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
-
+    return {
+        "model": "Qwen/Qwen2.5-VL-3B-Instruct",
+        "prompts": prompts,
+        "engine_params": {
+            "mm_processor_kwargs": {
+                "min_pixels": 28 * 28,
+                "max_pixels": 1280 * 28 * 28,
+                "fps": 1,
+            },
+            "limit_mm_per_prompt": {
+                "image": {"count": 1, "width": 160, "height": 160},
+                "video": {"count": 0, "num_frames": 32, "width": 640, "height": 640},
+            },
+        },
+    }
 
 MODEL_MAP = {
     "qwen3_vl": run_qwen3_vl,
@@ -145,33 +113,36 @@ MODEL_MAP = {
     "qwen2_5_vl": run_qwen2_5_vl,
 }
 
+def build_engine_params(args) -> dict:
+    return {
+        "max_model_len": args.max_model_len,
+        "max_num_seqs": args.max_num_seqs,
+        "tensor_parallel_size": args.tp_size,
+        "enforce_eager": True,
+        "async_scheduling": False,
+        "enable_prefix_caching": False,
+        "trust_remote_code": True,
+        "gpu_memory_utilization": 0.9,
+    }
 
 def main(args):
     if args.model_type not in MODEL_MAP:
         raise ValueError(f"Unsupported model_type: {args.model_type}")
 
-    req_data = MODEL_MAP[args.model_type](
-        [args.question],
-        args.modality,
-    )
+    req_data = MODEL_MAP[args.model_type]([args.question], args.modality)
 
-    engine_args = asdict(req_data.engine_args)
-    engine_args["tensor_parallel_size"] = args.tp_size
-    engine_args["enforce_eager"] = True
-    engine_args["async_scheduling"] = False
-    engine_args["enable_prefix_caching"] = False
-    engine_args["model_impl"] = args.model_impl
-    engine_args["trust_remote_code"] = True
-    engine_args["gpu_memory_utilization"] = 0.9
+    engine_params = build_engine_params(args)
+    engine_params["model"] = req_data["model"]
+    engine_params.update(req_data.get("engine_params", {}))
 
-    llm = LLM(
-        **engine_args,
-    )
+    prompts = req_data["prompts"]
+
+    llm = LLM(**engine_params)
 
     image = Image.open(args.image_path)
 
     inputs = {
-        "prompt": req_data.prompts[0],
+        "prompt": prompts[0],
         "multi_modal_data": {
             args.modality: [image],
         },
@@ -180,7 +151,7 @@ def main(args):
     outputs = llm.generate(
         inputs,
         sampling_params=SamplingParams(
-            temperature=0.0,
+            temperature=args.temperature,
             max_tokens=args.gen_len,
         ),
     )
