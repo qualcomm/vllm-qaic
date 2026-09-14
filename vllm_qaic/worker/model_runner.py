@@ -53,6 +53,7 @@ from vllm.v1.utils import record_function_or_nullcontext
 from vllm.v1.worker.gpu_input_batch import InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm_qaic import envs
+from vllm_qaic.utils.qaic_utils import compute_max_decode_tokens
 
 try:
     import torch_qaic.profile as qaic_profile
@@ -521,11 +522,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
             [] for _ in range(vllm_config.scheduler_config.max_num_seqs)
         ]
         self.num_decode_tokens = 0
-        self.max_decode_tokens = 1 + self.num_spec_tokens
-        # DFlash emits block_size logits/step (not 1+K); must match QaicCausalLM.
-        # Public num_speculative_tokens is block_size - 1, so block_size = K + 1.
-        if self.speculative_config and self.speculative_config.method == "dflash":
-            self.max_decode_tokens = self.num_spec_tokens + 1
+        self.max_decode_tokens = compute_max_decode_tokens(self.speculative_config)
         # Variable-K decode specializations: for ngram/suffix we compile two
         # kernels (K=0 and K=max_k) and select the cheapest one each step.
         _method = self.speculative_config.method if self.speculative_config else None

@@ -12,9 +12,17 @@ import regex as re
 from vllm_qaic.logger import init_logger
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import SpeculativeConfig, VllmConfig
 
 logger = init_logger(__name__)
+
+
+def compute_max_decode_tokens(
+    speculative_config: "SpeculativeConfig | None",
+) -> int:
+    if speculative_config is None:
+        return 1
+    return 1 + speculative_config.num_speculative_tokens
 
 
 def _clean_config(
