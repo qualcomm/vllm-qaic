@@ -25,6 +25,7 @@ Status of vLLM features on Qualcomm Cloud AI hardware.
 | N-gram | ✅ | ❌ | |
 | Suffix | ✅ | ❌ | |
 | Draft model | ✅ | ❌ | Separate DLM on same device |
+| DFlash (block-diffusion draft) | ✅ | ❌ | Separate DLM |
 | **Advanced Features** | | | |
 | LoRA adapters | ✅ | ❌ | Hot-swap adapters |
 | Disaggregated serving | ✅ | ❌ | xEyPzD prefill/decode split |
