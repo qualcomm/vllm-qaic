@@ -33,37 +33,48 @@ class QAicMRotaryEmbedding(MRotaryEmbedding):
         assert positions.ndim in (1, 2)
         assert key is not None
 
-        self._match_cos_sin_cache_dtype(query)
+        cos_sin_cache = self._match_cos_sin_cache_dtype(query)
 
         # ------------------------------------------------------------------
-        # Interleaved rotation style (is_neox_style=False): the QAIC
-        # mrotary_embedding kernel and its eager fallback only support
-        # neox-style (first-half / second-half split). Fall back to the
-        # parent's pure-PyTorch implementation which handles both styles.
+        # Assemble cos/sin in PyTorch, but route the rotation itself through
+        # ApplyRotaryEmb.forward_oot so it still reaches
+        # torch.ops.qaic.rotary_embedding instead of falling all the way back
+        # to the PyTorch decomposition.
         # ------------------------------------------------------------------
-        if not self.is_neox_style:
-            return self.forward_native(positions, query, key, offsets)
-
-        # ------------------------------------------------------------------
-        # Interleaved 3D positions: use the original path.
-        # Compute cos/sin on CPU (apply_interleaved_rope assembles them from
-        # the 3 T/H/W rows), then apply RoPE head-by-head via
-        # torch.ops.qaic.rotary_embedding.
-        # The fused mrotary_embedding op only supports non-interleaved assembly.
-        # ------------------------------------------------------------------
-        if positions.ndim == 2 and self.mrope_interleaved:
-            assert self.mrope_section
+        if not self.is_neox_style or (positions.ndim == 2 and self.mrope_interleaved):
             num_tokens = positions.shape[-1]
-            cos_sin = self.cos_sin_cache[positions]  # [3, num_tokens, rotary_dim]
-            cos, sin = cos_sin.chunk(2, dim=-1)  # each [3, num_tokens, half]
-            cos = apply_interleaved_rope(cos, self.mrope_section)  # [num_tokens, half]
-            sin = apply_interleaved_rope(sin, self.mrope_section)  # [num_tokens, half]
+            # [num_tokens, rotary_dim] for 1D positions,
+            # [3, num_tokens, rotary_dim] for 3D (T/H/W) positions.
+            cos_sin = cos_sin_cache[positions]
+            cos, sin = cos_sin.chunk(2, dim=-1)
+            if positions.ndim == 2:
+                # Collapse the leading T/H/W axis: each frequency band takes
+                # its values from one of the 3 rows, giving [num_tokens, half].
+                assert self.mrope_section
+                if self.mrope_interleaved:
+                    cos = apply_interleaved_rope(cos, self.mrope_section)
+                    sin = apply_interleaved_rope(sin, self.mrope_section)
+                else:
+                    cos = torch.cat(
+                        [
+                            m[i]
+                            for i, m in enumerate(cos.split(self.mrope_section, dim=-1))
+                        ],
+                        dim=-1,
+                    )
+                    sin = torch.cat(
+                        [
+                            m[i]
+                            for i, m in enumerate(sin.split(self.mrope_section, dim=-1))
+                        ],
+                        dim=-1,
+                    )
 
             query_shape = query.shape
             query = query.view(num_tokens, -1, self.head_size)
             query_rot = query[..., : self.rotary_dim]
             query_pass = query[..., self.rotary_dim :]
-            query_rot = torch.ops.qaic.rotary_embedding(
+            query_rot = self.apply_rotary_emb.forward_oot(
                 query_rot, cos, sin, self.is_neox_style
             )
             query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
@@ -72,13 +83,12 @@ class QAicMRotaryEmbedding(MRotaryEmbedding):
             key = key.view(num_tokens, -1, self.head_size)
             key_rot = key[..., : self.rotary_dim]
             key_pass = key[..., self.rotary_dim :]
-            key_rot = torch.ops.qaic.rotary_embedding(
+            key_rot = self.apply_rotary_emb.forward_oot(
                 key_rot, cos, sin, self.is_neox_style
             )
             key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
 
             return query, key
-
         # ------------------------------------------------------------------
         # Non-interleaved path: use the fused mrotary_embedding op.
         #
@@ -107,7 +117,7 @@ class QAicMRotaryEmbedding(MRotaryEmbedding):
             query,
             key,
             positions,
-            self.cos_sin_cache,
+            cos_sin_cache,
             num_axes,
             mrope_section_val[0],
             mrope_section_val[1],
