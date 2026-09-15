@@ -148,6 +148,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self.ctx_len = model_config.max_model_len
         self.decode_bsz = vllm_config.scheduler_config.max_num_seqs
         self.full_batch_size = vllm_config.scheduler_config.max_num_seqs
+        self.paged_attention = bool(vllm_config.cache_config.enable_prefix_caching)
+        self._cache_config = vllm_config.cache_config
         self.prefill_bsz = 1
         self.lora_mode = bool(vllm_config.lora_config)
         self.last_decode = False
@@ -219,6 +221,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         prefill_is_partial: list[bool] | None = None,
         prefill_cum_sum: np.ndarray | None = None,
         logits: np.ndarray | None = None,
+        block_table: np.ndarray | None = None,
+        slot_id: np.ndarray | None = None,
         num_prompt_tokens_prefill: np.ndarray | None = None,
     ) -> Queue | None:
         if self.is_pooling_model and not self.is_multimodal_model:
@@ -241,6 +245,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     callback,
                     mm_kwargs_list,
                     logits,
+                    block_table,
+                    slot_id,
                     num_prompt_tokens_prefill,
                 )
                 return pending_prefill_exec_queue
@@ -259,6 +265,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                         logits,
                         lora_ids,
                         mm_kwargs_list,
+                        block_table,
+                        slot_id,
                     )
                     return pending_prefill_exec_queue
                 else:
@@ -268,7 +276,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                         batch_indices,
                         logits,
                         lora_ids,
-                        callback=callback,
+                        block_table,
+                        slot_id,
                     )
         return None
 
@@ -363,6 +372,17 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self.stages: int = stages if stages is not None else 1
         self.disagg_serving_en = kv_transfer_role is not None
         self.disagg_producer_en = kv_transfer_role == "kv_producer"
+        self.num_gpu_blocks_per_batch = cdiv(
+            self.ctx_len, self._cache_config.block_size
+        )
+        if self.paged_attention:
+            self.num_gpu_blocks = (
+                self._cache_config.num_gpu_blocks_override
+                if self._cache_config.num_gpu_blocks_override
+                else cdiv(self.ctx_len, self._cache_config.block_size)
+            )
+        else:
+            self.num_gpu_blocks = self.decode_bsz
 
         logger.info("Loading QPC...")
         logger.info(
@@ -376,10 +396,20 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             self.stages = 1
         from .qaic_session_np import QAICInferenceSession
 
+        # qaicrt uses virtual device IDs (0-based within QAIC_VISIBLE_DEVICES).
+        # Translate physical device IDs to virtual IDs before creating the session.
+        _visible = os.environ.get(current_platform.device_control_env_var)
+        if _visible is not None:
+            _visible_ids = [int(x) for x in _visible.replace(",", " ").split()]
+            _phys_to_virt = {phys: virt for virt, phys in enumerate(_visible_ids)}
+            session_device_ids = [_phys_to_virt.get(d, d) for d in device_id]
+        else:
+            session_device_ids = device_id
+
         self.session = QAICInferenceSession(
             qpc_path,
             full_batch_size=self.full_batch_size,
-            device_ids=device_id,
+            device_ids=session_device_ids,
             stages=self.stages,
             cluster_id=cluster_id,
             use_async_scheduling=self.use_async_scheduling,
@@ -392,6 +422,14 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self.logits_dtype = (
             np.dtype(_logits_info[1]) if _logits_info is not None else np.float32
         )
+
+        if "block_table" in self.session.input_names:
+            self.decode_batch_inputs["block_table"] = np.full(
+                (self.decode_bsz, self.num_gpu_blocks_per_batch), -1, dtype=np.int64
+            )
+            self.decode_batch_inputs["slot_id"] = np.full(
+                (self.decode_bsz,), 0, dtype=np.int64
+            )
 
         e = time.perf_counter() - s
         logger.info("Successfully loaded QPC in %s secs", e)
@@ -556,6 +594,25 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 )
         return
 
+    def _inject_pa_prefill_inputs(
+        self,
+        chunk_inputs: dict,
+        batch_idx: int,
+        block_table: np.ndarray | None,
+        slot_id: np.ndarray | None,
+        req_index: int,
+    ) -> None:
+        if not self.paged_attention:
+            return
+        if block_table is not None and slot_id is not None:
+            chunk_inputs["block_table"] = block_table[
+                req_index : req_index + 1
+            ].reshape(1, self.num_gpu_blocks_per_batch)
+            chunk_inputs["slot_id"] = slot_id[req_index : req_index + 1]
+        else:
+            chunk_inputs["block_table"] = batch_idx
+            chunk_inputs["slot_id"] = 0
+
     def _run_pipeline_prefill(
         self,
         input_ids: np.ndarray,
@@ -569,6 +626,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         callback: Callable | None = None,
         mm_kwargs_list: list[dict] | None = None,
         logits: np.ndarray | None = None,
+        block_table: np.ndarray | None = None,
+        slot_id: np.ndarray | None = None,
         num_prompt_tokens_prefill: np.ndarray | None = None,
     ):
         pending_exec_count = 0  # in-flight executions in current batch
@@ -667,6 +726,10 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     if logits is not None:
                         chunk_inputs["logits"] = logits[index : index + 1]
 
+                self._inject_pa_prefill_inputs(
+                    chunk_inputs, batch_index, block_table, slot_id, index
+                )
+
                 if pending_exec_count == self.session.prefill_num_execObj:
                     if callback:
                         callback()
@@ -714,6 +777,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         logits: np.ndarray,
         lora_ids: np.ndarray | None = None,
         mm_kwargs_list: list[dict] | None = None,
+        block_table: np.ndarray | None = None,
+        slot_id: np.ndarray | None = None,
     ) -> np.ndarray:
         # perform prefill (only prefill_bsz=1 is supported)
         pending_exec_count = 0  # in-flight executions in current batch
@@ -756,6 +821,9 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 chunk_inputs["lora_ids"] = lora_index
             if mm_kwargs_list and (mm_kwargs := mm_kwargs_list[i]):
                 chunk_inputs.update(mm_kwargs)
+            self._inject_pa_prefill_inputs(
+                chunk_inputs, batch_indices[i], block_table, slot_id, i
+            )
             # chunk the request
             n_chunks: int = iids.shape[-1] // self.prefill_seq_len
 
@@ -832,6 +900,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         batch_indices: np.ndarray,
         logits: np.ndarray,
         lora_ids: np.ndarray | None = None,
+        block_table: np.ndarray | None = None,
+        slot_id: np.ndarray | None = None,
         callback: Callable | None = None,
     ) -> None:
         # Use the per-step K set by QaicModelRunner.  Falls back to max K so
@@ -865,6 +935,19 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             batch_inputs["lora_ids"][:num_decodes] = lora_ids.reshape(num_decodes, 1)
             if num_decodes < self.decode_bsz:
                 batch_inputs["lora_ids"][num_decodes:] = -1
+
+        if self.paged_attention:
+            if block_table is not None and slot_id is not None:
+                batch_inputs["block_table"][:num_decodes] = block_table[:num_decodes]
+                batch_inputs["slot_id"][:num_decodes] = slot_id[:num_decodes]
+                if num_decodes < self.decode_bsz:
+                    batch_inputs["block_table"][num_decodes:] = -1
+                    batch_inputs["slot_id"][num_decodes:] = 0
+            else:
+                batch_inputs["block_table"][:num_decodes] = batch_indices
+                if num_decodes < self.decode_bsz:
+                    batch_inputs["block_table"][num_decodes:] = -1
+                    batch_inputs["slot_id"][num_decodes:] = 0
 
         # For spec-decode target: include num_logits_to_keep in batch_inputs
         # so the hardware knows how many token positions to compute logits for.
@@ -1899,10 +1982,22 @@ def _get_qaic_compile_config(
         from qaicrt import QStatus
 
         if cfg["device_group"] is not None:
+            # qaicrt uses virtual device IDs (0-based within QAIC_VISIBLE_DEVICES).
+            # Physical device IDs from device_group must be translated to virtual
+            # IDs before calling getResourceInfo.
+            _visible = os.environ.get(current_platform.device_control_env_var)
+            if _visible is not None:
+                _visible_ids = [int(x) for x in _visible.replace(",", " ").split()]
+                _phys_to_virt = {phys: virt for virt, phys in enumerate(_visible_ids)}
+            else:
+                _phys_to_virt = {}
             for id in cfg["device_group"]:
-                _nsp_info = qaic_util().getResourceInfo(id)
+                virt_id = _phys_to_virt.get(id, id)
+                _nsp_info = qaic_util().getResourceInfo(virt_id)
                 if _nsp_info[0] != QStatus.QS_SUCCESS:
-                    raise ValueError(f"device_id {id} is not available !!")
+                    raise ValueError(
+                        f"device_id {id} (virtual {virt_id}) is not available !!"
+                    )
                 _hw_num_cores = min(_hw_num_cores, _nsp_info[1].nspTotal)
         cfg["num_cores"] = _hw_num_cores
         # Applicable for draft-target spd scheme
@@ -2019,10 +2114,10 @@ def _get_qaic_compile_config(
         if qaic_config is None:
             qaic_config = {}
         qaic_config["speculative_model_type"] = speculative_model_type
+    if qaic_config is None:
+        qaic_config = dict()
     # On Device Sampling
     if cfg.get("aic_include_sampler") is not None:
-        if qaic_config is None:
-            qaic_config = dict()
         qaic_config["include_sampler"] = cfg["aic_include_sampler"]
         if cfg.get("aic_return_pdfs") is not None:
             qaic_config["return_pdfs"] = cfg["aic_return_pdfs"]
@@ -2053,8 +2148,6 @@ def _get_qaic_compile_config(
         or len(cfg.get("comp_ctx_lengths_prefill", [])) > 0
         or len(cfg.get("comp_ctx_lengths_decode", [])) > 0
     ):
-        if qaic_config is None:
-            qaic_config = dict()
         qaic_config["ccl_enabled"] = True
         if not cfg.pop("ccl_enabled", False):
             cfg["comp_ctx_lengths_prefill"] = (
@@ -2067,6 +2160,31 @@ def _get_qaic_compile_config(
                 if (len(cfg.get("comp_ctx_lengths_decode", [])) == 0)
                 else cfg.get("comp_ctx_lengths_decode")
             )
+    # For disaggregated serving, the KV cache block size must match the
+    # prefill chunk size actually compiled into the QPC (post-override), not
+    # just the scheduler's long_prefill_token_threshold, so KV blocks handed
+    # off between producer and consumer stay aligned. Written here, before
+    # get_kv_cache_spec() is queried, so the updated value is picked up when
+    # the KV cache is sized.
+
+    if vllm_config.cache_config.enable_prefix_caching:
+        # Add num_kv_blocks through qaic_config
+        if vllm_config.kv_transfer_config:
+            kv_block_size = cfg.pop("kv_block_size")
+            num_kv_blocks = cdiv(vllm_config.model_config.max_model_len, kv_block_size)
+            vllm_config.cache_config.block_size = kv_block_size
+        else:
+            num_kv_blocks = cdiv(
+                vllm_config.model_config.max_model_len, cfg["prefill_seq_len"]
+            )
+            vllm_config.cache_config.block_size = cfg["prefill_seq_len"]
+        logger.info("Num KV Blocks: %s", num_kv_blocks)
+        qaic_config["num_kv_blocks"] = num_kv_blocks
+        qaic_config["blocking_mode"] = "kv_paged"
+        qaic_config["enable_blocking"] = True
+    else:
+        qaic_config["blocking_mode"] = ""
+        qaic_config["enable_blocking"] = False
     qpc_path = cfg.pop("qpc_path")
     if qpc_path and kv_offload and len(qpc_path.split(":")) > 1:
         assert qpc_idx is not None
