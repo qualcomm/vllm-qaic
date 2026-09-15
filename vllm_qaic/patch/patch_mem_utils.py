@@ -21,9 +21,24 @@ from contextlib import contextmanager
 from typing import Generator
 
 import psutil
+import torch
 import vllm.utils.mem_utils
 from vllm.platforms import current_platform
 from vllm.utils.mem_utils import MemoryProfilingResult, MemorySnapshot
+
+
+def _qaic_post_init(self) -> None:
+    if self.device is None:
+        device_fn = current_platform.current_device
+        if device_fn is not None:
+            self.device_ = torch.device(device_fn())
+        else:
+            self.device_ = torch.device("cpu")
+    else:
+        self.device_ = torch.device(self.device)
+
+    if self.auto_measure:
+        self.measure()
 
 
 def _qaic_measure(self) -> None:
@@ -34,11 +49,22 @@ def _qaic_measure(self) -> None:
     # After `torch.cuda.reset_peak_memory_stats()`,
     # `torch.cuda.memory_reserved()` will keep growing, and only shrink
     # when we call `torch.cuda.empty_cache()` or OOM happens.
-    self.torch_peak = current_platform.memory_stats(device).get(
-        "allocated_bytes.all.peak", 0
-    )
+    memory_stats = current_platform.memory_stats
+    if memory_stats is not None:
+        stats = memory_stats(device)
+        self.torch_peak = stats.get("allocated_bytes.all.peak", 0)
+        self.torch_allocated = stats.get("allocated_bytes.all.current", 0)
+    else:
+        self.torch_peak = 0
+        self.torch_allocated = 0
 
-    self.free_memory, self.total_memory = current_platform.mem_get_info(device)
+    mem_get_info = current_platform.mem_get_info
+    if mem_get_info is not None:
+        self.free_memory, self.total_memory = mem_get_info(device)
+    else:
+        vmem = psutil.virtual_memory()
+        self.free_memory, self.total_memory = vmem.available, vmem.total
+
     shared_sysmem_device_mem_sms = ((8, 7), (11, 0), (12, 1))  # Orin, Thor, Spark
     if (
         current_platform.is_cuda()
@@ -64,7 +90,11 @@ def _qaic_measure(self) -> None:
     # torch.cuda.memory_reserved() is how many bytes
     # PyTorch gets from cuda (by calling cudaMalloc, etc.)
     # this is used to measure the non-torch memory usage
-    self.torch_memory = current_platform.memory_reserved(device)
+    memory_reserved = current_platform.memory_reserved
+    if memory_reserved is not None:
+        self.torch_memory = memory_reserved(device)
+    else:
+        self.torch_memory = 0
 
     self.non_torch_memory = self.cuda_memory - self.torch_memory
     self.timestamp = time.time()
@@ -76,8 +106,13 @@ def _qaic_memory_profiling(
     weights_memory: int = 0,
 ) -> Generator[MemoryProfilingResult, None, None]:
     gc.collect()
-    current_platform.empty_cache()
-    current_platform.reset_peak_memory_stats(baseline_snapshot.device_)
+    empty_cache = current_platform.empty_cache
+    if empty_cache is not None:
+        empty_cache()
+
+    reset_peak_memory_stats = current_platform.reset_peak_memory_stats
+    if reset_peak_memory_stats is not None:
+        reset_peak_memory_stats(baseline_snapshot.device_)
 
     result = MemoryProfilingResult(
         before_create=baseline_snapshot,
@@ -88,7 +123,8 @@ def _qaic_memory_profiling(
     yield result
 
     gc.collect()
-    current_platform.empty_cache()
+    if empty_cache is not None:
+        empty_cache()
     result.after_profile.measure()
 
     diff_profile = result.after_profile - result.before_profile
@@ -104,5 +140,6 @@ def _qaic_memory_profiling(
     )
 
 
+MemorySnapshot.__post_init__ = _qaic_post_init
 MemorySnapshot.measure = _qaic_measure
 vllm.utils.mem_utils.memory_profiling = _qaic_memory_profiling
