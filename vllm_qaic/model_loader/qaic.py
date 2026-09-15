@@ -1385,6 +1385,16 @@ def _derive_dflash_config(vllm_config) -> None:
             f"DFlash requires num_speculative_tokens == DLM block_size - 1, got "
             f"{spec_config.num_speculative_tokens} and block_size {block_size}."
         )
+    # Validated here (before the TLM compiles) rather than in the DLM proposer.
+    tlm_prefill_seq_len = int(
+        (additional_config.get("override_qaic_config") or {}).get("prefill_seq_len", 0)
+    )
+    if tlm_prefill_seq_len <= 0 or tlm_prefill_seq_len % block_size != 0:
+        raise ValueError(
+            "DFlash requires a TLM prefill_seq_len that is a positive multiple of "
+            f"block_size; got prefill_seq_len={tlm_prefill_seq_len}, "
+            f"block_size={block_size}."
+        )
     additional_config["dflash_cfg"] = {
         "block_size": block_size,
         # TLM captures hidden states after the layer fires, so ids are +1.
