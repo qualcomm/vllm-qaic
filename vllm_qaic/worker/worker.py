@@ -202,6 +202,7 @@ class QaicWorkerPyt(QaicWorker):
             is_driver_worker=is_driver_worker,
         )
         assert self.model_config.enforce_eager
+        self.use_v2_model_runner = False
         self.parallel_config.disable_custom_all_reduce = True
         self.profiler_config = vllm_config.profiler_config
 
