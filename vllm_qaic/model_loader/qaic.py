@@ -90,7 +90,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         pooler_config = vllm_config.model_config.pooler_config
         self._pooler = None
         self.is_pooling_model = False
-        self.task = None
         if vllm_config.model_config.runner_type == "pooling":
             self.is_pooling_model = True
             _token_classify_pooler = pooler_for_token_classify(
@@ -143,11 +142,16 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             assert "prefill_seq_len" in override_qaic_config, (
                 "Prefill seq_len missing in override_qaic_config"
             )
-            self.prefill_seq_len = override_qaic_config["prefill_seq_len"] if isinstance(override_qaic_config["prefill_seq_len"], (list, tuple)) else int(override_qaic_config["prefill_seq_len"])
+            self.prefill_seq_len = (
+                override_qaic_config["prefill_seq_len"]
+                if isinstance(override_qaic_config["prefill_seq_len"], (list, tuple))
+                else int(override_qaic_config["prefill_seq_len"])
+            )
 
         self.ctx_len = model_config.max_model_len
         self.decode_bsz = vllm_config.scheduler_config.max_num_seqs
         self.full_batch_size = vllm_config.scheduler_config.max_num_seqs
+        self.paged_attention = bool(vllm_config.cache_config.enable_prefix_caching)
         self.prefill_bsz = 1
         self.lora_mode = bool(vllm_config.lora_config)
         self.last_decode = False
@@ -156,6 +160,11 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         if vllm_config.speculative_config:
             self.num_spec_tokens = vllm_config.speculative_config.num_speculative_tokens
             self.max_decode_tokens += self.num_spec_tokens
+        self._kv_connector_name = (
+            vllm_config.kv_transfer_config.kv_connector
+            if vllm_config.kv_transfer_config
+            else None
+        )
 
         self.num_logits_to_keep: int | None = None
         self.decode_logits: dict[str, np.ndarray] | None = None
@@ -204,6 +213,9 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self.uses_mrope = model_config.uses_mrope
         self.is_vision_encoder = False
         self.is_multimodal_model = vllm_config.model_config.is_multimodal_model
+
+    def _uses_torch_view_kv_connector(self):
+        return self._kv_connector_name in ["NixlConnector", "MooncakeConnector"]
 
     def forward(
         self,
@@ -1059,7 +1071,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         """assert prefill and decode work by running dummy inputs
 
         also creates attention_mask and decode input buffers
-        that will be used throughout the lifeycle of worker
+        that will be used throughout the lifecycle of worker
         """
 
         # Prepare dummy run inputs
@@ -1178,6 +1190,15 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
 
             self.decode_single_inputs = decode_single_inputs
             self.decode_batch_inputs = decode_batch_inputs
+            if "block_table" in self.session.input_names:
+                self.decode_batch_inputs["block_table"] = np.full(
+                    (self.decode_bsz, self.num_gpu_blocks_per_batch),
+                    -1,
+                    dtype=np.int64,
+                )
+                self.decode_batch_inputs["slot_id"] = np.full(
+                    (self.decode_bsz,), 0, dtype=np.int64
+                )
             # Re-inject any mm kwargs (e.g. image_idx) that _load_multimodal()
             # added to decode_batch_inputs before this dict was replaced.
             if getattr(self, "default_mm_kwargs", None):
@@ -1261,9 +1282,14 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 bidx = 0
                 input_kv_buffers: dict[str, Any] = {}
                 KvCache_buff = []
+                use_torch_view_kv = self._uses_torch_view_kv_connector()
                 for kv_shape, kv_type, _ in self.kv_cache_info:
-                    _kv_shape = (self.decode_bsz,) + kv_shape[1:]
-                    KvCache_buff.append(np.empty(shape=kv_shape, dtype=kv_type))
+                    _kv_shape = (
+                        (self.decode_bsz,) + kv_shape[1:]
+                        if use_torch_view_kv
+                        else kv_shape
+                    )
+                    KvCache_buff.append(np.empty(shape=_kv_shape, dtype=kv_type))
 
                 decode_logits_shape = (
                     (self.decode_bsz, 1, self.vocab_size)
