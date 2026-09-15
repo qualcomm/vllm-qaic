@@ -121,13 +121,13 @@ docker run --rm -it --network host \
 
 ## DFlash Speculative Decoding
 
-DFlash uses a block-diffusion draft LM (DLM) that proposes an entire block of candidate tokens per step in a single batched forward pass, conditioned on the target model's (TLM) hidden states. The DLM's `block_size` sets `num_speculative_tokens`:
+DFlash uses a block-diffusion draft LM (DLM) that proposes an entire block of candidate tokens per step in a single batched forward pass, conditioned on the target model's (TLM) hidden states. The DLM's `block_size` sets `num_speculative_tokens` (`= block_size - 1`):
 
 ```python
 from vllm import LLM, SamplingParams
 
 device_group = [0, 1, 2, 3]
-block_size = 16  # DFlash DLM block_size == num_speculative_tokens
+block_size = 16  # DFlash DLM block_size (num_speculative_tokens = block_size - 1)
 
 llm = LLM(
     model="Qwen/Qwen3-4B",
@@ -157,7 +157,7 @@ llm = LLM(
     speculative_config={
         "method": "dflash",
         "model": "z-lab/Qwen3-4B-DFlash-b16",
-        "num_speculative_tokens": block_size,
+        "num_speculative_tokens": block_size - 1,
     },
 )
 ```
@@ -177,7 +177,7 @@ docker run --rm -it --network host \
   --max-seq-len-to-capture 128 \
   --quantization mxfp6 \
   --kv-cache-dtype mxint8 \
-  --speculative-config '{"method":"dflash","model":"z-lab/Qwen3-4B-DFlash-b16","num_speculative_tokens":16}' \
+  --speculative-config '{"method":"dflash","model":"z-lab/Qwen3-4B-DFlash-b16","num_speculative_tokens":15}' \
   --additional-config '{"override_qaic_config":{"device_group":[0,1,2,3],"num_cores":8,"prefill_seq_len":128,"mxfp6_matmul":true,"mxint8_kv_cache":true,"mos":1},"draft_override_qaic_config":{"device_group":[0,1,2,3],"num_cores":8,"prefill_seq_len":16,"mxfp6_matmul":true,"mxint8_kv_cache":true,"mos":1}}'
 ```
 
