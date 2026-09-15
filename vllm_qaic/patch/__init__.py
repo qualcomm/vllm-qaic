@@ -71,6 +71,17 @@
 #       Because vLLM defaults to fork-based subprocesses, patching here (in the
 #       main process before fork) is sufficient.
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#
+# ** 6. File: patch_mooncake_connector.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. vllm.distributed.kv_transfer.kv_connector.v1.mooncake.
+#      mooncake_connector.MooncakeConnectorWorker.__init__
+#    Why:
+#       QAIC should not query torch.accelerator.current_device_index() while
+#       initializing the Mooncake connector worker.
+#    How:
+#       Temporarily make current_device_index() return 0 during worker init.
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # =================
 
 import vllm_qaic.patch.patch_config  # noqa
@@ -80,3 +91,4 @@ import vllm_qaic.patch.patch_rejection_sampler  # noqa
 import vllm_qaic.patch.patch_graph_pickler  # noqa
 import vllm_qaic.patch.patch_mem_utils  # noqa
 import vllm_qaic.patch.patch_block_table  # noqa
+import vllm_qaic.patch.patch_mooncake_connector  # noqa
