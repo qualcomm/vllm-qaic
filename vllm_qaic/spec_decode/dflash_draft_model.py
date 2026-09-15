@@ -103,14 +103,6 @@ class QaicDFlashProposer:
         self._prefill_pending: list[dict] = []
 
     def load_model(self) -> None:
-        assert self.tlm_prefill_seq_len > 0 and (
-            self.tlm_prefill_seq_len % self.block_size == 0
-        ), (
-            "DFlash requires a TLM prefill_seq_len that is a positive multiple of "
-            f"block_size; got prefill_seq_len={self.tlm_prefill_seq_len}, "
-            f"block_size={self.block_size}. The runner must set "
-            "drafter.tlm_prefill_seq_len before load_model()."
-        )
         self.num_sub_blocks = self.tlm_prefill_seq_len // self.block_size
         logger.info(
             "Loading DFlash DLM %s (block_size=%d, decode_bsz=%d, "
