@@ -21,6 +21,7 @@ import sys
 import json
 import argparse
 import urllib.request
+from urllib.parse import urlsplit
 from pathlib import Path
 
 RAW_URL = "https://raw.githubusercontent.com/vllm-project/vllm/{ref}/docs/models/supported_models.md"
@@ -38,6 +39,8 @@ def ref_suffix(ref: str) -> str:
 
 def fetch_markdown(ref: str) -> str:
     url = RAW_URL.format(ref=ref)
+    if urlsplit(url).scheme != "https":
+        raise ValueError(f"Refusing to fetch non-https URL: {url}")
     with urllib.request.urlopen(url) as resp:
         return resp.read().decode("utf-8")
 
