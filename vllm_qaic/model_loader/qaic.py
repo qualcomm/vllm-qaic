@@ -134,7 +134,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self.config = config
         self.vocab_size = config.get_text_config().vocab_size
         # `long_prefill_token_threshold` will define prefill chunk length
-        if self.config.model_type == "whisper":
+        if self.config.model_type in ("whisper", "cohere_asr"):
             # Encoder-decoder models have chunked prefill disabled by vllm,
             # but QAIC still requires a prefill sequence length.
             # For whisper, the prefill sequence length is fixed to 1.
@@ -745,6 +745,16 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     (1, self.prefill_seq_len), self.config.decoder_start_token_id
                 )
                 pids = pids[..., : self.prefill_seq_len]
+            elif self.config.model_type == "cohere_asr":
+                bos_token_id = getattr(self.config, "bos_token_id", None)
+                if (
+                    bos_token_id is not None
+                    and iids.size > 1
+                    and iids[0] == bos_token_id
+                ):
+                    iids = iids[1:]
+                    pids = pids[..., 1:]
+                    pids = pids - pids[..., :1]
 
             # create chunk inputs
             chunk_inputs = dict()
@@ -756,6 +766,14 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 chunk_inputs["lora_ids"] = lora_index
             if mm_kwargs_list and (mm_kwargs := mm_kwargs_list[i]):
                 chunk_inputs.update(mm_kwargs)
+            if self.config.model_type == "cohere_asr":
+                # QEff keeps the encoder feature length while decode uses a
+                # one-frame dummy feature tensor. The cross-attention mask is
+                # derived from this original request length.
+                self.default_mm_kwargs["feature_lengths"] = chunk_inputs[
+                    "feature_lengths"
+                ].copy()
+                self.decode_batch_inputs.update(self.default_mm_kwargs)
             # chunk the request
             n_chunks: int = iids.shape[-1] // self.prefill_seq_len
 
@@ -764,6 +782,12 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
 
             prefill_ccl_id = 0
             for chunk in range(n_chunks):
+                if self.config.model_type == "cohere_asr" and chunk > 0:
+                    # Cohere's transcription prefix contains multiple decoder
+                    # tokens. The QPC encoder runs only with the first token;
+                    # its decode specialization reuses retained cross-attention
+                    # state for the remaining prefix tokens.
+                    chunk_inputs.update(self.default_mm_kwargs)
                 lower_idx = int(chunk * self.prefill_seq_len)
                 upper_idx = int((chunk + 1) * self.prefill_seq_len)
                 chunk_inputs["input_ids"] = iids[lower_idx:upper_idx].reshape(
@@ -1685,7 +1709,21 @@ def get_hf_model(
         "seq_classify": QEFFAutoModelForSequenceClassification,
     }
     hf_config = model_config.hf_config
-    if hf_config.model_type in _CONFIG_REGISTRY or not is_json_serializable(hf_config):
+    qeff_trust_remote_code = model_config.trust_remote_code
+    if hf_config.model_type == "cohere_asr":
+        # QEff's Cohere ASR transforms target the native Transformers classes.
+        # Do not replace them with duplicate classes from Hub model code.
+        from transformers import AutoConfig
+
+        hf_config = AutoConfig.from_pretrained(
+            model_config.model,
+            trust_remote_code=False,
+            revision=model_config.revision,
+        )
+        qeff_trust_remote_code = False
+    elif (
+        hf_config.model_type in _CONFIG_REGISTRY or not is_json_serializable(hf_config)
+    ):
         # If vllm uses a custom model config class,
         # convert it back to the transformers config class
         from transformers import AutoConfig
@@ -1710,7 +1748,7 @@ def get_hf_model(
             "continuous_batching", True
         ),
         "qaic_config": qaic_config,
-        "trust_remote_code": model_config.trust_remote_code,
+        "trust_remote_code": qeff_trust_remote_code,
         "revision": model_config.revision,
         "code_revision": model_config.code_revision,
         "attn_implementation": "eager",
@@ -1724,7 +1762,7 @@ def get_hf_model(
 
     model_type = "lora" if lora_config else "default"
     if model_config.is_multimodal_model:
-        if model_config.hf_config.model_type == "whisper":
+        if model_config.hf_config.model_type in ("whisper", "cohere_asr"):
             model_type = "speech"
             del args["kv_offload"]
         elif model_config.hf_config.model_type != "internvl_chat":
