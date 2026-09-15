@@ -2,19 +2,7 @@
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 # ------------------------------------------------------------------
-"""Unit-level regression test for the DFlash decode-side KV-advance-on-skip fix.
-
-Reviewer comment (PR #71): when one request's sequence exceeds
-effective_drafter_max_model_len, the step-wide input_fits_in_drafter gate goes
-False and full draft-proposing is skipped for *every* request that step, not
-just the offending one. Before the fix, QaicDFlashProposer.propose() was only
-ever called when that gate was True, so every other in-decode-phase request's
-DLM KV cache (position_counter) silently fell behind the TLM. This test drives
-QaicDFlashProposer.propose() directly (no QAIC device / QPC needed — the DLM
-forward is replaced by a fake session) to check that a commit=False call still
-advances position_counter for active requests while not offering discarded
-candidates.
-"""
+"""Unit-level regression test for the DFlash decode-side KV-advance-on-skip fix."""
 
 import numpy as np
 import pytest
