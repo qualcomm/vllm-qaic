@@ -13,7 +13,6 @@ This replaces it with a pure PyTorch/numpy equivalent.
 
 import numpy as np
 import torch
-import vllm.v1.worker.block_table
 from vllm.v1.worker.block_table import BlockTable, PAD_SLOT_ID
 
 
@@ -73,9 +72,7 @@ def _qaic_compute_slot_mapping(
         # Calculate slot_mapping
         slot_mapping = block_numbers * self.block_size + block_offsets
         # Write final slots, use -1 for not-local
-        self.slot_mapping.np[: req_indices.shape[0]] = np.where(
-            mask, slot_mapping, -1
-        )
+        self.slot_mapping.np[: req_indices.shape[0]] = np.where(mask, slot_mapping, -1)
     else:
         block_table_indices = (
             req_indices * self.max_num_blocks_per_req + positions_np // self.block_size

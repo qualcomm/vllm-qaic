@@ -21,7 +21,7 @@ def _clean_config(
     cfg: dict[str, Any] | None,
     vllm_config: "VllmConfig | None" = None,
 ) -> dict[str, Any]:
-    update_cfg = {}
+    update_cfg: dict[str, Any] = {}
     if cfg is None:
         return {}
     # compiler args
