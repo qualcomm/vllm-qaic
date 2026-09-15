@@ -2,13 +2,18 @@
 vLLM Qualcomm Cloud AI (QAIC) Plugin
 </h1>
 
-
 <p align="center">
 | <a href="https://www.qualcomm.com/artificial-intelligence/data-center"><b>Qualcomm Data Center AI</b></a> | <a href="https://qualcomm.github.io/vllm-qaic/"><b>Documentation</b></a> | <a href="https://quic.github.io/cloud-ai-sdk-pages/"><b>User Guide</b></a> | <a href="docs/installation.md"><b>Installation Guide</b></a> |
 </p>
 
 > **This branch is under active development — plugin rebase to vLLM v0.23.0.**
+>
 > This is not a stable release.
+>
+> **Features not yet ported:**
+>
+> - LoRaX adapter serving
+>
 > For production use, please switch to the `main` branch or `release/v0.15.0`.
 
 ---
@@ -50,7 +55,7 @@ Please use the following recommended versions to get started quickly:
 
 | vllm-qaic version | vLLM version | Apps SDK version | Branch | Release type | Doc |
 |---|---|---|---|---|---|
-| v0.15.0.dev0 | v0.15.0 | >= 1.22.0 | [main](https://github.com/qualcomm/vllm-qaic/tree/main)  [v0.15.0](https://github.com/qualcomm/vllm-qaic/tree/release/v0.15.0)| Pre-release | See [QuickStart](#installation) and [Installation Guide](docs/installation.md) for more details |
+| v0.15.0.dev0 | v0.15.0 | >= 1.22.0 | [main](https://github.com/qualcomm/vllm-qaic/tree/main) | Pre-release | See [QuickStart](#installation) and [Installation Guide](docs/installation.md) for more details |
 | v0.23.0.dev0 | v0.23.0 | >= 1.22.0 | [v0.23.0](https://github.com/qualcomm/vllm-qaic/tree/v0.23.0) | Active Development | SpD and LoRaX not yet ported |
 
 ## Branches
@@ -161,10 +166,10 @@ PLease refer to [CONTRIBUTING](CONTRIBUTING.md) on how to submit changes.
 
 ## Getting in Contact
 
-Please report an issue or open a discussion as appropiate for your usecase.
+Please report an issue or open a discussion as appropriate for your usecase.
 
-* [Report an Issue on GitHub](../../issues)
-* [Open a Discussion on GitHub](../../discussions)
+- [Report an Issue on GitHub](../../issues)
+- [Open a Discussion on GitHub](../../discussions)
 
 ## License
 
