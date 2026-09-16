@@ -6,6 +6,19 @@
 ruff
 isort
 pytest
+anyio
+datasets
+evaluate
+nltk
+pytest-asyncio
+pytest-tornasync
+pytest-trio
+pytest-twisted
+rich
+rouge_score
+twisted
+tblib
+onnx_ir==0.2.1
 
 # type checking
 mypy==1.11.1

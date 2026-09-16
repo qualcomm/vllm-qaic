@@ -8,8 +8,8 @@
 # Stage overview
 # --------------
 #   pyt-base   Shared foundation: system packages, uv venv, build tools,
-#              torch + torch_qaic (SDK wheel), vllm deps + vllm.
-#              Can be built and pushed as a standalone image.
+#              torch + torch_qaic (SDK wheel), rust frontend (optional),
+#              vllm deps + vllm. Can be built and pushed as a standalone image.
 #
 #   release    FROM pyt-base. Installs vllm-qaic non-editable from a
 #              published git ref (tag or branch). Fully self-contained.
@@ -31,6 +31,8 @@
 #   - vllm_qaic itself compiles Hexagon kernel C++ extensions — build-essential
 #     and cmake are required; QAIC_DEVICE_ARCH controls which sources compile
 #   - No triton-cpu step (PYT mode has no equivalent)
+#   - Rust frontend build (VLLM_BUILD_RUST) is shared with Dockerfile.aot —
+#     it's independent of the AOT/PYT backend split
 #   - TORCH_QAIC_INSTALLED is not set (auto-detected = 1 via torch_qaic import)
 #
 # Build commands
@@ -60,6 +62,23 @@
 #     --build-arg PYTHON_VERSION=3.11 --build-arg QAIC_DEVICE_ARCH=v81 \
 #     --output type=local,dest=./dist/pyt/py311 .
 #
+#   # Wheel with an overridden filename:
+#   docker buildx build --target wheel -f docker/Dockerfile.pyt \
+#     --build-arg PYTHON_VERSION=3.11 \
+#     --build-arg WHEEL_NAME=vllm_qaic-1.22.0+pyt-cp311-cp311-linux_x86_64.whl \
+#     --output type=local,dest=./dist/pyt/py311 .
+#
+#   # Any target — also build vllm's experimental Rust OpenAI frontend
+#   # (vllm-rs). See docs/installation.md for known caveats.
+#   docker build --target release -f docker/Dockerfile.pyt \
+#     --build-arg VLLM_BUILD_RUST=1 -t vllm-qaic-pyt:1.22-rust .
+#
+#   # Rust toolchain from a mirror / internal registry instead of Docker Hub:
+#   docker build --target release -f docker/Dockerfile.pyt \
+#     --build-arg VLLM_BUILD_RUST=1 \
+#     --build-arg RUST_IMAGE=my.registry.internal:5000/mirror/rust:1.90-slim \
+#     -t vllm-qaic-pyt:1.22-rust .
+#
 # The BASE_IMAGE must have the QAIC Platform and Apps SDKs installed
 # (i.e. /opt/qti-aic/ present with torch_qaic wheels).
 #
@@ -81,6 +100,12 @@ ARG BASE_IMAGE="ghcr.io/quic/cloud_ai_inference_ubuntu24:1.21.6.0"
 ARG VENV="/opt/venv-pyt"
 ARG UV_VERSION="0.11.29"
 ARG PYTHON_VERSION="3.12"
+ARG RUST_VERSION="1.90"
+
+# Full image ref for the Rust toolchain. Defaults to the RUST_VERSION pin on
+# Docker Hub; override to pull from a mirror or internal registry, in which case
+# RUST_VERSION is ignored (the override supplies its own tag).
+ARG RUST_IMAGE="docker.io/library/rust:${RUST_VERSION}-slim"
 
 # ---------------------------------------------------------------------------
 # Shared stack version pins — defaults mirror scripts/utility.sh.
@@ -101,6 +126,18 @@ ARG TORCH_QAIC_BASE_PATH="/opt/qti-aic/integrations/torch_qaic"
 ARG QAIC_DEVICE_ARCH="v68"
 
 # ---------------------------------------------------------------------------
+# rust frontend — experimental (see docs/installation.md); default ON.
+# ---------------------------------------------------------------------------
+ARG VLLM_BUILD_RUST="1"
+
+# ---------------------------------------------------------------------------
+# vllm source override (any target) — priority: VLLM_PR > VLLM_BRANCH > the
+# pinned VLLM_VERSION tag.
+# ---------------------------------------------------------------------------
+ARG VLLM_PR=""
+ARG VLLM_BRANCH=""
+
+# ---------------------------------------------------------------------------
 # Release-specific
 # ---------------------------------------------------------------------------
 ARG VLLM_QAIC_GIT_REF="v0.23.0"
@@ -112,24 +149,46 @@ ARG VLLM_QAIC_PR=""
 ARG VLLM_QAIC_BRANCH=""
 
 # ---------------------------------------------------------------------------
+# Wheel-specific — WHEEL_NAME renames the built wheel before it is exported
+# (empty = keep uv build's own name).
+# ---------------------------------------------------------------------------
+ARG WHEEL_NAME=""
+
+# ---------------------------------------------------------------------------
 # Pinned uv binary — FROM supports ARG substitution, COPY --from does not.
 # ---------------------------------------------------------------------------
 # hadolint ignore=DL3006
 FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
 
+# ---------------------------------------------------------------------------
+# Pinned Rust toolchain, COPY'd into the infra layer below. Version doesn't
+# need to match exactly — rustup auto-fetches whatever toolchain vllm's own
+# rust-toolchain.toml pins when `cargo build` runs. RUST_IMAGE selects the ref
+# (see the ARG above) so a mirror can be used instead of Docker Hub.
+# ---------------------------------------------------------------------------
+# hadolint ignore=DL3006
+FROM ${RUST_IMAGE} AS rust-toolchain
+
 # ===========================================================================
 # pyt-base — shared foundation for all three targets.
 #
 # Layer structure (each RUN is an independent cache layer):
-#   1. infra      : apt + uv venv + build-deps (merged)
+#   1. infra      : apt + uv venv + build-deps + Rust toolchain (COPY'd,
+#                   unused unless VLLM_BUILD_RUST=1)
 #   2. step1      : torch + torchvision + torchaudio (python -m pip)
 #   3. step2      : torch_qaic SDK wheel from /opt/qti-aic
-#   4. step3      : vllm_dependency_pyt.txt + build-deps re-pin + vllm deps + vllm
+#   4a. step2b    : clone vllm at the pinned tag (always; rust build deps
+#                   only when VLLM_BUILD_RUST=1)
+#   4b. step2c    : rust frontend build (optional)
+#   5. step3      : vllm deps + vllm install from the local clone, then
+#                   delete it
 # ===========================================================================
 # hadolint ignore=DL3006
 FROM ${BASE_IMAGE} AS pyt-base
 
 COPY --from=uv /uv /usr/local/bin/uv
+COPY --from=rust-toolchain /usr/local/cargo /usr/local/cargo
+COPY --from=rust-toolchain /usr/local/rustup /usr/local/rustup
 
 # UV environment — set once, inherited by all downstream stages.
 # UV_PYTHON_DOWNLOADS=manual: never auto-download a runtime implicitly; the
@@ -148,6 +207,13 @@ ENV UV_LINK_MODE=copy \
     UV_INDEX_STRATEGY=unsafe-best-match \
     UV_CACHE_DIR=/var/cache/uv
 
+# Rust toolchain from the COPY above. Not leaked into release/ci/dev/wheel —
+# those stages COPY only specific paths (${VENV}, /opt/uv-python) out of
+# their builder, not this whole filesystem.
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+
 # Use bash for all RUN steps.
 SHELL ["/bin/bash", "-c"]
 
@@ -163,6 +229,9 @@ ARG TORCHAUDIO_VERSION_PYT="2.11.0+cpu"
 ARG VLLM_TARGET_DEVICE_PYT="empty"
 ARG TORCH_QAIC_BASE_PATH="/opt/qti-aic/integrations/torch_qaic"
 ARG QAIC_DEVICE_ARCH="v68"
+ARG VLLM_BUILD_RUST="1"
+ARG VLLM_PR=""
+ARG VLLM_BRANCH=""
 
 # ---------------------------------------------------------------------------
 # Layer 1 — infra: system packages + uv-managed python + build tools (merged)
@@ -175,6 +244,7 @@ ARG QAIC_DEVICE_ARCH="v68"
 # symlinks into it, and a cache mount's contents vanish when the RUN ends,
 # leaving a dangling symlink in the venv for every later layer.
 # ---------------------------------------------------------------------------
+COPY requirements/build.txt /src/vllm-qaic/requirements/build.txt
 RUN --mount=type=cache,sharing=locked,target=/var/cache/apt \
     --mount=type=cache,sharing=locked,target=/var/lib/apt \
     --mount=type=cache,sharing=locked,target=/var/cache/uv \
@@ -184,12 +254,7 @@ RUN --mount=type=cache,sharing=locked,target=/var/cache/apt \
         git && \
     uv python install ${PYTHON_VERSION} && \
     uv venv ${VENV} --python ${PYTHON_VERSION} --seed && \
-    PATH="${VENV}/bin:${PATH}" uv pip install \
-        "setuptools>=77.0.3,<80.0.0" \
-        setuptools-scm \
-        setuptools-rust \
-        wheel \
-        "cmake>=3.26"
+    PATH="${VENV}/bin:${PATH}" uv pip install -r /src/vllm-qaic/requirements/build.txt
 
 ENV PATH="${VENV}/bin:${PATH}" \
     VIRTUAL_ENV="${VENV}"
@@ -216,9 +281,50 @@ RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
     uv pip install "${TORCH_QAIC_BASE_PATH}/${PYVER}"/torch_qaic-*.whl
 
 # ---------------------------------------------------------------------------
-# Layer 4 — step3: vllm dependencies + vllm
+# Layer 4a — clone vllm; vllm is always installed from this local checkout
+# (never git+URL). Priority: VLLM_PR > VLLM_BRANCH > pinned VLLM_VERSION tag.
+# Rust build deps installed only when needed. Kept separate from the build
+# step below — cache-mounting into a not-yet-cloned /src/vllm makes BuildKit
+# pre-create the path, and git clone then fails ("already exists").
+# ---------------------------------------------------------------------------
+RUN if [ -n "${VLLM_PR}" ]; then \
+        echo "=== vllm from PR #${VLLM_PR} ===" && \
+        git clone https://github.com/vllm-project/vllm.git /src/vllm && \
+        git -C /src/vllm fetch origin "refs/pull/${VLLM_PR}/head" && \
+        git -C /src/vllm checkout FETCH_HEAD; \
+    elif [ -n "${VLLM_BRANCH}" ]; then \
+        echo "=== vllm from branch ${VLLM_BRANCH} ===" && \
+        git clone --branch "${VLLM_BRANCH}" --depth 1 \
+            https://github.com/vllm-project/vllm.git /src/vllm; \
+    else \
+        git clone --branch "v${VLLM_VERSION}" --depth 1 \
+            https://github.com/vllm-project/vllm.git /src/vllm; \
+    fi && \
+    if [ "${VLLM_BUILD_RUST}" = "1" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends \
+            pkg-config perl protobuf-compiler libprotobuf-dev; \
+    fi
+
+# ---------------------------------------------------------------------------
+# Layer 4b — rust frontend build (optional): compile vllm-rs via
+# build_rust.sh. Cache mounts persist the cargo registry/git caches, rustup
+# toolchain, and build target dir across rebuilds. Uses cargo's DEFAULT
+# target dir — build_rust.sh's own `cp` step expects the binary there;
+# CARGO_TARGET_DIR overrides break it.
+# ---------------------------------------------------------------------------
+RUN --mount=type=cache,sharing=locked,target=/usr/local/cargo/registry \
+    --mount=type=cache,sharing=locked,target=/usr/local/cargo/git \
+    --mount=type=cache,sharing=locked,target=/usr/local/rustup \
+    --mount=type=cache,sharing=locked,target=/src/vllm/rust/target \
+    if [ "${VLLM_BUILD_RUST}" = "1" ]; then \
+        bash /src/vllm/build_rust.sh; \
+    fi
+
+# ---------------------------------------------------------------------------
+# Layer 5 — step3: vllm dependencies + vllm, installed from the local clone
+# (Layer 4a, optionally Rust-enabled by 4b), then delete the clone — release
+# and ci never COPY /src/vllm into their final image; dev re-clones it below.
 # Re-pin build deps after the dependency install which may downgrade them.
-# vllm-cpu is a prebuilt PyPI wheel — no C++ compilation needed here.
 # TORCH_DEVICE_BACKEND_AUTOLOAD=0: vllm's setup.py does `import torch` at
 # module load; torch auto-loads torch_qaic as a registered backend extension,
 # which enumerates live QAIC devices and SIGABRTs when none are present in
@@ -228,12 +334,11 @@ RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
 COPY requirements/vllm_dependency_pyt.txt /src/vllm-qaic/requirements/vllm_dependency_pyt.txt
 RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
     uv pip install -r /src/vllm-qaic/requirements/vllm_dependency_pyt.txt && \
-    uv pip install \
-        "setuptools>=77.0.3,<80.0.0" setuptools-scm setuptools-rust wheel "cmake>=3.26" && \
+    uv pip install -r /src/vllm-qaic/requirements/build.txt && \
     TORCH_DEVICE_BACKEND_AUTOLOAD=0 \
     VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE_PYT}" uv pip install \
-        --no-build-isolation --no-deps \
-        "vllm @ git+https://github.com/vllm-project/vllm.git@v${VLLM_VERSION}"
+        --no-build-isolation --no-deps /src/vllm && \
+    rm -rf /src/vllm
 
 ENV VLLM_PLUGINS="qaic"
 
@@ -303,7 +408,8 @@ RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
     fi && \
     QAIC_DEVICE_ARCH="${QAIC_DEVICE_ARCH}" \
     VLLM_VERSION_OVERRIDE="${VLLM_VERSION}+pyt${VLLM_QAIC_VERSION}" \
-    uv pip install --no-build-isolation "${SRC}"
+    uv pip install --no-build-isolation "${SRC}" && \
+    uv pip install -r "${SRC}/requirements/test.txt"
 
 # hadolint ignore=DL3006
 FROM ${BASE_IMAGE} AS ci
@@ -319,9 +425,11 @@ ENV PATH="${VENV}/bin:${PATH}" \
     VLLM_PLUGINS="qaic"
 
 # ===========================================================================
-# DEV — editable install of vllm-qaic for fast iteration.
+# DEV — editable installs of vllm and vllm-qaic for fast iteration.
 # torch_qaic is a binary SDK wheel — no editable override needed.
-# Source dir is kept in the final image (editable install requires it).
+# vllm:       re-cloned and reinstalled editable (pyt-base's non-editable
+#             install is uninstalled first).
+# vllm-qaic:  source dir kept for its editable install.
 # ===========================================================================
 FROM pyt-base AS dev-builder
 
@@ -329,12 +437,36 @@ ARG VENV="/opt/venv-pyt"
 ARG VLLM_VERSION="0.23.0"
 ARG VLLM_QAIC_VERSION="1.22"
 ARG QAIC_DEVICE_ARCH="v68"
+ARG VLLM_TARGET_DEVICE_PYT="empty"
+ARG VLLM_PR=""
+ARG VLLM_BRANCH=""
+
+# vllm editable — re-clone (pyt-base deleted its source after the
+# non-editable install; same VLLM_PR/VLLM_BRANCH priority), uninstall that
+# copy, reinstall -e.
+RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
+    if [ -n "${VLLM_PR}" ]; then \
+        git clone https://github.com/vllm-project/vllm.git /src/vllm && \
+        git -C /src/vllm fetch origin "refs/pull/${VLLM_PR}/head" && \
+        git -C /src/vllm checkout FETCH_HEAD; \
+    elif [ -n "${VLLM_BRANCH}" ]; then \
+        git clone --branch "${VLLM_BRANCH}" --depth 1 \
+            https://github.com/vllm-project/vllm.git /src/vllm; \
+    else \
+        git clone --branch "v${VLLM_VERSION}" --depth 1 \
+            https://github.com/vllm-project/vllm.git /src/vllm; \
+    fi && \
+    uv pip uninstall vllm --quiet 2>/dev/null || true && \
+    TORCH_DEVICE_BACKEND_AUTOLOAD=0 \
+    VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE_PYT}" uv pip install \
+        --no-build-isolation --no-deps -e /src/vllm
 
 COPY . /src/vllm-qaic
 RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
     QAIC_DEVICE_ARCH="${QAIC_DEVICE_ARCH}" \
     VLLM_VERSION_OVERRIDE="${VLLM_VERSION}+pyt${VLLM_QAIC_VERSION}" \
-    uv pip install --no-build-isolation -e /src/vllm-qaic
+    uv pip install --no-build-isolation -e /src/vllm-qaic && \
+    uv pip install -r /src/vllm-qaic/requirements/test.txt
 
 # hadolint ignore=DL3006
 FROM ${BASE_IMAGE} AS dev
@@ -351,6 +483,7 @@ RUN --mount=type=cache,sharing=locked,target=/var/cache/apt \
 COPY --from=uv /uv /usr/local/bin/uv
 COPY --from=dev-builder ${VENV} ${VENV}
 COPY --from=dev-builder /opt/uv-python /opt/uv-python
+COPY --from=dev-builder /src/vllm /src/vllm
 COPY --from=dev-builder /src/vllm-qaic /src/vllm-qaic
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
@@ -371,18 +504,42 @@ CMD ["bash"]
 #   docker buildx build --target wheel -f docker/Dockerfile.pyt \
 #     --build-arg PYTHON_VERSION=3.11 --build-arg QAIC_DEVICE_ARCH=v81 \
 #     --output type=local,dest=./dist/pyt/py311 .
+#
+#   # Custom wheel filename:
+#   docker buildx build --target wheel -f docker/Dockerfile.pyt \
+#     --build-arg WHEEL_NAME=vllm_qaic-1.22.0+pyt-cp311-cp311-linux_x86_64.whl \
+#     --output type=local,dest=./dist/pyt/py311 .
 # ===========================================================================
 FROM pyt-base AS wheel-builder
 
 ARG VLLM_VERSION="0.23.0"
 ARG VLLM_QAIC_VERSION="1.22"
 ARG QAIC_DEVICE_ARCH="v68"
+ARG WHEEL_NAME=""
 
+# WHEEL_NAME rename: the wheel's own name comes from setup.py's package name
+# and version, so overriding the filename is a post-build mv. Only the filename
+# changes — the .dist-info inside still carries the real name/version. pip reads
+# the distribution and compatibility tags off the filename and requires the
+# distribution to match that metadata, so an arbitrary name exports fine but
+# may not be installable; scripts/build_wheels.sh warns about names pip would
+# reject. Failing when /out has no wheel keeps a silent no-op rename from
+# exporting an unrenamed artifact.
 COPY . /src/vllm-qaic
 RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
     QAIC_DEVICE_ARCH="${QAIC_DEVICE_ARCH}" \
     VLLM_VERSION_OVERRIDE="${VLLM_VERSION}+pyt${VLLM_QAIC_VERSION}" \
-    uv build --wheel --no-build-isolation --out-dir /out /src/vllm-qaic
+    uv build --wheel --no-build-isolation --out-dir /out /src/vllm-qaic && \
+    if [ -n "${WHEEL_NAME}" ]; then \
+        built="$(find /out -maxdepth 1 -name '*.whl' -print -quit)"; \
+        if [ -z "${built}" ]; then \
+            echo "ERROR: no wheel found in /out to rename" >&2; exit 1; \
+        fi; \
+        if [ "${built}" != "/out/${WHEEL_NAME}" ]; then \
+            mv "${built}" "/out/${WHEEL_NAME}" && \
+            echo "=== Wheel renamed: $(basename "${built}") -> ${WHEEL_NAME} ==="; \
+        fi; \
+    fi
 
 FROM scratch AS wheel
 COPY --from=wheel-builder /out /
