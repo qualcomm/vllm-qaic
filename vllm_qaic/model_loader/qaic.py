@@ -400,6 +400,14 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
 
         e = time.perf_counter() - s
         logger.info("Successfully loaded QPC in %s secs", e)
+        
+        # Resolve CCL lengths before loading multimodal model since
+        # multimodal dummy input shapes depends on whether CCL 
+        # is enabled
+        
+        self.comp_ctx_lengths_prefill, self.comp_ctx_lengths_decode = (
+            self.get_comp_ctx_lengths()
+        )
 
         if self.is_multimodal_model:
             self._load_multimodal()
@@ -408,9 +416,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 # paradigm, so remaining configs do not apply.
                 return
 
-        self.comp_ctx_lengths_prefill, self.comp_ctx_lengths_decode = (
-            self.get_comp_ctx_lengths()
-        )
         self.prefill_num_logits_buffer = None
         self.prefill_logits = dict(
             logits=np.random.randn(self.prefill_bsz, 1, self.vocab_size).astype(

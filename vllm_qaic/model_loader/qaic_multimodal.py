@@ -111,8 +111,16 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
                 "image_idx_output": np.array([[0]], dtype=np.int64),
             }
             if "mm_token_type_ids" in self.session.input_names:
+            # Preserve the existing mm_token_type_ids shape (1,1) unless
+            # CCL is enabled. If CCL is enabled,
+            # CCL prefill specializations require one mask value
                 mm_token_type_shape = (
                     (1, 1)
+                    (
+                        (self.prefill_bsz, self.prefill_seq_len)
+                        if self.comp_ctx_lengths_prefill is not None
+                        else (1, 1)
+                    )
                     if self.session.cluster_id == "prefill"
                     else (self.decode_bsz, 1)
                 )
