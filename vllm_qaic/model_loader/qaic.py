@@ -544,7 +544,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         return allowed_seqlens
 
     @property
-    def kv_cache_info(self) -> list[tuple]:  # [(kv_shape, kv_type, kv_size)]
+    def kv_cache_info(self) -> list[tuple]:
+        # [(kv_shape, kv_type, kv_size, kv_kind)]
         return self.session.kv_cache_info
 
     def get_io_shape_and_dtype(
@@ -1272,7 +1273,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     if self.is_multimodal_model and self.default_mm_kwargs:
                         prefill_inputs.update(self.default_mm_kwargs)
                     KvCache_buff = []
-                    for kv_shape, kv_type, _ in self.kv_cache_info:
+                    for kv_shape, kv_type, _, _ in self.kv_cache_info:
                         _kv_shape = (1,) + kv_shape[1:]
                         KvCache_buff.append(np.empty(shape=_kv_shape, dtype=kv_type))
                     if self.comp_ctx_lengths_prefill is not None:
@@ -1291,7 +1292,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             if self.session.cluster_id == "decode":
                 logger.info("Running dummy decode run with bsz %s", self.decode_bsz)
                 KvCache_buff = []
-                for kv_shape, kv_type, _ in self.kv_cache_info:
+                for kv_shape, kv_type, _, _ in self.kv_cache_info:
                     KvCache_buff.append(np.empty(shape=kv_shape, dtype=kv_type))
 
                 decode_logits_shape = (
