@@ -6,21 +6,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # Adapted from vllm/vllm/config/cache.py
 
+from typing import Literal, TypeAlias
+
 import torch
 import vllm.config
 import vllm.engine.arg_utils
 from pydantic import ConfigDict, field_validator
 from pydantic.dataclasses import dataclass
-from vllm.config.cache import CacheConfig
+from vllm.config.cache import CacheConfig, CacheDType
 from vllm.config.device import DeviceConfig
 from vllm.config.utils import config
 from vllm_qaic.logger import init_logger
 
 logger = init_logger(__name__)
 
-# CacheDType is a Literal[str] union in vLLM; alias to str so the type stays
-# valid even when vllm types are unavailable to the type checker.
-QaicCacheDType = str
+QaicCacheDType: TypeAlias = CacheDType | Literal["mxint8"]
 
 
 @config
