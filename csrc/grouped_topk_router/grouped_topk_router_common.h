@@ -1006,29 +1006,30 @@ inline void load_bitonic_candidate_chunk_hf_i32(const float16* candidate_scores,
 
   const int32_t lo_to_load =
       vals_to_load < kIdxInVec ? vals_to_load : kIdxInVec;
-  // idx is a caller-provided fixed HVX_Vector[2]; slots [0] and [1] are always
-  // valid, so the RABV array-access analysis is a false positive here.
-  idx[0] =  // nosemgrep
-      LoadUnaligned<HVX_Vector>((const int8_t*)&candidate_ids[offset],
-                                lo_to_load * sizeof(int32_t));
+  HVX_Vector lo_idx = LoadUnaligned<HVX_Vector>(
+      (const int8_t*)&candidate_ids[offset], lo_to_load * sizeof(int32_t));
   if (lo_to_load < kIdxInVec) {
     const HVX_VectorPred pred = Q6_Q_vsetq2_R(lo_to_load * sizeof(int32_t));
-    idx[0] = Q6_V_vmux_QVV(pred, idx[0], int_max_vec);
+    lo_idx = Q6_V_vmux_QVV(pred, lo_idx, int_max_vec);
   }
 
   const int32_t hi_to_load =
       vals_to_load > kIdxInVec ? vals_to_load - kIdxInVec : 0;
+  HVX_Vector hi_idx = int_max_vec;
   if (hi_to_load > 0) {
-    idx[1] = LoadUnaligned<HVX_Vector>(
+    hi_idx = LoadUnaligned<HVX_Vector>(
         (const int8_t*)&candidate_ids[offset + kIdxInVec],
         hi_to_load * sizeof(int32_t));
     if (hi_to_load < kIdxInVec) {
       const HVX_VectorPred pred = Q6_Q_vsetq2_R(hi_to_load * sizeof(int32_t));
-      idx[1] = Q6_V_vmux_QVV(pred, idx[1], int_max_vec);
+      hi_idx = Q6_V_vmux_QVV(pred, hi_idx, int_max_vec);
     }
-  } else {
-    idx[1] = int_max_vec;
   }
+
+  // idx is a caller-provided fixed HVX_Vector[2]; assign both lanes last so the
+  // loads/masking above operate on locals.
+  idx[0] = lo_idx;
+  idx[1] = hi_idx;
 }
 
 // Select top-k from a candidate list using HVX bitonic merge steps.

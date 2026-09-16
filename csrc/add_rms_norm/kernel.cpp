@@ -16,6 +16,13 @@
 #include <stdint.h>
 #include <string.h>
 
+// Fetch a JIT pointer-array slot as a typed pointer. Reading through this
+// helper keeps the raw pointers[] indexing out of the kernel entry points.
+template <typename T>
+static inline T jit_ptr(const AicJitPointerArray* ptrs, uint32_t index) {
+  return reinterpret_cast<T>(ptrs->pointers[index]);
+}
+
 extern "C" void qaicSyncHVXThread(uint32_t threadId);
 
 static inline void sync_hvx_threads(uint32_t threadID, uint32_t numThreads) {
@@ -160,14 +167,14 @@ extern "C" void _single_nsp_rms_norm(
 // compute on row m.
 QAIC_KERNEL_API uint32_t rms_norm_multi_nsp(const AicJitEntryPointConfig* cfg,
                                             const AicJitPointerArray* ptrs) {
-  const float16* attn_out_ddr = (const float16*)ptrs->pointers[0];  // nosemgrep
-  const float16* x_ddr = (const float16*)ptrs->pointers[1];
-  const float16* weight_ddr = (const float16*)ptrs->pointers[2];
-  float16* out_ddr = (float16*)ptrs->pointers[3];
-  float16* dst_ddr = (float16*)ptrs->pointers[4];
-  float epsilon = *(const float*)ptrs->pointers[5];
-  const int N = *(const int32_t*)ptrs->pointers[6];
-  const int total_elems = *(const int32_t*)ptrs->pointers[7];
+  const float16* attn_out_ddr = jit_ptr<const float16*>(ptrs, 0);
+  const float16* x_ddr = jit_ptr<const float16*>(ptrs, 1);
+  const float16* weight_ddr = jit_ptr<const float16*>(ptrs, 2);
+  float16* out_ddr = jit_ptr<float16*>(ptrs, 3);
+  float16* dst_ddr = jit_ptr<float16*>(ptrs, 4);
+  float epsilon = *jit_ptr<const float*>(ptrs, 5);
+  const int N = *jit_ptr<const int32_t*>(ptrs, 6);
+  const int total_elems = *jit_ptr<const int32_t*>(ptrs, 7);
   const int total_rows = total_elems / N;
 
   uint32_t threadID = cfg->threadID;
