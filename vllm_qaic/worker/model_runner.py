@@ -484,7 +484,8 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 "quant_config": None,
             }
             if spec_cfg.use_dflash():
-                # Avoid leaking the DLM's tiny prefill_seq_len into the target's scheduler_config.
+                # Avoid leaking the DLM's tiny prefill_seq_len into the
+                # target's scheduler_config.
                 draft_config_overrides["scheduler_config"] = deepcopy(
                     self.vllm_config.scheduler_config
                 )
@@ -1318,10 +1319,13 @@ class QaicModelRunnerAoT(GPUModelRunner):
                     tlm_prefill_hidden_chunks=tlm_prefill_hidden_chunks,
                 )
                 if _dflash_prefill:
-                    # Prefill is sync for DFlash; per-chunk hidden buffers are now filled.
+                    # Prefill is sync for DFlash; per-chunk hidden buffers are
+                    # now filled.
                     prefill_req_ids = self.input_batch.req_ids[
                         self.num_decodes : self.input_batch.num_reqs
                     ]
+                    assert self.drafter is not None
+                    assert tlm_prefill_hidden_chunks is not None
                     self.drafter.build_prefill_pending(
                         prefill_cum_sum,
                         prefill_positions,
@@ -1594,7 +1598,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
         assert spec_config is not None
         assert self.drafter is not None
         if spec_config.method == "ngram":
-            draft_token_ids = self.drafter.propose(
+            draft_token_ids = self.drafter.propose(  # type: ignore[call-arg]
                 sampled_token_ids,
                 self.input_batch.num_tokens_no_spec,
                 self.input_batch.token_ids_cpu,
@@ -1607,7 +1611,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
             self.input_batch.token_ids_cpu = token_ids_cpu_orig.astype(
                 np.int32, copy=False
             )
-            draft_token_ids = self.drafter.propose(
+            draft_token_ids = self.drafter.propose(  # type: ignore[call-arg]
                 self.input_batch, sampled_token_ids, slot_mappings=slot_mappings
             )
             self.input_batch.token_ids_cpu = token_ids_cpu_orig

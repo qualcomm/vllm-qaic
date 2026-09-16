@@ -415,11 +415,9 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         # by the QPC even outside DFlash steps, e.g. the warm-up dummy run).
         _hs_info = self.get_io_shape_and_dtype("hidden_states", is_input=False)
         self._dflash_prefill_hidden_scratch: np.ndarray | None = None
-        if _hs_info is not None and not isinstance(
-            self.prefill_seq_len, (list, tuple)
-        ):
+        if _hs_info is not None and not isinstance(self.prefill_seq_len, (list, tuple)):
             _hidden_size = self.config.get_text_config().hidden_size
-            self._dflash_prefill_hidden_scratch = np.zeros(  # nosemgrep: trailofbits.python.numpy-in-pytorch-modules.numpy-in-pytorch-modules
+            self._dflash_prefill_hidden_scratch = np.zeros(  # nosemgrep
                 (1, self.prefill_seq_len, _hidden_size), dtype=_hs_info[1]
             )
 
@@ -729,7 +727,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         return
 
     def num_prefill_chunks(self, prefill_cum_sum: np.ndarray) -> int:
-        """Total TLM prefill chunks (ceil per request) for sizing DFlash hidden buffers."""
+        """Total TLM prefill chunks (ceil per request) for DFlash hidden buffers."""
         tok_start = 0
         total = 0
         for tok_end in prefill_cum_sum:
@@ -1418,7 +1416,8 @@ def _derive_dflash_config(vllm_config) -> None:
 def load_qaic_model(
     vllm_config: VllmConfig, speculative_model_type: str | None = None
 ) -> nn.Module:
-    # DFlash: derive cross-checkpoint config before the draft build clears speculative_config.
+    # DFlash: derive cross-checkpoint config before the draft build
+    # clears speculative_config.
     if (
         vllm_config.speculative_config is not None
         and vllm_config.speculative_config.method == "dflash"
@@ -1805,7 +1804,8 @@ def get_hf_model(
         "seq_classify": QEFFAutoModelForSequenceClassification,
     }
     hf_config = model_config.hf_config
-    # DFlash DLM: unwrap vLLM's EAGLEConfig wrapper so QEfficient sees the native checkpoint config.
+    # DFlash DLM: unwrap vLLM's EAGLEConfig wrapper so QEfficient sees the
+    # native checkpoint config.
     _eagle_inner = getattr(hf_config, "model", None)
     if (
         hf_config.model_type == "eagle"

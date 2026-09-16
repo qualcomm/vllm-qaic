@@ -267,6 +267,7 @@ class QaicDFlashProposer:
             }
             exec_obj_idx = self.model.session.np_run(dlm_inputs, is_prefill=True)
             self.model.session.complete_inf(exec_obj_idx, is_prefill=True)
+            assert self._dlm_logits_buf is not None
             return self._dlm_logits_buf[active_slot]
 
         if not is_final_chunk:
@@ -422,6 +423,7 @@ class QaicDFlashProposer:
             self.model.session.complete_inf(exec_obj_idx, is_prefill=True)
 
             if commit:
+                assert self._dlm_logits_buf is not None
                 all_candidates = self._dlm_logits_buf.argmax(axis=-1).astype(np.int64)
                 for slot in active_slots:
                     st = self._req_state[req_ids[slot]]
