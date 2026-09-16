@@ -160,6 +160,10 @@ extern "C" void _single_nsp_rms_norm(
 // compute on row m.
 QAIC_KERNEL_API uint32_t rms_norm_multi_nsp(const AicJitEntryPointConfig* cfg,
                                             const AicJitPointerArray* ptrs) {
+  // Bounds check before indexing: this kernel reads pointer slots [0..7].
+  if (ptrs->numPointers < 8) {
+    return JIT_DEV_ERROR_INVALID_PARAMETER;
+  }
   const float16* attn_out_ddr = (const float16*)ptrs->pointers[0];
   const float16* x_ddr = (const float16*)ptrs->pointers[1];
   const float16* weight_ddr = (const float16*)ptrs->pointers[2];

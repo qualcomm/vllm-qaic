@@ -190,6 +190,10 @@ extern "C" void _single_nsp_rms_norm_bf16(
 // row r.
 QAIC_KERNEL_API uint32_t rms_norm_multi_nsp_bf16(
     const AicJitEntryPointConfig* cfg, const AicJitPointerArray* ptrs) {
+  // Bounds check before indexing: this kernel reads pointer slots [0..7].
+  if (ptrs->numPointers < 8) {
+    return JIT_DEV_ERROR_INVALID_PARAMETER;
+  }
   const uint16_t* attn_out_ddr = (const uint16_t*)ptrs->pointers[0];
   const uint16_t* x_ddr = (const uint16_t*)ptrs->pointers[1];
   const uint16_t* weight_ddr = (const uint16_t*)ptrs->pointers[2];
