@@ -1008,7 +1008,8 @@ inline void load_bitonic_candidate_chunk_hf_i32(const float16* candidate_scores,
       vals_to_load < kIdxInVec ? vals_to_load : kIdxInVec;
   // idx is a caller-provided fixed HVX_Vector[2]; slots [0] and [1] are always
   // valid, so the RABV array-access analysis is a false positive here.
-  // nosemgrep: cxx.rabv.check.array-access-before-allow-bounds-check, cxx.rabv.check.array-access-before-reject-bounds-check
+  // nosemgrep: cxx.rabv.check.array-access-before-allow-bounds-check,
+  // cxx.rabv.check.array-access-before-reject-bounds-check
   idx[0] = LoadUnaligned<HVX_Vector>((const int8_t*)&candidate_ids[offset],
                                      lo_to_load * sizeof(int32_t));
   if (lo_to_load < kIdxInVec) {
