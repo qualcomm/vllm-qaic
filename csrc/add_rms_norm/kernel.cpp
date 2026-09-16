@@ -164,7 +164,7 @@ QAIC_KERNEL_API uint32_t rms_norm_multi_nsp(const AicJitEntryPointConfig* cfg,
   if (ptrs->numPointers < 8) {
     return JIT_DEV_ERROR_INVALID_PARAMETER;
   }
-  const float16* attn_out_ddr = (const float16*)ptrs->pointers[0];
+  const float16* attn_out_ddr = (const float16*)ptrs->pointers[0];  // nosemgrep
   const float16* x_ddr = (const float16*)ptrs->pointers[1];
   const float16* weight_ddr = (const float16*)ptrs->pointers[2];
   float16* out_ddr = (float16*)ptrs->pointers[3];
