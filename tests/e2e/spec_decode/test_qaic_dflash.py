@@ -65,9 +65,7 @@ class TestQaicDFlash:
         `min_len` guarantees at least 2 chunks are actually exercised (prompt
         strictly longer than `seq_len`); `seed` makes the ShareGPT sample
         selection deterministic across runs."""
-        prompts = sharegpt_prompts(
-            2, in_len=seq_len * 3, min_len=seq_len + 1, seed=0
-        )
+        prompts = sharegpt_prompts(2, in_len=seq_len * 3, min_len=seq_len + 1, seed=0)
         assert len(prompts) > 0, "no ShareGPT prompts long enough to force chunking"
         output = qaic_model.generate(prompts, _SAMPLING_PARAMS)
         assert len(output) == len(prompts), (
