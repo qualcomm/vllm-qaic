@@ -45,9 +45,12 @@ def main():
     llm = LLM(
         model="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
         max_num_seqs=decode_bsz,  # determines decode batch size
-        max_model_len=ctx_len,  # ctx_len (does not account for padding, but does account for prompt and generated tokens)
+        # ctx_len (does not account for padding, but does account for prompt
+        # and generated tokens)
+        max_model_len=ctx_len,
         quantization="mxfp6",  # Preferred quantization
-        kv_cache_dtype="mxint8",  # Preferred option to same KV cache and increase performance
+        # Preferred option to same KV cache and increase performance
+        kv_cache_dtype="mxint8",
         disable_log_stats=False,
         enable_prefix_caching=False,
         gpu_memory_utilization=1.0,
@@ -70,7 +73,8 @@ def main():
         generated_tokens = output.outputs[0].token_ids
         num_generated_tokens = len(generated_tokens)
         print(
-            f"Prompt: {prompt!r}, Generated text: {generated_text!r}, Num generated tokens: {num_generated_tokens!r}"
+            f"Prompt: {prompt!r}, Generated text: {generated_text!r}, "
+            f"Num generated tokens: {num_generated_tokens!r}"
         )
 
 

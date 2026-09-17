@@ -14,25 +14,25 @@
 #include <stdint.h>
 
 void kv_cache_blocked_to_flat_hvx(
-    float16 *key,         // [num_tokens, num_heads_k, head_dim]
-    float16 *value,       // [num_tokens, num_heads_v, head_dim]
-    float16 *key_cache,   // [num_blocks, num_heads_k, block_size, head_dim]
-    float16 *value_cache, // [num_blocks, num_heads_v, block_size, head_dim]
-    int32_t *buff, int32_t *buffer,
-    const int64_t *slot_mapping, // [num_tokens]
+    float16* key,          // [num_tokens, num_heads_k, head_dim]
+    float16* value,        // [num_tokens, num_heads_v, head_dim]
+    float16* key_cache,    // [num_blocks, num_heads_k, block_size, head_dim]
+    float16* value_cache,  // [num_blocks, num_heads_v, block_size, head_dim]
+    int32_t* buff, int32_t* buffer,
+    const int64_t* slot_mapping,  // [num_tokens]
     int32_t seqlen, int32_t block_size, int32_t nheads_k, int32_t headdim,
     int32_t element_bytes) {
   const int token_bytes = nheads_k * headdim * element_bytes;
 
-  float16 const *k_in = (float16 const *)key;
-  float16 const *v_in = (float16 const *)value;
-  float16 *k_base = (float16 *)key_cache;
-  float16 *v_base = (float16 *)value_cache;
-  int32_t *buff_base = (int32_t *)buff;
-  int64_t *buff_base_a; // = (int64_t*)buffer; // Assuming buff has enough
-                        // space for this
+  float16 const* k_in = (float16 const*)key;
+  float16 const* v_in = (float16 const*)value;
+  float16* k_base = (float16*)key_cache;
+  float16* v_base = (float16*)value_cache;
+  int32_t* buff_base = (int32_t*)buff;
+  int64_t* buff_base_a;  // = (int64_t*)buffer; // Assuming buff has enough
+                         // space for this
 
-  const int64_t *block_table = (const int64_t *)slot_mapping;
+  const int64_t* block_table = (const int64_t*)slot_mapping;
 
   int t = 0;
   int32_t slot_idx = 0;
@@ -62,9 +62,9 @@ void kv_cache_blocked_to_flat_hvx(
   int32_t src_head_stride = headdim * block_size;
   int32_t src_within_block_stride = block_size;
   while (tok < (uint32_t)seqlen) {
-    slot_idx = (int32_t)(*((int64_t *)slot_mapping + (int32_t)tok));
-    buff_base_a = (int64_t *)slot_mapping;
-    slot_idx = *((int32_t *)buff_base_a + tok);
+    slot_idx = (int32_t)(*((int64_t*)slot_mapping + (int32_t)tok));
+    buff_base_a = (int64_t*)slot_mapping;
+    slot_idx = *((int32_t*)buff_base_a + tok);
     block_id = slot_idx / block_size;
     block_offset = slot_idx % block_size;
     while (hid < (uint32_t)nheads_k) {
@@ -104,9 +104,9 @@ void kv_cache_blocked_to_flat_hvx(
 }
 
 QAIC_KERNEL_API int32_t multinsp_multithread_kv_cache_blocked_to_flat_hvx_f(
-    const AicJitEntryPointConfig *entryConfig,
-    const AicJitPointerArray *pointerArray) {
-  int32_t const numel = (int32_t)*(int32_t *)pointerArray->pointers[11];
+    const AicJitEntryPointConfig* entryConfig,
+    const AicJitPointerArray* pointerArray) {
+  int32_t const numel = (int32_t)*(int32_t*)pointerArray->pointers[11];
   int32_t const numelPerCore =
       (numel + entryConfig->numCores - 1) / entryConfig->numCores;
   int32_t const numelPerThread =
@@ -114,18 +114,18 @@ QAIC_KERNEL_API int32_t multinsp_multithread_kv_cache_blocked_to_flat_hvx_f(
   int32_t const offset = entryConfig->threadID * numelPerThread +
                          entryConfig->coreID * numelPerCore;
 
-  float16 *key = (float16 *)pointerArray->pointers[0];
-  float16 *value = (float16 *)pointerArray->pointers[1];
-  float16 *key_cache = (float16 *)pointerArray->pointers[2];
-  float16 *value_cache = (float16 *)pointerArray->pointers[3];
-  int32_t *buff = (int32_t *)pointerArray->pointers[4];
-  int32_t *buffer = (int32_t *)pointerArray->pointers[5];
-  int64_t *slot_mapping = (int64_t *)pointerArray->pointers[6];
-  int32_t seqlen = *(const int32_t *)pointerArray->pointers[7];
-  int32_t block_size = *(const int32_t *)pointerArray->pointers[8];
-  int32_t nheads_k = *(const int32_t *)pointerArray->pointers[9];
-  int32_t headdim = *(const int32_t *)pointerArray->pointers[10];
-  int32_t element_bytes = *(const int32_t *)pointerArray->pointers[11];
+  float16* key = (float16*)pointerArray->pointers[0];
+  float16* value = (float16*)pointerArray->pointers[1];
+  float16* key_cache = (float16*)pointerArray->pointers[2];
+  float16* value_cache = (float16*)pointerArray->pointers[3];
+  int32_t* buff = (int32_t*)pointerArray->pointers[4];
+  int32_t* buffer = (int32_t*)pointerArray->pointers[5];
+  int64_t* slot_mapping = (int64_t*)pointerArray->pointers[6];
+  int32_t seqlen = *(const int32_t*)pointerArray->pointers[7];
+  int32_t block_size = *(const int32_t*)pointerArray->pointers[8];
+  int32_t nheads_k = *(const int32_t*)pointerArray->pointers[9];
+  int32_t headdim = *(const int32_t*)pointerArray->pointers[10];
+  int32_t element_bytes = *(const int32_t*)pointerArray->pointers[11];
 
   kv_cache_blocked_to_flat_hvx(key, value, key_cache, value_cache, buff, buffer,
                                slot_mapping, seqlen, block_size, nheads_k,
