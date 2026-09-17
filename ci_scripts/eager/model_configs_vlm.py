@@ -11,6 +11,7 @@ CONFIGS = {
         "prompt": "<image>\nDescribe the image in detail.",
         "gpu_memory_utilization": 0.98,
     },
+    "deepseek-ai/deepseek-vl2-tiny": {"tp_size": 2},
     "MiniMaxAI/MiniMax-VL-01": {"max_model_len": 4096},
     "PaddlePaddle/PaddleOCR-VL": {
         "max_model_len": 4096,
@@ -41,6 +42,7 @@ CONFIGS = {
         "<|im_start|>assistant\n",
     },  # 2072+output tokens
     "Qwen/Qwen2-VL-7B-Instruct": {"max_model_len": 4096},  # 2060+output tokens
+    "Qwen/Qwen3-ASR-0.6B": {"tp_size": 2},
     "allenai/Molmo-7B-D-0924": {"max_model_len": 4096},
     "allenai/Molmo-7B-O-0924": {"max_model_len": 4096},
     "allenai/Molmo2-4B": {
@@ -98,6 +100,7 @@ CONFIGS = {
     },
     "llava-hf/llava-1.5-7b-hf": {"max_model_len": 4096},
     "llava-hf/llava-v1.6-mistral-7b-hf": {"max_model_len": 4096},  # 2097+output tokens
+    "llava-hf/llava-onevision-qwen2-0.5b-ov-hf": {"tp_size": 2},
     "llava-hf/llava-onevision-qwen2-7b-ov-hf": {
         "max_model_len": 8000
     },  # 7253+output tokens

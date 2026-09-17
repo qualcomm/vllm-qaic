@@ -37,7 +37,7 @@
 #   bash ci_fallback_ops.sh --type llm --ref v0.23.0
 #
 # To add a new model type (e.g. embedding):
-#   1. Add entry to RUNNER_MAP, JSON_PREFIX, RUNNER_EXTRA_ARGS below
+#   1. Add entry to RUNNER_MAP, JSON_PREFIX below
 #   2. Add run_<type>.py in the eager/ dir
 #   3. Run scrape_models.py with the new type and store its JSON
 ######################################################################
@@ -70,7 +70,7 @@ export QAIC_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 # Model type registry 
 # To support a new model type:
 #   1. Add its name to ALL_TYPES (controls run order for --type all)
-#   2. Add one entry to each of RUNNER_MAP, JSON_PREFIX, RUNNER_EXTRA_ARGS
+#   2. Add one entry to each of RUNNER_MAP, JSON_PREFIX
 #   3. Create the corresponding run_<type>.py in eager/
 ALL_TYPES=("llm" "vlm")
 
@@ -87,13 +87,6 @@ declare -A JSON_PREFIX=(
     ["vlm"]="vlm_models"
     # ["embedding"]="embedding_models"
     # ["spd"]="spd_models"
-)
-#extra args for runner script
-declare -A RUNNER_EXTRA_ARGS=(
-    ["llm"]=""
-    ["vlm"]="--model-impl vllm"
-    # ["embedding"]=""
-    # ["spd"]=""
 )
 
 # Parse arguments
@@ -247,8 +240,6 @@ run_model() {
     local model_type="$1"
     local model_name="$2"
     local runner="${RUNNER_MAP[$model_type]}"
-    local extra_args="${RUNNER_EXTRA_ARGS[$model_type]}"
-
     local m_name="${model_name//\//_}"
     m_name="${m_name// /_}"
 
@@ -280,7 +271,6 @@ run_model() {
     logsave "${logname}" python "${EAGER_DIR}/${runner}" \
         --model-name "${model_name}" \
         --tp-size "${TP_SIZE}" \
-        ${extra_args} \
         "${cleanup_flag[@]}"
 
     # Parse the log to extract fallback ops and write to parse log

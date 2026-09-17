@@ -20,7 +20,7 @@ import regex as re
 import sys
 import json
 import argparse
-import urllib.request
+import requests
 from urllib.parse import urlsplit
 from pathlib import Path
 
@@ -41,8 +41,11 @@ def fetch_markdown(ref: str) -> str:
     url = RAW_URL.format(ref=ref)
     if urlsplit(url).scheme != "https":
         raise ValueError(f"Refusing to fetch non-https URL: {url}")
-    with urllib.request.urlopen(url) as resp:
-        return resp.read().decode("utf-8")
+
+    response = requests.get(url, timeout=30)
+    response.raise_for_status()
+
+    return response.text
 
 
 def parse_param_count(model_id: str) -> float | None:

@@ -23,7 +23,6 @@ CONFIGS = {
     "pfnet/plamo-2-8b": {"dtype": "bfloat16"},
     "EssentialAI/rnj-1-instruct": {"dtype": "float32"},
     "google/gemma-2b": {"dtype": "float32"},
-    "google/gemma-3n-E2B-it": {"dtype": "float32"},
     "upstage/solar-pro-preview-instruct": {"tp_size": 1},
     "Zyphra/Zamba2-7B-instruct": {"tp_size": 1},
     "microsoft/Phi-3.5-MoE-instruct": {"tp_size": 8, "gpu_memory_utilization": 0.98},
@@ -34,6 +33,38 @@ CONFIGS = {
     "nvidia/Llama-3_3-Nemotron-Super-49B-v1": {
         "tp_size": 8,
         "gpu_memory_utilization": 0.98,
+    },
+    "01-ai/Yi-34B": {
+        "tp_size": 8,
+        "gpu_memory_utilization": 0.98,
+    },
+    "IQuestLab/IQuest-Coder-V1-40B-Instruct": {
+        "tp_size": 8,
+        "gpu_memory_utilization": 0.98,
+    },
+    "IQuestLab/IQuest-Coder-V1-40B-Loop-Instruct": {
+        "tp_size": 8,
+        "gpu_memory_utilization": 0.98,
+    },
+    "LGAI-EXAONE/EXAONE-4.0-32B": {
+        "tp_size": 8,
+        "gpu_memory_utilization": 0.98,
+    },
+    "Qwen/QwQ-32B-Preview": {
+        "tp_size": 8,
+        "gpu_memory_utilization": 0.98,
+    },
+    "Tele-AI/TeleChat3-36B-Thinking": {
+        "tp_size": 8,
+        "gpu_memory_utilization": 0.98,
+    },
+    "allenai/Olmo-Hybrid-7B": {"tp_size": 2},
+    "gemma-3n-E2B-it": {
+        "hf_overrides": {
+            "vision_config": {"torch_dtype": "float32", "dtype": "float32"},
+            "audio_config": {"torch_dtype": "float32", "dtype": "float32"},
+        },
+        "dtype": "float32",
     },
 }
 
