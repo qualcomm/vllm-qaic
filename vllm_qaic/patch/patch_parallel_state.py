@@ -38,6 +38,7 @@ class QaicGroupCoordinator(GroupCoordinator):
         use_device_communicator: bool,  # whether to use device communicator
         use_message_queue_broadcaster: bool = False,
         group_name: str | None = None,
+        use_all2all: bool = False,
     ):
         group_name = group_name or "anonymous"
         self.unique_name = _get_unique_name(group_name)
@@ -88,6 +89,7 @@ class QaicGroupCoordinator(GroupCoordinator):
                 device=self.device,
                 device_group=self.device_group,
                 unique_name=self.unique_name,
+                use_all2all=use_all2all,
             )
 
         from vllm.distributed.device_communicators.shm_broadcast import (

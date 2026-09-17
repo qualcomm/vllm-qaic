@@ -21,14 +21,26 @@ LORA_NAME = "jashing/tinyllama-colorist-lora"
 
 
 @pytest.mark.qaic_test_config(
-    model_name=MODEL_NAME,
-    seq_len=32,
-    ctx_len=64,
-    decode_bsz=4,
-    dtype="mxfp6",
-    kv_dtype="mxint8",
-    num_device_groups=1,
-    device_group_size=1,
+    {
+        "aot": dict(
+            model_name=MODEL_NAME,
+            seq_len=32,
+            ctx_len=64,
+            decode_bsz=4,
+            dtype="mxfp6",
+            kv_dtype="mxint8",
+            num_device_groups=1,
+            device_group_size=1,
+        ),
+        "eager": dict(
+            model_name=MODEL_NAME,
+            seq_len=32,
+            ctx_len=64,
+            decode_bsz=4,
+            num_device_groups=1,
+            device_group_size=1,
+        ),
+    }
 )
 def test_multiple_lora_requests(device_group, make_runner):
     lora_modules = [

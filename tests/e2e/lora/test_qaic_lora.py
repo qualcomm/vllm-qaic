@@ -25,14 +25,26 @@ ADAPTER_ID_1 = "jashing/tinyllama-energy-lora"
 
 
 @pytest.mark.qaic_test_config(
-    model_name=BASE_MODEL_NAME,
-    seq_len=64,
-    ctx_len=32,
-    decode_bsz=2,
-    dtype="mxfp6",
-    kv_dtype="mxint8",
-    num_device_groups=1,
-    device_group_size=1,
+    {
+        "aot": dict(
+            model_name=BASE_MODEL_NAME,
+            seq_len=64,
+            ctx_len=32,
+            decode_bsz=2,
+            dtype="mxfp6",
+            kv_dtype="mxint8",
+            num_device_groups=1,
+            device_group_size=1,
+        ),
+        "eager": dict(
+            model_name=BASE_MODEL_NAME,
+            seq_len=64,
+            ctx_len=32,
+            decode_bsz=2,
+            num_device_groups=1,
+            device_group_size=1,
+        ),
+    }
 )
 def test_llm_lora_max_adapter_load(device_group, make_runner):
     """Test loading maximum number of LoRA adapters."""
@@ -57,16 +69,36 @@ def test_llm_lora_max_adapter_load(device_group, make_runner):
 
 
 @pytest.mark.qaic_test_config(
-    model_name=BASE_MODEL_NAME,
-    seq_len=32,
-    ctx_len=64,
-    decode_bsz=2,
-    dtype="mxfp6",
-    kv_dtype="mxint8",
-    num_device_groups=1,
-    device_group_size=1,
+    {
+        "aot": dict(
+            model_name=BASE_MODEL_NAME,
+            seq_len=32,
+            ctx_len=64,
+            decode_bsz=2,
+            dtype="mxfp6",
+            kv_dtype="mxint8",
+            num_device_groups=1,
+            device_group_size=1,
+        ),
+        "eager": dict(
+            model_name=BASE_MODEL_NAME,
+            seq_len=32,
+            ctx_len=64,
+            decode_bsz=2,
+            num_device_groups=1,
+            device_group_size=1,
+        ),
+    }
 )
-def test_llm_lora_offline_init_caching(device_group):
+def test_llm_lora_offline_init_caching(
+    device_group,
+    model_name,
+    seq_len,
+    ctx_len,
+    decode_bsz,
+    dtype,
+    kv_dtype,
+):
     """Test offline LoRA initialization and QPC caching."""
     lora_modules = [
         LoRAModulePath(name="adapter_0", path=snapshot_download(repo_id=ADAPTER_ID_0)),
@@ -74,12 +106,12 @@ def test_llm_lora_offline_init_caching(device_group):
     ]
 
     llm_kwargs = dict(
-        model=BASE_MODEL_NAME,
-        max_num_seqs=2,
-        max_model_len=64,
-        long_prefill_token_threshold=32,
-        quantization="mxfp6",
-        kv_cache_dtype="mxint8",
+        model=model_name,
+        max_num_seqs=decode_bsz,
+        max_model_len=ctx_len,
+        long_prefill_token_threshold=seq_len,
+        quantization=dtype,
+        kv_cache_dtype=kv_dtype,
         gpu_memory_utilization=1.0,
         enable_lora=True,
         max_loras=2,
@@ -111,8 +143,40 @@ def test_llm_lora_offline_init_caching(device_group):
     assert init_time_0 > init_time_1
 
 
-@pytest.mark.qaic_test_config(num_device_groups=1, device_group_size=1)
-def test_llm_lora_online_openai_init(device_group, host, port, server_runner):
+@pytest.mark.qaic_test_config(
+    {
+        "aot": dict(
+            model_name=BASE_MODEL_NAME,
+            seq_len=32,
+            ctx_len=64,
+            decode_bsz=2,
+            dtype="mxfp6",
+            kv_dtype="mxint8",
+            num_device_groups=1,
+            device_group_size=1,
+        ),
+        "eager": dict(
+            model_name=BASE_MODEL_NAME,
+            seq_len=32,
+            ctx_len=64,
+            decode_bsz=2,
+            num_device_groups=1,
+            device_group_size=1,
+        ),
+    }
+)
+def test_llm_lora_online_openai_init(
+    device_group,
+    host,
+    port,
+    server_runner,
+    model_name,
+    seq_len,
+    ctx_len,
+    decode_bsz,
+    dtype,
+    kv_dtype,
+):
     """Test online LoRA initialization with OpenAI API server."""
     lora_module_1 = f"adapter_0={snapshot_download(repo_id=ADAPTER_ID_0)}"
     lora_module_2 = f"adapter_1={snapshot_download(repo_id=ADAPTER_ID_1)}"
@@ -121,14 +185,14 @@ def test_llm_lora_online_openai_init(device_group, host, port, server_runner):
 
     with server_runner(
         server_runner.Backend.OPENAI_API_SERVER_MODULE,
-        BASE_MODEL_NAME,
+        model_name,
         host,
         port,
-        32,
-        64,
-        2,
-        "mxfp6",
-        "mxint8",
+        seq_len,
+        ctx_len,
+        decode_bsz,
+        dtype,
+        kv_dtype,
         additional_config,
         timeout=SERVER_STARTUP_TIMEOUT,
         enable_lora=True,
@@ -139,14 +203,26 @@ def test_llm_lora_online_openai_init(device_group, host, port, server_runner):
 
 
 @pytest.mark.qaic_test_config(
-    model_name=BASE_MODEL_NAME,
-    seq_len=128,
-    ctx_len=256,
-    decode_bsz=4,
-    dtype="mxfp6",
-    kv_dtype="mxint8",
-    num_device_groups=1,
-    device_group_size=1,
+    {
+        "aot": dict(
+            model_name=BASE_MODEL_NAME,
+            seq_len=128,
+            ctx_len=256,
+            decode_bsz=4,
+            dtype="mxfp6",
+            kv_dtype="mxint8",
+            num_device_groups=1,
+            device_group_size=1,
+        ),
+        "eager": dict(
+            model_name=BASE_MODEL_NAME,
+            seq_len=128,
+            ctx_len=256,
+            decode_bsz=4,
+            num_device_groups=1,
+            device_group_size=1,
+        ),
+    }
 )
 def test_llm_lora_consistency(device_group, make_runner):
     """Test output consistency across multiple LoRA inference runs."""

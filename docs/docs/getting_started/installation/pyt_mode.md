@@ -43,7 +43,7 @@ pip install /opt/qti-aic/integrations/torch_qaic/py312/torch_qaic-*.whl
 pip install -r requirements/vllm_dependency_pyt.txt
 
 # Install vllm-cpu from PyPI (no compilation needed)
-pip install --no-deps "vllm-cpu==0.15.0"
+pip install --no-deps "vllm-cpu==0.28.0"
 
 # 4. vllm-qaic plugin
 pip install --no-build-isolation ./vllm-qaic
@@ -57,7 +57,7 @@ pip install --no-build-isolation ./vllm-qaic
 
 | Component | Version |
 |-----------|---------|
-| vLLM | 0.15.0 (vllm-cpu) |
+| vLLM | 0.28.0 (vllm-cpu) |
 | torch | 2.10.0+cpu |
 | torchvision | 0.25.0+cpu |
 | torch_qaic | 0.1.0 |
