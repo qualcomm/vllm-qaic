@@ -56,9 +56,10 @@ static inline QShimUDmaHandle qaic_linear_udma_submit_local(
                                require_handle, status);
 }
 
-static inline QShimUDmaHandle dma_copy_submit_local(
-    uint32_t thread_id, void* dst, const void* src, uint32_t bytes,
-    uint32_t* status) {
+static inline QShimUDmaHandle dma_copy_submit_local(uint32_t thread_id,
+                                                    void* dst, const void* src,
+                                                    uint32_t bytes,
+                                                    uint32_t* status) {
   return qaic_linear_udma_submit_local(thread_id, (AicJitPtr)src, bytes,
                                        (AicJitPtr)dst, 0, true, status);
 }
@@ -96,16 +97,16 @@ static inline int32_t wait_dma_handles(QShimUDmaHandle* handles,
 
 static inline uint64_t hmx_lhs_crouton_bytes(int32_t m, int32_t k) {
   int shape[2] = {m, k};
-  const QAicHMXDims<QAIC_HMX_FlatNXYD> flat_dims(
-      shape, sizeof(float16), HMXShapeKind::YD);
+  const QAicHMXDims<QAIC_HMX_FlatNXYD> flat_dims(shape, sizeof(float16),
+                                                 HMXShapeKind::YD);
   const QAicHMXDims<QAIC_HMX_MATMUL_CROUTON_16B> crouton_dims(flat_dims);
   return crouton_dims.sizeInBytes();
 }
 
 static inline uint64_t hmx_out_crouton_bytes(int32_t m, int32_t n) {
   int shape[2] = {m, n};
-  const QAicHMXDims<QAIC_HMX_FlatNXYD> flat_dims(
-      shape, sizeof(float16), HMXShapeKind::YD);
+  const QAicHMXDims<QAIC_HMX_FlatNXYD> flat_dims(shape, sizeof(float16),
+                                                 HMXShapeKind::YD);
   const QAicHMXDims<QAIC_HMX_MATMUL_CROUTON_16B> crouton_dims(flat_dims);
   return crouton_dims.sizeInBytes();
 }
@@ -265,8 +266,7 @@ static inline bool hmx_prefill_pair_layout_expand(
   uint64_t offset = layout->total_bytes - kHmxVtcmSafetyBytes;
   const uint64_t pair_work_bytes =
       layout->q_bytes > layout->p_bytes ? layout->q_bytes : layout->p_bytes;
-  if (!aligned_alloc_size(&offset, QAIC_HMX_INPUT_ALIGNMENT,
-                          pair_work_bytes) ||
+  if (!aligned_alloc_size(&offset, QAIC_HMX_INPUT_ALIGNMENT, pair_work_bytes) ||
       !aligned_alloc_size(&offset, QAIC_HMX_ALIGNMENT,
                           layout->q_lhs_crouton_bytes) ||
       !aligned_alloc_size(&offset, HVX_VectorSize, layout->acc_bytes) ||
@@ -281,46 +281,46 @@ static inline bool hmx_prefill_pair_layout_expand(
 static inline void hmx_attention_scratch_alloc(
     HmxPagedAttentionScratch* scratch, uint8_t** vtcm_cur,
     const HmxPagedAttentionLayout* layout) {
-  scratch->q_rm = (float16*)vtcm_alloc(vtcm_cur, QAIC_HMX_INPUT_ALIGNMENT,
-                                       layout->q_bytes);
+  scratch->q_rm =
+      (float16*)vtcm_alloc(vtcm_cur, QAIC_HMX_INPUT_ALIGNMENT, layout->q_bytes);
   scratch->k_rhs_rm[0] = (float16*)vtcm_alloc(
       vtcm_cur, QAIC_HMX_INPUT_ALIGNMENT, layout->k_rhs_bytes);
   scratch->k_rhs_rm[1] = (float16*)vtcm_alloc(
       vtcm_cur, QAIC_HMX_INPUT_ALIGNMENT, layout->k_rhs_bytes);
-  scratch->s_rm = (float16*)vtcm_alloc(vtcm_cur, QAIC_HMX_INPUT_ALIGNMENT,
-                                       layout->s_bytes);
-  scratch->p_rm = (float16*)vtcm_alloc(vtcm_cur, QAIC_HMX_INPUT_ALIGNMENT,
-                                       layout->p_bytes);
+  scratch->s_rm =
+      (float16*)vtcm_alloc(vtcm_cur, QAIC_HMX_INPUT_ALIGNMENT, layout->s_bytes);
+  scratch->p_rm =
+      (float16*)vtcm_alloc(vtcm_cur, QAIC_HMX_INPUT_ALIGNMENT, layout->p_bytes);
   scratch->v_rhs_rm[0] = (float16*)vtcm_alloc(
       vtcm_cur, QAIC_HMX_INPUT_ALIGNMENT, layout->v_rhs_bytes);
   scratch->v_rhs_rm[1] = (float16*)vtcm_alloc(
       vtcm_cur, QAIC_HMX_INPUT_ALIGNMENT, layout->v_rhs_bytes);
   scratch->pv_rm = (float16*)vtcm_alloc(vtcm_cur, QAIC_HMX_INPUT_ALIGNMENT,
                                         layout->pv_bytes);
-  scratch->q_lhs_crouton = (float16*)vtcm_alloc(
-      vtcm_cur, QAIC_HMX_ALIGNMENT, layout->q_lhs_crouton_bytes);
-  scratch->lhs_crouton = (float16*)vtcm_alloc(
-      vtcm_cur, QAIC_HMX_ALIGNMENT, layout->lhs_crouton_bytes);
+  scratch->q_lhs_crouton = (float16*)vtcm_alloc(vtcm_cur, QAIC_HMX_ALIGNMENT,
+                                                layout->q_lhs_crouton_bytes);
+  scratch->lhs_crouton = (float16*)vtcm_alloc(vtcm_cur, QAIC_HMX_ALIGNMENT,
+                                              layout->lhs_crouton_bytes);
   scratch->rhs_crouton = (float16*)vtcm_alloc(
       vtcm_cur, QAIC_HMX_WEIGHT_ALIGNMENT, layout->rhs_crouton_bytes);
-  scratch->out_crouton = (float16*)vtcm_alloc(
-      vtcm_cur, QAIC_HMX_ALIGNMENT, layout->out_crouton_bytes);
-  scratch->out_acc = (float*)vtcm_alloc(vtcm_cur, HVX_VectorSize,
-                                        layout->acc_bytes);
-  scratch->row_max = (float*)vtcm_alloc(vtcm_cur, HVX_VectorSize,
-                                        layout->row_bytes);
-  scratch->row_sum = (float*)vtcm_alloc(vtcm_cur, HVX_VectorSize,
-                                        layout->row_bytes);
-  scratch->hmx_status = (int32_t*)vtcm_alloc(vtcm_cur, HVX_VectorSize,
-                                             layout->status_bytes);
+  scratch->out_crouton = (float16*)vtcm_alloc(vtcm_cur, QAIC_HMX_ALIGNMENT,
+                                              layout->out_crouton_bytes);
+  scratch->out_acc =
+      (float*)vtcm_alloc(vtcm_cur, HVX_VectorSize, layout->acc_bytes);
+  scratch->row_max =
+      (float*)vtcm_alloc(vtcm_cur, HVX_VectorSize, layout->row_bytes);
+  scratch->row_sum =
+      (float*)vtcm_alloc(vtcm_cur, HVX_VectorSize, layout->row_bytes);
+  scratch->hmx_status =
+      (int32_t*)vtcm_alloc(vtcm_cur, HVX_VectorSize, layout->status_bytes);
 }
 
 static inline bool hmx_choose_prefill_tile(int32_t gqa, int32_t head_dim,
                                            uint64_t vtcm_size,
                                            HmxPagedAttentionTile* tile) {
   static const int32_t q_candidates[] = {64, 32, 16, 8, 4, 2, 1};
-  static const int32_t kv_candidates[] = {
-      2048, 1792, 1536, 1280, 1024, 512, 256, 128, 64, 32, 16};
+  static const int32_t kv_candidates[] = {2048, 1792, 1536, 1280, 1024, 512,
+                                          256,  128,  64,   32,   16};
 
   uint64_t best_score = 0;
   bool found = false;
@@ -328,8 +328,8 @@ static inline bool hmx_choose_prefill_tile(int32_t gqa, int32_t head_dim,
 
   for (uint32_t qi = 0; qi < sizeof(q_candidates) / sizeof(q_candidates[0]);
        ++qi) {
-    for (uint32_t ki = 0;
-         ki < sizeof(kv_candidates) / sizeof(kv_candidates[0]); ++ki) {
+    for (uint32_t ki = 0; ki < sizeof(kv_candidates) / sizeof(kv_candidates[0]);
+         ++ki) {
       const int32_t q_block = q_candidates[qi];
       const int32_t kv_block = kv_candidates[ki];
       const int64_t rows64 = (int64_t)q_block * (int64_t)gqa;
@@ -369,22 +369,20 @@ static inline bool hmx_choose_prefill_tile(int32_t gqa, int32_t head_dim,
 }
 
 static inline bool hmx_choose_decode_tile(int32_t gqa, int32_t head_dim,
-                                          int32_t num_reqs,
-                                          int32_t max_seq_len,
+                                          int32_t num_reqs, int32_t max_seq_len,
                                           int32_t block_size,
                                           uint64_t vtcm_size,
                                           HmxPagedAttentionTile* tile) {
   static const int32_t req_candidates[] = {16, 8, 4, 2, 1};
-  static const int32_t kv_candidates[] = {
-      2048, 1792, 1536, 1280, 1024, 512, 256, 128, 64, 32, 16};
+  static const int32_t kv_candidates[] = {2048, 1792, 1536, 1280, 1024, 512,
+                                          256,  128,  64,   32,   16};
 
   if (block_size <= 0) {
     return false;
   }
   const int64_t aligned_seq_len64 =
       max_seq_len > 0
-          ? (((int64_t)max_seq_len + block_size - 1) / block_size) *
-                block_size
+          ? (((int64_t)max_seq_len + block_size - 1) / block_size) * block_size
           : block_size;
   if (aligned_seq_len64 > INT32_MAX) {
     return false;
@@ -395,8 +393,8 @@ static inline bool hmx_choose_decode_tile(int32_t gqa, int32_t head_dim,
   bool found = false;
   HmxPagedAttentionTile best = {};
 
-  for (uint32_t ri = 0;
-       ri < sizeof(req_candidates) / sizeof(req_candidates[0]); ++ri) {
+  for (uint32_t ri = 0; ri < sizeof(req_candidates) / sizeof(req_candidates[0]);
+       ++ri) {
     int32_t req_block = req_candidates[ri];
     if (req_block > num_reqs) {
       req_block = num_reqs;
@@ -465,9 +463,7 @@ static inline int32_t ceil_div_i32(int32_t a, int32_t b) {
   return (a + b - 1) / b;
 }
 
-static inline int32_t min_i32(int32_t a, int32_t b) {
-  return a < b ? a : b;
-}
+static inline int32_t min_i32(int32_t a, int32_t b) { return a < b ? a : b; }
 
 static inline int32_t snake_task_owner(int32_t task_id, int32_t num_cores) {
   const int32_t batch = task_id / num_cores;
@@ -475,9 +471,11 @@ static inline int32_t snake_task_owner(int32_t task_id, int32_t num_cores) {
   return (batch & 1) != 0 ? num_cores - 1 - lane : lane;
 }
 
-static inline int32_t paired_prefill_task_owner(
-    int32_t pair_index, int32_t kv_head, int32_t num_kv_heads,
-    int32_t num_cores, int32_t fallback_task_id) {
+static inline int32_t paired_prefill_task_owner(int32_t pair_index,
+                                                int32_t kv_head,
+                                                int32_t num_kv_heads,
+                                                int32_t num_cores,
+                                                int32_t fallback_task_id) {
   if (num_kv_heads <= 0 || num_cores < num_kv_heads ||
       num_cores % num_kv_heads != 0) {
     return snake_task_owner(fallback_task_id, num_cores);
@@ -499,13 +497,14 @@ static inline int32_t num_workers(const AicJitEntryPointConfig* cfg) {
   return cfg->numCores * cfg->numThreads;
 }
 
-static inline bool hmx_thread_is_launched(
-    const AicJitEntryPointConfig* cfg, int64_t hmx_thread_id) {
+static inline bool hmx_thread_is_launched(const AicJitEntryPointConfig* cfg,
+                                          int64_t hmx_thread_id) {
   return hmx_thread_id >= 0 && hmx_thread_id < (int64_t)cfg->numThreads;
 }
 
-static inline int32_t hmx_local_hvx_thread(
-    uint32_t thread_id, int64_t hmx_thread_id, bool hmx_launched) {
+static inline int32_t hmx_local_hvx_thread(uint32_t thread_id,
+                                           int64_t hmx_thread_id,
+                                           bool hmx_launched) {
   if (hmx_launched && thread_id > (uint32_t)hmx_thread_id) {
     return (int32_t)thread_id - 1;
   }
@@ -559,9 +558,8 @@ static inline void store_cache_rows_chunk(PagedAttentionStoreState* state,
     const int32_t src =
         (token * state->num_kv_heads + kv_head) * state->head_dim;
     const int32_t dst =
-        cache_offset(block_id, kv_head, block_offset, 0,
-                     state->num_kv_heads, state->block_size,
-                     state->head_dim);
+        cache_offset(block_id, kv_head, block_offset, 0, state->num_kv_heads,
+                     state->block_size, state->head_dim);
     memcpy(state->key_cache + dst, state->key + src, row_bytes);
     memcpy(state->value_cache + dst, state->value + src, row_bytes);
   }
@@ -570,11 +568,10 @@ static inline void store_cache_rows_chunk(PagedAttentionStoreState* state,
 
 static inline int32_t submit_prefill_v_dma(
     uint32_t thread_id, const float16* value, const float16* value_cache,
-    float16* v_dst, const int32_t* block_table, int32_t req, int32_t req_q_start,
-    int32_t prefix_len, int32_t kv_head, int32_t kv_start, int32_t kv_rows,
-    int32_t num_kv_heads, int32_t block_size, int32_t head_dim,
-    int32_t max_blocks_per_seq, QShimUDmaHandle* handles,
-    int32_t* n_handles) {
+    float16* v_dst, const int32_t* block_table, int32_t req,
+    int32_t req_q_start, int32_t prefix_len, int32_t kv_head, int32_t kv_start,
+    int32_t kv_rows, int32_t num_kv_heads, int32_t block_size, int32_t head_dim,
+    int32_t max_blocks_per_seq, QShimUDmaHandle* handles, int32_t* n_handles) {
   *n_handles = 0;
   int32_t c = 0;
   while (c < kv_rows) {
@@ -595,9 +592,9 @@ static inline int32_t submit_prefill_v_dma(
         return JIT_DEV_ERROR_INVALID_PARAMETER;
       }
       uint32_t status = JIT_DEV_STATUS_SUCCESS;
-      handles[*n_handles] = dma_copy_2d_submit_local(
-          thread_id, dst, v_src, (uint32_t)chunk_rows, width, dst_stride,
-          src_stride, &status);
+      handles[*n_handles] =
+          dma_copy_2d_submit_local(thread_id, dst, v_src, (uint32_t)chunk_rows,
+                                   width, dst_stride, src_stride, &status);
       if (status != JIT_DEV_STATUS_SUCCESS ||
           handles[*n_handles] == INVALID_UDMA_HANDLE) {
         return status != JIT_DEV_STATUS_SUCCESS
@@ -627,12 +624,12 @@ static inline int32_t submit_prefill_v_dma(
       return JIT_DEV_ERROR_INVALID_PARAMETER;
     }
     uint32_t status = JIT_DEV_STATUS_SUCCESS;
-    handles[*n_handles] = dma_copy_submit_local(
-        thread_id, dst, v_src, (uint32_t)bytes64, &status);
+    handles[*n_handles] = dma_copy_submit_local(thread_id, dst, v_src,
+                                                (uint32_t)bytes64, &status);
     if (status != JIT_DEV_STATUS_SUCCESS ||
         handles[*n_handles] == INVALID_UDMA_HANDLE) {
       return status != JIT_DEV_STATUS_SUCCESS ? status
-                                               : JIT_DEV_ERROR_INVALID_PARAMETER;
+                                              : JIT_DEV_ERROR_INVALID_PARAMETER;
     }
     ++(*n_handles);
     c += chunk_rows;
@@ -680,8 +677,8 @@ static inline int32_t submit_decode_v_dma(
         return JIT_DEV_ERROR_INVALID_PARAMETER;
       }
       uint32_t status = JIT_DEV_STATUS_SUCCESS;
-      handles[*n_handles] = dma_copy_submit_local(
-          thread_id, dst, v_src, (uint32_t)bytes64, &status);
+      handles[*n_handles] = dma_copy_submit_local(thread_id, dst, v_src,
+                                                  (uint32_t)bytes64, &status);
       if (status != JIT_DEV_STATUS_SUCCESS ||
           handles[*n_handles] == INVALID_UDMA_HANDLE) {
         return status != JIT_DEV_STATUS_SUCCESS
@@ -720,29 +717,24 @@ static inline void zero_f16_row_hvx(float16* row, int32_t count) {
     StoreUnalignedHVX((int8_t*)(row + i), zero);
   }
   if (i < count) {
-    StoreUnalignedHVX((int8_t*)(row + i), zero,
-                      (count - i) * sizeof(float16));
+    StoreUnalignedHVX((int8_t*)(row + i), zero, (count - i) * sizeof(float16));
   }
 }
 
-static inline void scale_f16_row_hvx(float16* row, int32_t count,
-                                      float scale) {
+static inline void scale_f16_row_hvx(float16* row, int32_t count, float scale) {
   const float16 scale_hf = (float16)scale;
   const HVX_Vector scale_vhf = Q6_Vh_vsplat_R(*(const uint16_t*)&scale_hf);
   int32_t i = 0;
   for (; i + kF16PerHvx <= count; i += kF16PerHvx) {
     const HVX_Vector in_hf =
         LoadUnaligned<HVX_Vector>((const int8_t*)(row + i));
-    StoreUnalignedHVX((int8_t*)(row + i),
-                      Q6_Vhf_vmpy_VhfVhf(in_hf, scale_vhf));
+    StoreUnalignedHVX((int8_t*)(row + i), Q6_Vhf_vmpy_VhfVhf(in_hf, scale_vhf));
   }
   if (i < count) {
     const int32_t rem = count - i;
-    const HVX_Vector in_hf =
-        LoadUnaligned<HVX_Vector>((const int8_t*)(row + i),
-                                  rem * sizeof(float16));
-    StoreUnalignedHVX((int8_t*)(row + i),
-                      Q6_Vhf_vmpy_VhfVhf(in_hf, scale_vhf),
+    const HVX_Vector in_hf = LoadUnaligned<HVX_Vector>((const int8_t*)(row + i),
+                                                       rem * sizeof(float16));
+    StoreUnalignedHVX((int8_t*)(row + i), Q6_Vhf_vmpy_VhfVhf(in_hf, scale_vhf),
                       rem * sizeof(float16));
   }
 }
@@ -759,21 +751,17 @@ static inline HVX_Vector softmax_exp_hvx(HVX_Vector centered_hf) {
   const HVX_Vector inv_32_hf = splat_f16(1.0f / 32.0f);
   const HVX_Vector one_hf = splat_f16(1.0f);
 
-  HVX_Vector x_hf =
-      Q6_Vhf_vmax_VhfVhf(centered_hf, neg_limit_hf);
+  HVX_Vector x_hf = Q6_Vhf_vmax_VhfVhf(centered_hf, neg_limit_hf);
   x_hf = Q6_Vhf_vmpy_VhfVhf(x_hf, inv_32_hf);
 
   HVX_Vector p_hf = splat_f16(1.0f / 120.0f);
-  p_hf = Q6_Vhf_vadd_VhfVhf(
-      Q6_Vhf_vmpy_VhfVhf(p_hf, x_hf), splat_f16(1.0f / 24.0f));
-  p_hf = Q6_Vhf_vadd_VhfVhf(
-      Q6_Vhf_vmpy_VhfVhf(p_hf, x_hf), splat_f16(1.0f / 6.0f));
-  p_hf = Q6_Vhf_vadd_VhfVhf(
-      Q6_Vhf_vmpy_VhfVhf(p_hf, x_hf), splat_f16(0.5f));
-  p_hf =
-      Q6_Vhf_vadd_VhfVhf(Q6_Vhf_vmpy_VhfVhf(p_hf, x_hf), one_hf);
-  p_hf =
-      Q6_Vhf_vadd_VhfVhf(Q6_Vhf_vmpy_VhfVhf(p_hf, x_hf), one_hf);
+  p_hf = Q6_Vhf_vadd_VhfVhf(Q6_Vhf_vmpy_VhfVhf(p_hf, x_hf),
+                            splat_f16(1.0f / 24.0f));
+  p_hf = Q6_Vhf_vadd_VhfVhf(Q6_Vhf_vmpy_VhfVhf(p_hf, x_hf),
+                            splat_f16(1.0f / 6.0f));
+  p_hf = Q6_Vhf_vadd_VhfVhf(Q6_Vhf_vmpy_VhfVhf(p_hf, x_hf), splat_f16(0.5f));
+  p_hf = Q6_Vhf_vadd_VhfVhf(Q6_Vhf_vmpy_VhfVhf(p_hf, x_hf), one_hf);
+  p_hf = Q6_Vhf_vadd_VhfVhf(Q6_Vhf_vmpy_VhfVhf(p_hf, x_hf), one_hf);
 
   for (int32_t i = 0; i < 5; ++i) {
     p_hf = Q6_Vhf_vmpy_VhfVhf(p_hf, p_hf);
@@ -795,10 +783,12 @@ static inline float online_rescale_exp_hvx(float delta) {
   return values[0];
 }
 
-static inline void online_softmax_block_hvx(
-    const float16* scores_row, float16* probs_row, int32_t n_cols,
-    int32_t valid_begin, int32_t valid_count, float scale,
-    float* block_max_out, float* block_sum_out) {
+static inline void online_softmax_block_hvx(const float16* scores_row,
+                                            float16* probs_row, int32_t n_cols,
+                                            int32_t valid_begin,
+                                            int32_t valid_count, float scale,
+                                            float* block_max_out,
+                                            float* block_sum_out) {
   *block_max_out = -FLT_MAX;
   *block_sum_out = 0.0f;
 
@@ -846,8 +836,7 @@ static inline void online_softmax_block_hvx(
   for (c = 0; c + kF16PerHvx <= valid_count; c += kF16PerHvx) {
     const HVX_Vector scaled_hf =
         LoadUnaligned<HVX_Vector>((const int8_t*)(valid_probs + c));
-    const HVX_Vector centered_hf =
-        Q6_Vhf_vsub_VhfVhf(scaled_hf, max_hf);
+    const HVX_Vector centered_hf = Q6_Vhf_vsub_VhfVhf(scaled_hf, max_hf);
     const HVX_Vector exp_hf = softmax_exp_hvx(centered_hf);
     reduce_f16_as_f32(&sum_reducer, exp_hf);
     StoreUnalignedHVX((int8_t*)(valid_probs + c), exp_hf);
@@ -856,8 +845,7 @@ static inline void online_softmax_block_hvx(
     const int32_t rem = valid_count - c;
     const HVX_Vector scaled_hf = LoadUnaligned<HVX_Vector>(
         (const int8_t*)(valid_probs + c), rem * sizeof(float16));
-    const HVX_Vector centered_hf =
-        Q6_Vhf_vsub_VhfVhf(scaled_hf, max_hf);
+    const HVX_Vector centered_hf = Q6_Vhf_vsub_VhfVhf(scaled_hf, max_hf);
     HVX_Vector exp_hf = softmax_exp_hvx(centered_hf);
     const HVX_VectorB valid = Q6_Q_vsetq2_R(rem * sizeof(float16));
     exp_hf = Q6_V_vmux_QVV(valid, exp_hf, Q6_V_vzero());
@@ -924,10 +912,10 @@ static inline void accumulate_value_hvx(float* acc, const float16* value,
 
     HVX_Vector acc_lo = LoadHVX(acc + dim);
     HVX_Vector acc_hi = LoadHVX(acc + dim + kF32PerHvx);
-    acc_lo = Q6_Vsf_vadd_VsfVsf(
-        acc_lo, Q6_Vsf_vmpy_VsfVsf(Q6_V_lo_W(v_sf), weight_sf));
-    acc_hi = Q6_Vsf_vadd_VsfVsf(
-        acc_hi, Q6_Vsf_vmpy_VsfVsf(Q6_V_hi_W(v_sf), weight_sf));
+    acc_lo = Q6_Vsf_vadd_VsfVsf(acc_lo,
+                                Q6_Vsf_vmpy_VsfVsf(Q6_V_lo_W(v_sf), weight_sf));
+    acc_hi = Q6_Vsf_vadd_VsfVsf(acc_hi,
+                                Q6_Vsf_vmpy_VsfVsf(Q6_V_hi_W(v_sf), weight_sf));
     StoreHVX(acc + dim, acc_lo);
     StoreHVX(acc + dim + kF32PerHvx, acc_hi);
   }
@@ -945,8 +933,7 @@ static inline void add_value_hvx(float* acc, const float16* value,
         LoadUnaligned<HVX_Vector>((const int8_t*)(value + dim));
     const HVX_VectorPair value_sf = Q6_Wsf_vcvt_Vhf(value_hf);
     StoreHVX(acc + dim,
-             Q6_Vsf_vadd_VsfVsf(LoadHVX(acc + dim),
-                                Q6_V_lo_W(value_sf)));
+             Q6_Vsf_vadd_VsfVsf(LoadHVX(acc + dim), Q6_V_lo_W(value_sf)));
     StoreHVX(acc + dim + kF32PerHvx,
              Q6_Vsf_vadd_VsfVsf(LoadHVX(acc + dim + kF32PerHvx),
                                 Q6_V_hi_W(value_sf)));
@@ -962,30 +949,26 @@ static inline void store_normalized_hvx(float16* output, const float* acc,
   const HVX_Vector inv_sf = Q6_V_vsplat_R(float_bits(inv_denom));
   int32_t dim = 0;
   for (; dim + kF16PerHvx <= head_dim; dim += kF16PerHvx) {
-    const HVX_Vector out_lo =
-        Q6_Vsf_vmpy_VsfVsf(LoadHVX(acc + dim), inv_sf);
+    const HVX_Vector out_lo = Q6_Vsf_vmpy_VsfVsf(LoadHVX(acc + dim), inv_sf);
     const HVX_Vector out_hi =
         Q6_Vsf_vmpy_VsfVsf(LoadHVX(acc + dim + kF32PerHvx), inv_sf);
     const HVX_Vector out_hf = Q6_Vhf_vcvt_VsfVsf(out_lo, out_hi);
     StoreUnalignedHVX((int8_t*)(output + dim), out_hf);
   }
   // Q6_Vhf_vcvt_VsfVsf packs even/odd fp16 lanes from two fp32 vectors.
-  // Residual dimensions are kept in normal scalar order, so store them scalarly.
+  // Residual dimensions are kept in normal scalar order, so store them
+  // scalarly.
   for (; dim < head_dim; ++dim) {
     output[dim] = (float16)(acc[dim] * inv_denom);
   }
 }
 
-static inline int32_t hmx_prepare_lhs_crouton_16b(uint32_t thread_id,
-                                                  int64_t hmx_thread_id,
-                                                  float16* lhs_rm,
-                                                  float16* lhs_crouton,
-                                                  int32_t* shared_status,
-                                                  int32_t m,
-                                                  int32_t k) {
+static inline int32_t hmx_prepare_lhs_crouton_16b(
+    uint32_t thread_id, int64_t hmx_thread_id, float16* lhs_rm,
+    float16* lhs_crouton, int32_t* shared_status, int32_t m, int32_t k) {
   int lhs_shape[2] = {m, k};
-  const QAicHMXDims<QAIC_HMX_FlatNXYD> lhs_flat_dims(
-      lhs_shape, sizeof(float16), HMXShapeKind::YD);
+  const QAicHMXDims<QAIC_HMX_FlatNXYD> lhs_flat_dims(lhs_shape, sizeof(float16),
+                                                     HMXShapeKind::YD);
   const QAicHMXDims<QAIC_HMX_MATMUL_CROUTON_16B> lhs_crouton_dims(
       lhs_flat_dims);
 
@@ -1010,29 +993,20 @@ static inline int32_t hmx_prepare_lhs_crouton_16b(uint32_t thread_id,
 }
 
 static inline int32_t hmx_matmul_prepared_lhs_rm_16b(
-    uint32_t thread_id,
-    int64_t hmx_thread_id,
-    float16* lhs_crouton,
-    float16* rhs_rm,
-    float16* out_rm,
-    float16* rhs_crouton,
-    float16* out_crouton,
-    int32_t* shared_status,
-    int32_t m,
-    int32_t k,
-    int32_t n,
-    bool rhs_col_major,
-    bool rhs_prepared,
+    uint32_t thread_id, int64_t hmx_thread_id, float16* lhs_crouton,
+    float16* rhs_rm, float16* out_rm, float16* rhs_crouton,
+    float16* out_crouton, int32_t* shared_status, int32_t m, int32_t k,
+    int32_t n, bool rhs_col_major, bool rhs_prepared,
     PagedAttentionStoreState* store_state) {
   int lhs_shape[2] = {m, k};
-  const QAicHMXDims<QAIC_HMX_FlatNXYD> lhs_flat_dims(
-      lhs_shape, sizeof(float16), HMXShapeKind::YD);
+  const QAicHMXDims<QAIC_HMX_FlatNXYD> lhs_flat_dims(lhs_shape, sizeof(float16),
+                                                     HMXShapeKind::YD);
   const QAicHMXDims<QAIC_HMX_MATMUL_CROUTON_16B> lhs_crouton_dims(
       lhs_flat_dims);
 
   int out_shape[2] = {m, n};
-  const QAicHMXDims<QAIC_HMX_FlatNXYD> out_flat_dims(
-      out_shape, sizeof(float16), HMXShapeKind::YD);
+  const QAicHMXDims<QAIC_HMX_FlatNXYD> out_flat_dims(out_shape, sizeof(float16),
+                                                     HMXShapeKind::YD);
   const QAicHMXDims<QAIC_HMX_MATMUL_CROUTON_16B> out_crouton_dims(
       out_flat_dims);
 
@@ -1048,12 +1022,12 @@ static inline int32_t hmx_matmul_prepared_lhs_rm_16b(
     JitDevStatusCode_t ret = JIT_DEV_STATUS_SUCCESS;
     if (!rhs_prepared) {
       ret = rhs_col_major
-                ? qaic_hmx_cm_matmul_rhs_to_crouton_16b(
-                      (int16_t*)rhs_crouton, (const int16_t*)rhs_rm, rhs_dims,
-                      thread_id)
-                : qaic_hmx_rm_matmul_rhs_to_crouton_16b(
-                      (int16_t*)rhs_crouton, (const int16_t*)rhs_rm, rhs_dims,
-                      thread_id);
+                ? qaic_hmx_cm_matmul_rhs_to_crouton_16b((int16_t*)rhs_crouton,
+                                                        (const int16_t*)rhs_rm,
+                                                        rhs_dims, thread_id)
+                : qaic_hmx_rm_matmul_rhs_to_crouton_16b((int16_t*)rhs_crouton,
+                                                        (const int16_t*)rhs_rm,
+                                                        rhs_dims, thread_id);
     }
     if (ret != JIT_DEV_STATUS_SUCCESS) {
       local_status = ret;
@@ -1090,30 +1064,21 @@ static inline int32_t hmx_matmul_prepared_lhs_rm_16b(
   return *shared_status;
 }
 
-static inline int32_t hmx_matmul_rm_16b(uint32_t thread_id,
-                                        int64_t hmx_thread_id,
-                                        float16* lhs_rm,
-                                        float16* rhs_rm,
-                                        float16* out_rm,
-                                        float16* lhs_crouton,
-                                        float16* rhs_crouton,
-                                        float16* out_crouton,
-                                        int32_t* shared_status,
-                                        int32_t m,
-                                        int32_t k,
-                                        int32_t n,
-                                        bool rhs_col_major,
-                                        bool rhs_prepared,
-                                        PagedAttentionStoreState* store_state) {
+static inline int32_t hmx_matmul_rm_16b(
+    uint32_t thread_id, int64_t hmx_thread_id, float16* lhs_rm, float16* rhs_rm,
+    float16* out_rm, float16* lhs_crouton, float16* rhs_crouton,
+    float16* out_crouton, int32_t* shared_status, int32_t m, int32_t k,
+    int32_t n, bool rhs_col_major, bool rhs_prepared,
+    PagedAttentionStoreState* store_state) {
   int lhs_shape[2] = {m, k};
-  const QAicHMXDims<QAIC_HMX_FlatNXYD> lhs_flat_dims(
-      lhs_shape, sizeof(float16), HMXShapeKind::YD);
+  const QAicHMXDims<QAIC_HMX_FlatNXYD> lhs_flat_dims(lhs_shape, sizeof(float16),
+                                                     HMXShapeKind::YD);
   const QAicHMXDims<QAIC_HMX_MATMUL_CROUTON_16B> lhs_crouton_dims(
       lhs_flat_dims);
 
   int out_shape[2] = {m, n};
-  const QAicHMXDims<QAIC_HMX_FlatNXYD> out_flat_dims(
-      out_shape, sizeof(float16), HMXShapeKind::YD);
+  const QAicHMXDims<QAIC_HMX_FlatNXYD> out_flat_dims(out_shape, sizeof(float16),
+                                                     HMXShapeKind::YD);
   const QAicHMXDims<QAIC_HMX_MATMUL_CROUTON_16B> out_crouton_dims(
       out_flat_dims);
 
@@ -1129,12 +1094,12 @@ static inline int32_t hmx_matmul_rm_16b(uint32_t thread_id,
     JitDevStatusCode_t ret = JIT_DEV_STATUS_SUCCESS;
     if (!rhs_prepared) {
       ret = rhs_col_major
-                ? qaic_hmx_cm_matmul_rhs_to_crouton_16b(
-                      (int16_t*)rhs_crouton, (const int16_t*)rhs_rm, rhs_dims,
-                      thread_id)
-                : qaic_hmx_rm_matmul_rhs_to_crouton_16b(
-                      (int16_t*)rhs_crouton, (const int16_t*)rhs_rm, rhs_dims,
-                      thread_id);
+                ? qaic_hmx_cm_matmul_rhs_to_crouton_16b((int16_t*)rhs_crouton,
+                                                        (const int16_t*)rhs_rm,
+                                                        rhs_dims, thread_id)
+                : qaic_hmx_rm_matmul_rhs_to_crouton_16b((int16_t*)rhs_crouton,
+                                                        (const int16_t*)rhs_rm,
+                                                        rhs_dims, thread_id);
     }
     if (ret != JIT_DEV_STATUS_SUCCESS) {
       local_status = ret;
@@ -1241,15 +1206,14 @@ static inline bool map_decode_ordered_row(
 }
 
 static inline int32_t paged_attention_hmx_prefill(
-    const AicJitEntryPointConfig* cfg, const float16* query,
-    const float16* key, const float16* value, float16* key_cache,
-    float16* value_cache, const int32_t* slot_mapping, float16* output,
-    const int32_t* block_table,
+    const AicJitEntryPointConfig* cfg, const float16* query, const float16* key,
+    const float16* value, float16* key_cache, float16* value_cache,
+    const int32_t* slot_mapping, float16* output, const int32_t* block_table,
     const int32_t* query_start_loc, const int32_t* seq_lens, int32_t num_reqs,
-    int32_t num_tokens, int32_t num_heads, int32_t num_kv_heads, int32_t head_dim,
-    int32_t block_size, int32_t max_blocks_per_seq, bool causal, float scale) {
-  if (head_dim <= 0 || num_kv_heads <= 0 ||
-      num_heads % num_kv_heads != 0) {
+    int32_t num_tokens, int32_t num_heads, int32_t num_kv_heads,
+    int32_t head_dim, int32_t block_size, int32_t max_blocks_per_seq,
+    bool causal, float scale) {
+  if (head_dim <= 0 || num_kv_heads <= 0 || num_heads % num_kv_heads != 0) {
     return JIT_DEV_ERROR_INVALID_PARAMETER;
   }
 
@@ -1269,20 +1233,17 @@ static inline int32_t paged_attention_hmx_prefill(
 
   const bool is_hmx_thread = thread_id == (uint32_t)hmx_thread_id;
   const bool hmx_launched = hmx_thread_is_launched(cfg, hmx_thread_id);
-  const int32_t hvx_threads =
-      (int32_t)cfg->numThreads - (hmx_launched ? 1 : 0);
+  const int32_t hvx_threads = (int32_t)cfg->numThreads - (hmx_launched ? 1 : 0);
   const int32_t local_hvx_thread =
       hmx_local_hvx_thread(thread_id, hmx_thread_id, hmx_launched);
 
   PagedAttentionStoreState store_state = {};
-  if (!is_hmx_thread && key != NULL && value != NULL &&
-      slot_mapping != NULL) {
+  if (!is_hmx_thread && key != NULL && value != NULL && slot_mapping != NULL) {
     const int32_t total_store_rows = num_tokens * num_kv_heads;
     const int32_t store_workers = (int32_t)cfg->numCores * hvx_threads;
     const int32_t store_worker =
         (int32_t)cfg->coreID * hvx_threads + local_hvx_thread;
-    const int32_t store_chunk =
-        ceil_div_i32(total_store_rows, store_workers);
+    const int32_t store_chunk = ceil_div_i32(total_store_rows, store_workers);
     const int32_t store_start = store_worker * store_chunk;
     int32_t store_end = store_start + store_chunk;
     if (store_end > total_store_rows) {
@@ -1319,22 +1280,22 @@ static inline int32_t paged_attention_hmx_prefill(
   uint8_t* vtcm_cur = (uint8_t*)qshimGetBaseVtcmAddr();
   HmxPagedAttentionScratch scratch;
   hmx_attention_scratch_alloc(&scratch, &vtcm_cur, &tile.layout);
-  const uint64_t pair_work_bytes =
-      tile.layout.q_bytes > tile.layout.p_bytes ? tile.layout.q_bytes
-                                                : tile.layout.p_bytes;
+  const uint64_t pair_work_bytes = tile.layout.q_bytes > tile.layout.p_bytes
+                                       ? tile.layout.q_bytes
+                                       : tile.layout.p_bytes;
   // The second Q row-major input is dead before its P probabilities are built.
-  float16* pair_work = (float16*)vtcm_alloc(
-      &vtcm_cur, QAIC_HMX_INPUT_ALIGNMENT, pair_work_bytes);
+  float16* pair_work = (float16*)vtcm_alloc(&vtcm_cur, QAIC_HMX_INPUT_ALIGNMENT,
+                                            pair_work_bytes);
   float16* pair_q_rm = pair_work;
   float16* pair_p_rm = pair_work;
   float16* pair_q_lhs_crouton = (float16*)vtcm_alloc(
       &vtcm_cur, QAIC_HMX_ALIGNMENT, tile.layout.q_lhs_crouton_bytes);
-  float* pair_out_acc = (float*)vtcm_alloc(
-      &vtcm_cur, HVX_VectorSize, tile.layout.acc_bytes);
-  float* pair_row_max = (float*)vtcm_alloc(
-      &vtcm_cur, HVX_VectorSize, tile.layout.row_bytes);
-  float* pair_row_sum = (float*)vtcm_alloc(
-      &vtcm_cur, HVX_VectorSize, tile.layout.row_bytes);
+  float* pair_out_acc =
+      (float*)vtcm_alloc(&vtcm_cur, HVX_VectorSize, tile.layout.acc_bytes);
+  float* pair_row_max =
+      (float*)vtcm_alloc(&vtcm_cur, HVX_VectorSize, tile.layout.row_bytes);
+  float* pair_row_sum =
+      (float*)vtcm_alloc(&vtcm_cur, HVX_VectorSize, tile.layout.row_bytes);
   qaicSyncHVXAndHMXThreads(thread_id);
   QShimUDmaHandle k_dma_handles[2][kMaxDmaHandles];
   int32_t k_dma_count[2] = {0, 0};
@@ -1349,12 +1310,12 @@ static inline int32_t paged_attention_hmx_prefill(
     const int32_t prefix_len = seq_len - q_len;
 
     for (int32_t kv_head = 0; kv_head < num_kv_heads; ++kv_head) {
-      for (int32_t q_block = 0; q_block < q_len;
-           q_block += 2 * q_block_tile) {
+      for (int32_t q_block = 0; q_block < q_len; q_block += 2 * q_block_tile) {
         const int32_t pair_index = q_block / (2 * q_block_tile);
-        const bool owns_task = paired_prefill_task_owner(
-            pair_index, kv_head, num_kv_heads, (int32_t)cfg->numCores,
-            task_id) == (int32_t)cfg->coreID;
+        const bool owns_task =
+            paired_prefill_task_owner(pair_index, kv_head, num_kv_heads,
+                                      (int32_t)cfg->numCores,
+                                      task_id) == (int32_t)cfg->coreID;
         ++task_id;
         if (!owns_task) {
           continue;
@@ -1372,8 +1333,7 @@ static inline int32_t paged_attention_hmx_prefill(
           m[pair] = q_rows[pair] * gqa;
           kv_ends[pair] =
               causal
-                  ? min_i32(seq_len,
-                            prefix_len + q_blocks[pair] + q_rows[pair])
+                  ? min_i32(seq_len, prefix_len + q_blocks[pair] + q_rows[pair])
                   : seq_len;
         }
         const int32_t kv_end = kv_ends[pair_count - 1];
@@ -1392,28 +1352,26 @@ static inline int32_t paged_attention_hmx_prefill(
             const int32_t first_kv_rows =
                 kv_end < kv_block_tile ? kv_end : kv_block_tile;
             *scratch.hmx_status = submit_prefill_v_dma(
-                thread_id, key, key_cache, scratch.k_rhs_rm[0],
-                block_table, req, req_q_start, prefix_len, kv_head, 0,
-                first_kv_rows, num_kv_heads, block_size, head_dim,
-                max_blocks_per_seq, k_dma_handles[0], &k_dma_count[0]);
+                thread_id, key, key_cache, scratch.k_rhs_rm[0], block_table,
+                req, req_q_start, prefix_len, kv_head, 0, first_kv_rows,
+                num_kv_heads, block_size, head_dim, max_blocks_per_seq,
+                k_dma_handles[0], &k_dma_count[0]);
             if (*scratch.hmx_status == JIT_DEV_STATUS_SUCCESS) {
               *scratch.hmx_status = submit_prefill_v_dma(
-                thread_id, value, value_cache, scratch.v_rhs_rm[0],
-                block_table, req, req_q_start, prefix_len, kv_head, 0,
-                first_kv_rows, num_kv_heads, block_size, head_dim,
-                max_blocks_per_seq, v_dma_handles[0], &v_dma_count[0]);
+                  thread_id, value, value_cache, scratch.v_rhs_rm[0],
+                  block_table, req, req_q_start, prefix_len, kv_head, 0,
+                  first_kv_rows, num_kv_heads, block_size, head_dim,
+                  max_blocks_per_seq, v_dma_handles[0], &v_dma_count[0]);
             }
           }
         }
 
         if (!is_hmx_thread) {
           for (int32_t pair = 0; pair < pair_count; ++pair) {
-            for (int32_t r = local_hvx_thread; r < m[pair];
-                 r += hvx_threads) {
+            for (int32_t r = local_hvx_thread; r < m[pair]; r += hvx_threads) {
               const int32_t local_q = r / gqa;
               const int32_t h_in_group = r - local_q * gqa;
-              const int32_t token =
-                  req_q_start + q_blocks[pair] + local_q;
+              const int32_t token = req_q_start + q_blocks[pair] + local_q;
               const int32_t head = kv_head * gqa + h_in_group;
               const float16* q_src =
                   query + flat_q_offset(token, head, 0, num_heads, head_dim);
@@ -1427,8 +1385,7 @@ static inline int32_t paged_attention_hmx_prefill(
 
         for (int32_t pair = 0; pair < pair_count; ++pair) {
           const int32_t total_acc = m[pair] * head_dim;
-          for (int32_t i = local_hvx_thread; i < total_acc;
-               i += hvx_threads) {
+          for (int32_t i = local_hvx_thread; i < total_acc; i += hvx_threads) {
             acc_buffers[pair][i] = 0.0f;
           }
         }
@@ -1442,8 +1399,7 @@ static inline int32_t paged_attention_hmx_prefill(
         for (int32_t pair = 0; pair < pair_count; ++pair) {
           ret = hmx_prepare_lhs_crouton_16b(
               thread_id, hmx_thread_id, q_rm_buffers[pair],
-              q_crouton_buffers[pair], scratch.hmx_status, m[pair],
-              head_dim);
+              q_crouton_buffers[pair], scratch.hmx_status, m[pair], head_dim);
           if (ret != JIT_DEV_STATUS_SUCCESS) {
             return ret;
           }
@@ -1503,8 +1459,7 @@ static inline int32_t paged_attention_hmx_prefill(
               for (int32_t r = local_hvx_thread; r < m[pair];
                    r += hvx_threads) {
                 const int32_t local_q = r / gqa;
-                const int32_t q_pos =
-                    prefix_len + q_blocks[pair] + local_q;
+                const int32_t q_pos = prefix_len + q_blocks[pair] + local_q;
                 int32_t kv_limit = causal ? (q_pos + 1) : seq_len;
                 if (kv_limit > seq_len) {
                   kv_limit = seq_len;
@@ -1523,11 +1478,10 @@ static inline int32_t paged_attention_hmx_prefill(
                 const float old_max = row_max_buffers[pair][r];
                 float block_max = -FLT_MAX;
                 float block_sum = 0.0f;
-                online_softmax_block_hvx(
-                    scratch.s_rm + r * kv_rows, p_row, kv_rows, 0,
-                    valid_count, scale, &block_max, &block_sum);
-                const float new_max =
-                    block_max > old_max ? block_max : old_max;
+                online_softmax_block_hvx(scratch.s_rm + r * kv_rows, p_row,
+                                         kv_rows, 0, valid_count, scale,
+                                         &block_max, &block_sum);
+                const float new_max = block_max > old_max ? block_max : old_max;
                 float prev_rescale = 1.0f;
                 float curr_rescale = 1.0f;
                 if (block_max > old_max) {
@@ -1536,8 +1490,7 @@ static inline int32_t paged_attention_hmx_prefill(
                           ? 0.0f
                           : online_rescale_exp_hvx(old_max - block_max);
                 } else if (block_max < old_max) {
-                  curr_rescale =
-                      online_rescale_exp_hvx(block_max - old_max);
+                  curr_rescale = online_rescale_exp_hvx(block_max - old_max);
                 }
                 if (prev_rescale != 1.0f) {
                   scale_accumulator_hvx(acc_buffers[pair] + r * head_dim,
@@ -1592,10 +1545,10 @@ static inline int32_t paged_attention_hmx_prefill(
             }
             ret = hmx_matmul_rm_16b(
                 thread_id, hmx_thread_id, p_rm_buffers[pair],
-                scratch.v_rhs_rm[kv_buf], scratch.pv_rm,
-                scratch.lhs_crouton, scratch.rhs_crouton,
-                scratch.out_crouton, scratch.hmx_status, m[pair], kv_rows,
-                head_dim, false, v_rhs_prepared, &store_state);
+                scratch.v_rhs_rm[kv_buf], scratch.pv_rm, scratch.lhs_crouton,
+                scratch.rhs_crouton, scratch.out_crouton, scratch.hmx_status,
+                m[pair], kv_rows, head_dim, false, v_rhs_prepared,
+                &store_state);
             if (ret != JIT_DEV_STATUS_SUCCESS) {
               return ret;
             }
@@ -1615,19 +1568,16 @@ static inline int32_t paged_attention_hmx_prefill(
 
         if (!is_hmx_thread) {
           for (int32_t pair = 0; pair < pair_count; ++pair) {
-            for (int32_t r = local_hvx_thread; r < m[pair];
-                 r += hvx_threads) {
+            for (int32_t r = local_hvx_thread; r < m[pair]; r += hvx_threads) {
               const int32_t local_q = r / gqa;
               const int32_t h_in_group = r - local_q * gqa;
-              const int32_t token =
-                  req_q_start + q_blocks[pair] + local_q;
+              const int32_t token = req_q_start + q_blocks[pair] + local_q;
               const int32_t head = kv_head * gqa + h_in_group;
               float16* out_row =
                   output + flat_q_offset(token, head, 0, num_heads, head_dim);
               const float denom = row_sum_buffers[pair][r];
               const float inv_denom = denom == 0.0f ? 0.0f : 1.0f / denom;
-              store_normalized_hvx(out_row,
-                                   acc_buffers[pair] + r * head_dim,
+              store_normalized_hvx(out_row, acc_buffers[pair] + r * head_dim,
                                    head_dim, inv_denom);
             }
           }
@@ -1648,16 +1598,14 @@ static inline int32_t paged_attention_hmx_prefill(
 }
 
 static inline int32_t paged_attention_hmx_decode(
-    const AicJitEntryPointConfig* cfg, const float16* query,
-    const float16* key, const float16* value, float16* key_cache,
-    float16* value_cache, const int32_t* slot_mapping, float16* output,
-    const int32_t* block_table, const int32_t* query_start_loc,
-    const int32_t* seq_lens, int32_t num_reqs, int32_t num_heads,
-    int32_t num_kv_heads, int32_t head_dim, int32_t block_size,
-    int32_t max_blocks_per_seq, bool causal, float scale) {
+    const AicJitEntryPointConfig* cfg, const float16* query, const float16* key,
+    const float16* value, float16* key_cache, float16* value_cache,
+    const int32_t* slot_mapping, float16* output, const int32_t* block_table,
+    const int32_t* query_start_loc, const int32_t* seq_lens, int32_t num_reqs,
+    int32_t num_heads, int32_t num_kv_heads, int32_t head_dim,
+    int32_t block_size, int32_t max_blocks_per_seq, bool causal, float scale) {
   (void)causal;
-  if (head_dim <= 0 || num_kv_heads <= 0 ||
-      num_heads % num_kv_heads != 0) {
+  if (head_dim <= 0 || num_kv_heads <= 0 || num_heads % num_kv_heads != 0) {
     return JIT_DEV_ERROR_INVALID_PARAMETER;
   }
 
@@ -1677,8 +1625,7 @@ static inline int32_t paged_attention_hmx_decode(
 
   const bool is_hmx_thread = thread_id == (uint32_t)hmx_thread_id;
   const bool hmx_launched = hmx_thread_is_launched(cfg, hmx_thread_id);
-  const int32_t hvx_threads =
-      (int32_t)cfg->numThreads - (hmx_launched ? 1 : 0);
+  const int32_t hvx_threads = (int32_t)cfg->numThreads - (hmx_launched ? 1 : 0);
   const int32_t local_hvx_thread =
       hmx_local_hvx_thread(thread_id, hmx_thread_id, hmx_launched);
 
@@ -1720,10 +1667,9 @@ static inline int32_t paged_attention_hmx_decode(
 
   int32_t task_id = 0;
   for (int32_t kv_head = 0; kv_head < num_kv_heads; ++kv_head) {
-    for (int32_t req_base = 0; req_base < num_reqs;
-         req_base += reqs_per_task) {
-      const bool owns_task = (task_id % (int32_t)cfg->numCores) ==
-                             (int32_t)cfg->coreID;
+    for (int32_t req_base = 0; req_base < num_reqs; req_base += reqs_per_task) {
+      const bool owns_task =
+          (task_id % (int32_t)cfg->numCores) == (int32_t)cfg->coreID;
       ++task_id;
       if (!owns_task) {
         continue;
@@ -1742,8 +1688,7 @@ static inline int32_t paged_attention_hmx_decode(
       }
 
       if (!is_hmx_thread) {
-        for (int32_t rb = local_hvx_thread; rb < req_tile;
-             rb += hvx_threads) {
+        for (int32_t rb = local_hvx_thread; rb < req_tile; rb += hvx_threads) {
           const int32_t req = req_base + rb;
           const int32_t token = query_start_loc[req];
           const int32_t slot = slot_mapping != NULL ? slot_mapping[token] : -1;
@@ -1753,10 +1698,9 @@ static inline int32_t paged_attention_hmx_decode(
             const int32_t src =
                 flat_kv_offset(token, kv_head, 0, num_kv_heads, head_dim);
             const int32_t dst =
-                cache_offset(block_id, kv_head, block_offset, 0,
-                             num_kv_heads, block_size, head_dim);
-            const uint32_t row_bytes =
-                (uint32_t)head_dim * sizeof(float16);
+                cache_offset(block_id, kv_head, block_offset, 0, num_kv_heads,
+                             block_size, head_dim);
+            const uint32_t row_bytes = (uint32_t)head_dim * sizeof(float16);
             memcpy(key_cache + dst, key + src, row_bytes);
             memcpy(value_cache + dst, value + src, row_bytes);
           }
@@ -1788,16 +1732,16 @@ static inline int32_t paged_attention_hmx_decode(
         *scratch.hmx_status = JIT_DEV_STATUS_SUCCESS;
         if (max_seq_len > 0) {
           *scratch.hmx_status = submit_decode_v_dma(
-              thread_id, key_cache, scratch.k_rhs_rm[0], block_table,
-              req_base, req_tile, kv_head, 0, kv_block_tile, n_cols,
-              seq_lens, num_kv_heads, block_size, head_dim,
-              max_blocks_per_seq, k_dma_handles[0], &k_dma_count[0]);
+              thread_id, key_cache, scratch.k_rhs_rm[0], block_table, req_base,
+              req_tile, kv_head, 0, kv_block_tile, n_cols, seq_lens,
+              num_kv_heads, block_size, head_dim, max_blocks_per_seq,
+              k_dma_handles[0], &k_dma_count[0]);
           if (*scratch.hmx_status == JIT_DEV_STATUS_SUCCESS) {
             *scratch.hmx_status = submit_decode_v_dma(
                 thread_id, value_cache, scratch.v_rhs_rm[0], block_table,
-                req_base, req_tile, kv_head, 0, kv_block_tile, n_cols,
-                seq_lens, num_kv_heads, block_size, head_dim,
-                max_blocks_per_seq, v_dma_handles[0], &v_dma_count[0]);
+                req_base, req_tile, kv_head, 0, kv_block_tile, n_cols, seq_lens,
+                num_kv_heads, block_size, head_dim, max_blocks_per_seq,
+                v_dma_handles[0], &v_dma_count[0]);
           }
         }
       }
@@ -1845,8 +1789,8 @@ static inline int32_t paged_attention_hmx_decode(
         ret = hmx_matmul_prepared_lhs_rm_16b(
             thread_id, hmx_thread_id, scratch.q_lhs_crouton,
             scratch.k_rhs_rm[kv_buf], scratch.s_rm, scratch.rhs_crouton,
-            scratch.out_crouton, scratch.hmx_status, m, head_dim, n_cols,
-            true, false, NULL);
+            scratch.out_crouton, scratch.hmx_status, m, head_dim, n_cols, true,
+            false, NULL);
         if (ret != JIT_DEV_STATUS_SUCCESS) {
           return ret;
         }
@@ -1871,34 +1815,30 @@ static inline int32_t paged_attention_hmx_decode(
             float block_max = -FLT_MAX;
             float block_sum = 0.0f;
             float16* p_row = scratch.p_rm + r * n_cols;
-          online_softmax_block_hvx(
-              scratch.s_rm + r * n_cols, p_row, n_cols, valid_begin,
-              valid_count, scale, &block_max, &block_sum);
-            const float new_max =
-                block_max > old_max ? block_max : old_max;
+            online_softmax_block_hvx(scratch.s_rm + r * n_cols, p_row, n_cols,
+                                     valid_begin, valid_count, scale,
+                                     &block_max, &block_sum);
+            const float new_max = block_max > old_max ? block_max : old_max;
             float prev_rescale = 1.0f;
             float curr_rescale = 1.0f;
             if (block_max > old_max) {
-              prev_rescale =
-                  old_max == -FLT_MAX
-                      ? 0.0f
-                      : online_rescale_exp_hvx(old_max - block_max);
+              prev_rescale = old_max == -FLT_MAX
+                                 ? 0.0f
+                                 : online_rescale_exp_hvx(old_max - block_max);
             } else if (block_max < old_max) {
               curr_rescale = online_rescale_exp_hvx(block_max - old_max);
             }
             if (prev_rescale != 1.0f) {
-              scale_accumulator_hvx(scratch.out_acc + r * head_dim,
-                                    head_dim, prev_rescale);
+              scale_accumulator_hvx(scratch.out_acc + r * head_dim, head_dim,
+                                    prev_rescale);
             }
             if (curr_rescale != 1.0f) {
-              scale_f16_row_hvx(p_row + valid_begin, valid_count,
-                                 curr_rescale);
+              scale_f16_row_hvx(p_row + valid_begin, valid_count, curr_rescale);
             }
 
             scratch.row_max[r] = new_max;
             scratch.row_sum[r] =
-                scratch.row_sum[r] * prev_rescale +
-                block_sum * curr_rescale;
+                scratch.row_sum[r] * prev_rescale + block_sum * curr_rescale;
           }
         }
 
@@ -1927,11 +1867,11 @@ static inline int32_t paged_attention_hmx_decode(
           return *scratch.hmx_status;
         }
 
-        ret = hmx_matmul_rm_16b(
-            thread_id, hmx_thread_id, scratch.p_rm, scratch.v_rhs_rm[kv_buf],
-            scratch.pv_rm, scratch.lhs_crouton, scratch.rhs_crouton,
-            scratch.out_crouton, scratch.hmx_status, m, n_cols, head_dim,
-            false, false, NULL);
+        ret = hmx_matmul_rm_16b(thread_id, hmx_thread_id, scratch.p_rm,
+                                scratch.v_rhs_rm[kv_buf], scratch.pv_rm,
+                                scratch.lhs_crouton, scratch.rhs_crouton,
+                                scratch.out_crouton, scratch.hmx_status, m,
+                                n_cols, head_dim, false, false, NULL);
         if (ret != JIT_DEV_STATUS_SUCCESS) {
           return ret;
         }
@@ -2039,10 +1979,9 @@ QAIC_KERNEL_API int32_t multinsp_multithreaded_paged_attention_hmx_prefill(
   }
 
   return paged_attention_hmx_prefill(
-      cfg, query, NULL, NULL, key_cache, value_cache, NULL, output,
-      block_table, query_start_loc, seq_lens, num_reqs, num_tokens, num_heads,
-      num_kv_heads, head_dim, block_size, max_blocks_per_seq, causal != 0,
-      scale);
+      cfg, query, NULL, NULL, key_cache, value_cache, NULL, output, block_table,
+      query_start_loc, seq_lens, num_reqs, num_tokens, num_heads, num_kv_heads,
+      head_dim, block_size, max_blocks_per_seq, causal != 0, scale);
 }
 
 QAIC_KERNEL_API int32_t
@@ -2109,9 +2048,8 @@ QAIC_KERNEL_API int32_t multinsp_multithreaded_paged_attention_hmx_decode(
 
   return paged_attention_hmx_decode(
       cfg, query, key, value, key_cache, value_cache, slot_mapping, output,
-      block_table, query_start_loc, seq_lens, num_reqs, num_heads,
-      num_kv_heads, head_dim, block_size, max_blocks_per_seq, causal != 0,
-      scale);
+      block_table, query_start_loc, seq_lens, num_reqs, num_heads, num_kv_heads,
+      head_dim, block_size, max_blocks_per_seq, causal != 0, scale);
 }
 
 QAIC_KERNEL_API int32_t multinsp_multithreaded_paged_attention_hmx_decode_cache(
@@ -2139,10 +2077,9 @@ QAIC_KERNEL_API int32_t multinsp_multithreaded_paged_attention_hmx_decode_cache(
   }
 
   return paged_attention_hmx_decode(
-      cfg, query, NULL, NULL, key_cache, value_cache, NULL, output,
-      block_table, query_start_loc, seq_lens, num_reqs, num_heads,
-      num_kv_heads, head_dim, block_size, max_blocks_per_seq, causal != 0,
-      scale);
+      cfg, query, NULL, NULL, key_cache, value_cache, NULL, output, block_table,
+      query_start_loc, seq_lens, num_reqs, num_heads, num_kv_heads, head_dim,
+      block_size, max_blocks_per_seq, causal != 0, scale);
 }
 
 QAIC_KERNEL_API int32_t multinsp_multithreaded_paged_attention(
@@ -2201,16 +2138,13 @@ QAIC_KERNEL_API int32_t multinsp_multithreaded_paged_attention(
     int32_t head = 0;
     int32_t kv_head = 0;
     int32_t local_q = 0;
-    const bool mapped = decode_order
-                            ? map_decode_ordered_row(row, query_start_loc,
-                                                     num_reqs, gqa, &req,
-                                                     &token, &head, &kv_head,
-                                                     &local_q)
-                            : map_prefill_ordered_row(row, query_start_loc,
-                                                      num_reqs, num_kv_heads,
-                                                      gqa, &req, &token,
-                                                      &head, &kv_head,
-                                                      &local_q);
+    const bool mapped =
+        decode_order
+            ? map_decode_ordered_row(row, query_start_loc, num_reqs, gqa, &req,
+                                     &token, &head, &kv_head, &local_q)
+            : map_prefill_ordered_row(row, query_start_loc, num_reqs,
+                                      num_kv_heads, gqa, &req, &token, &head,
+                                      &kv_head, &local_q);
     if (!mapped) {
       continue;
     }

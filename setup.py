@@ -115,7 +115,6 @@ def get_qaic_extensions() -> list[Extension]:
         if include_dir.exists():
             extra_compile_args += [f"-I{include_dir}"]
 
-
     # QAIC_DEVICE_ARCH: when set, bypass all torch_qaic imports (torch_qaic._C
     # triggers the QAIC driver which SIGABRTs without live devices in Docker builds).
     device_arch = os.environ.get("QAIC_DEVICE_ARCH")

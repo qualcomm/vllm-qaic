@@ -62,6 +62,7 @@ def _kernel(name: str):
     """Return a compiled QAIC Hexagon kernel by exported symbol name."""
     return getattr(_qaic_custom_ops, name)
 
+
 _paged_attention_store_kernel = _kernel("multinsp_multithreaded_paged_attention_store")
 _paged_attention_hvx_kernel = _kernel("multinsp_multithreaded_paged_attention")
 _paged_attention_hmx_prefill_cache_kernel = _kernel(
@@ -76,6 +77,7 @@ _paged_attention_hmx_decode_kernel = _kernel(
 _paged_attention_hmx_decode_cache_kernel = _kernel(
     "multinsp_multithreaded_paged_attention_hmx_decode_cache"
 )
+
 
 def _kernel_score_mode(scoring_func: int) -> int:
     """Map public scoring id to the fp16/fp32 score-mode id expected by kernels.
@@ -381,13 +383,17 @@ def _paged_attention_op(
         or block_table.dtype != torch.int32
         or not block_table.is_contiguous()
     ):
-        block_table = block_table.to(device=query.device, dtype=torch.int32).contiguous()
+        block_table = block_table.to(
+            device=query.device, dtype=torch.int32
+        ).contiguous()
     if write_cache and (
         slot_mapping.device != query.device
         or slot_mapping.dtype != torch.int32
         or not slot_mapping.is_contiguous()
     ):
-        slot_mapping = slot_mapping.to(device=query.device, dtype=torch.int32).contiguous()
+        slot_mapping = slot_mapping.to(
+            device=query.device, dtype=torch.int32
+        ).contiguous()
     if (
         query_start_loc.device != query.device
         or query_start_loc.dtype != torch.int32
@@ -412,27 +418,19 @@ def _paged_attention_op(
     block_size = key_cache.shape[2]
     num_reqs = seq_lens.shape[0]
     max_blocks_per_seq = block_table.shape[1]
-    gqa = num_heads // num_kv_heads if num_kv_heads > 0 else 0
 
     backend = os.environ.get("QAIC_PAGED_ATTN_BACKEND")
     if backend is None:
-        backend = (
-            "hvx" if os.environ.get("QAIC_PAGED_ATTN_HMX", "1") == "0" else "hmx"
-        )
+        backend = "hvx" if os.environ.get("QAIC_PAGED_ATTN_HMX", "1") == "0" else "hmx"
     backend = backend.lower()
     if backend not in ("hmx", "hvx"):
         raise RuntimeError(
-            "QAIC_PAGED_ATTN_BACKEND must be 'hmx' or 'hvx', "
-            f"got {backend!r}"
+            f"QAIC_PAGED_ATTN_BACKEND must be 'hmx' or 'hvx', got {backend!r}"
         )
 
     use_hmx = backend == "hmx"
     is_decode = num_tokens == num_reqs
-    hmx_supported = (
-        head_dim > 0
-        and num_kv_heads > 0
-        and num_heads % num_kv_heads == 0
-    )
+    hmx_supported = head_dim > 0 and num_kv_heads > 0 and num_heads % num_kv_heads == 0
     if use_hmx and not hmx_supported:
         raise RuntimeError(
             "HMX paged attention requested for unsupported shape: "
@@ -462,8 +460,6 @@ def _paged_attention_op(
         attn_kernel = _paged_attention_hvx_kernel
 
     fused_hmx_store = use_hmx and write_cache
-    print("PAGED ATTN KERNEL HIT !!!")
-    exit()
 
     if not fused_hmx_store and write_cache:
         _paged_attention_store_kernel[_NSP_COUNT, _THREAD_COUNT](

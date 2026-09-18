@@ -366,15 +366,9 @@ class QAicAttentionBackendImpl(AttentionImpl):
         if os.environ.get("QAIC_NATIVE_PAGED_ATTN", "1") == "0":
             return False
         write_cache = self.kv_sharing_target_layer_name is None
-        if write_cache and (key is None or value is None):
-            return False
         if self.attn_type != AttentionType.DECODER:
             return False
         if query.device.type != "qaic" or query.dtype != torch.float16:
-            return False
-        if write_cache and (
-            key.dtype != torch.float16 or value.dtype != torch.float16
-        ):
             return False
         if key_cache.dtype != torch.float16 or value_cache.dtype != torch.float16:
             return False
@@ -391,9 +385,7 @@ class QAicAttentionBackendImpl(AttentionImpl):
         backend = os.environ.get("QAIC_PAGED_ATTN_BACKEND")
         if backend is None:
             backend = (
-                "hvx"
-                if os.environ.get("QAIC_PAGED_ATTN_HMX", "1") == "0"
-                else "hmx"
+                "hvx" if os.environ.get("QAIC_PAGED_ATTN_HMX", "1") == "0" else "hmx"
             )
         if backend.lower() == "hvx" and self.head_size > 256:
             return False
@@ -401,8 +393,13 @@ class QAicAttentionBackendImpl(AttentionImpl):
             return False
         if query.dim() != 3:
             return False
-        if write_cache and (key.dim() != 3 or value.dim() != 3):
-            return False
+        if write_cache:
+            if key is None or value is None:
+                return False
+            if key.dtype != torch.float16 or value.dtype != torch.float16:
+                return False
+            if key.dim() != 3 or value.dim() != 3:
+                return False
         if key_cache.dim() != 4 or value_cache.dim() != 4:
             return False
         if num_actual_tokens <= 0:
