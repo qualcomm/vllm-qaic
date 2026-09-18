@@ -120,10 +120,18 @@ def _unquantized_fused_moe_hvx_op(
     total_routes = num_tokens * topk
     workers = _NSP_COUNT * _THREAD_COUNT
     route_out = torch.empty((total_routes, hidden_size), dtype=x.dtype, device=x.device)
-    expert_route_indices = torch.empty((total_routes,), dtype=torch.float32, device=x.device)
-    expert_offsets = torch.empty((num_experts + 1,), dtype=torch.float32, device=x.device)
-    worker_counts = torch.empty((workers, num_experts), dtype=torch.float32, device=x.device)
-    worker_offsets = torch.empty((workers, num_experts), dtype=torch.float32, device=x.device)
+    expert_route_indices = torch.empty(
+        (total_routes,), dtype=torch.float32, device=x.device
+    )
+    expert_offsets = torch.empty(
+        (num_experts + 1,), dtype=torch.float32, device=x.device
+    )
+    worker_counts = torch.empty(
+        (workers, num_experts), dtype=torch.float32, device=x.device
+    )
+    worker_offsets = torch.empty(
+        (workers, num_experts), dtype=torch.float32, device=x.device
+    )
     out = torch.empty_like(x)
     params = torch.tensor(
         [
@@ -143,9 +151,15 @@ def _unquantized_fused_moe_hvx_op(
         device=x.device,
     ).contiguous()
 
-    group_count_kernel = _kernel("multinsp_multithreaded_unquantized_fused_moe_route_group_count")
-    group_prefix_kernel = _kernel("multinsp_multithreaded_unquantized_fused_moe_route_group_prefix")
-    group_fill_kernel = _kernel("multinsp_multithreaded_unquantized_fused_moe_route_group_fill")
+    group_count_kernel = _kernel(
+        "multinsp_multithreaded_unquantized_fused_moe_route_group_count"
+    )
+    group_prefix_kernel = _kernel(
+        "multinsp_multithreaded_unquantized_fused_moe_route_group_prefix"
+    )
+    group_fill_kernel = _kernel(
+        "multinsp_multithreaded_unquantized_fused_moe_route_group_fill"
+    )
     route_kernel = _kernel("multinsp_multithreaded_unquantized_fused_moe_route_compute")
     reduce_kernel = _kernel("multinsp_multithreaded_unquantized_fused_moe_route_reduce")
     group_count_kernel[_NSP_COUNT, _THREAD_COUNT](
@@ -211,10 +225,18 @@ def _unquantized_fused_moe_hmx_op(
     total_routes = num_tokens * topk
     workers = _NSP_COUNT * _THREAD_COUNT
     route_out = torch.empty((total_routes, hidden_size), dtype=x.dtype, device=x.device)
-    expert_route_indices = torch.empty((total_routes,), dtype=torch.float32, device=x.device)
-    expert_offsets = torch.empty((num_experts + 1,), dtype=torch.float32, device=x.device)
-    worker_counts = torch.empty((workers, num_experts), dtype=torch.float32, device=x.device)
-    worker_offsets = torch.empty((workers, num_experts), dtype=torch.float32, device=x.device)
+    expert_route_indices = torch.empty(
+        (total_routes,), dtype=torch.float32, device=x.device
+    )
+    expert_offsets = torch.empty(
+        (num_experts + 1,), dtype=torch.float32, device=x.device
+    )
+    worker_counts = torch.empty(
+        (workers, num_experts), dtype=torch.float32, device=x.device
+    )
+    worker_offsets = torch.empty(
+        (workers, num_experts), dtype=torch.float32, device=x.device
+    )
     out = torch.empty_like(x)
     params = torch.tensor(
         [
@@ -234,9 +256,15 @@ def _unquantized_fused_moe_hmx_op(
         device=x.device,
     ).contiguous()
 
-    group_count_kernel = _kernel("multinsp_multithreaded_unquantized_fused_moe_route_group_count")
-    group_prefix_kernel = _kernel("multinsp_multithreaded_unquantized_fused_moe_route_group_prefix")
-    group_fill_kernel = _kernel("multinsp_multithreaded_unquantized_fused_moe_route_group_fill")
+    group_count_kernel = _kernel(
+        "multinsp_multithreaded_unquantized_fused_moe_route_group_count"
+    )
+    group_prefix_kernel = _kernel(
+        "multinsp_multithreaded_unquantized_fused_moe_route_group_prefix"
+    )
+    group_fill_kernel = _kernel(
+        "multinsp_multithreaded_unquantized_fused_moe_route_group_fill"
+    )
     route_kernel = _kernel(_UNQUANTIZED_FUSED_MOE_HMX_KERNEL)
     reduce_kernel = _kernel("multinsp_multithreaded_unquantized_fused_moe_route_reduce")
     group_count_kernel[_NSP_COUNT, _THREAD_COUNT](
@@ -562,7 +590,9 @@ def unquantized_fused_moe_hvx(
     if expert_map is None:
         expert_map_tensor = torch.empty((1,), dtype=torch.float32, device=x.device)
     else:
-        expert_map_tensor = expert_map.to(device=x.device, dtype=torch.float32).contiguous()
+        expert_map_tensor = expert_map.to(
+            device=x.device, dtype=torch.float32
+        ).contiguous()
 
     if has_bias:
         assert w13_bias is not None and w2_bias is not None
@@ -627,7 +657,9 @@ def unquantized_fused_moe_hmx(
     if expert_map is None:
         expert_map_tensor = torch.empty((1,), dtype=torch.float32, device=x.device)
     else:
-        expert_map_tensor = expert_map.to(device=x.device, dtype=torch.float32).contiguous()
+        expert_map_tensor = expert_map.to(
+            device=x.device, dtype=torch.float32
+        ).contiguous()
 
     if has_bias:
         assert w13_bias is not None and w2_bias is not None
