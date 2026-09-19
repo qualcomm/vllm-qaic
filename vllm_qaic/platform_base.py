@@ -593,9 +593,10 @@ class QaicPlatform(Platform):
         default_min_pixels = 4 * factor * factor
         default_max_pixels = 16384 * factor * factor
 
-        if model_config.mm_processor_kwargs is None:
-            model_config.mm_processor_kwargs = {}
-        mm_kwargs = model_config.mm_processor_kwargs
+        multimodal_config = model_config.get_multimodal_config()
+        if multimodal_config.mm_processor_kwargs is None:
+            multimodal_config.mm_processor_kwargs = {}
+        mm_kwargs = multimodal_config.mm_processor_kwargs
         override_mm_kwargs = override_qaic_config.get("mm_processor_kwargs") or {}
         mm_kwargs["max_pixels"] = override_mm_kwargs.get(
             "max_pixels", mm_kwargs.get("max_pixels", default_max_pixels)

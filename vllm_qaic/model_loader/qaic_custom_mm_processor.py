@@ -504,7 +504,9 @@ class QaicQwenVLProcessingInfoOverrideInitMixin:
             vision_config = self.get_hf_config().vision_config
             patch_size = vision_config.patch_size
             merge_size = vision_config.spatial_merge_size
-            mm_processor_kwargs = model_config.mm_processor_kwargs or {}
+            mm_processor_kwargs = (
+                model_config.get_multimodal_config().mm_processor_kwargs or {}
+            )
 
             image_grid_thw_lookup = {}
             resized_resolutions = []
