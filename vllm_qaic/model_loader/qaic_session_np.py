@@ -210,7 +210,8 @@ class QAICInferenceSession:
                 kv_shape = tuple(_binding.dims)
                 kv_type = aic_to_np_dtype_mapping[_binding.type]
                 kv_size = _binding.size
-                self.kv_cache_info.append((kv_shape, kv_type, kv_size))
+                kv_kind = self._classify_kv_binding(name)
+                self.kv_cache_info.append((kv_shape, kv_type, kv_size, kv_kind))
 
         # Hybrid KV detected if more than one KV shape found
         _num_kv_cache_info = len(set(self.kv_cache_info))
@@ -243,6 +244,18 @@ class QAICInferenceSession:
         for name in self.output_names:
             if name.startswith("log"):
                 self.prefill_buff_map.append((name, self.binding_index_map[name]))
+    
+    def _classify_kv_binding(
+        self,
+        name: str,
+    ) -> str:
+        name = name.lower()
+        if "conv" in name:
+            return "LA_CONV"
+        elif "recurrent" in name:
+            return "LA_RECURRENT"
+        else:
+            return "FA"
 
     def _is_kv_cache_name(self, name: str) -> bool:
         if self.use_legacy_slicing_spec:
@@ -257,8 +270,12 @@ class QAICInferenceSession:
             {"start": "ctx_start"},
             {"start": 0},
         ]
-        _linear_attn_dim_spec = [
+        # Qwen3.5/Qwen3.6 recurrent (linear-attention) states are rank 4,
+        # but their last two dimensions are state dimensions rather than
+        # (context, head_size).  Do not apply ctx_start slicing to them.
+        _full_state_dim_spec =[
             {"start": "batch_index"},
+            {"start": 0},
             {"start": 0},
             {"start": 0},
         ]
@@ -268,13 +285,19 @@ class QAICInferenceSession:
             if self._is_kv_cache_name(name) and name.endswith("_RetainedState"):
                 size = aic_to_np_dtype_mapping[binding.type]
                 base_name = name.replace("_RetainedState", "")
+                is_recurrent = "recurrent" in name
+                is_conv = "conv" in name
+                
+                if is_recurrent or is_conv:
+                    dimspec = _full_state_dim_spec
+                else:
+                    dimspec = _full_attn_dim_spec
+ 
                 buffer_specs.append(
                     {
                         "Name": f"{base_name}.*",
                         "ElemSize": size.itemsize,
-                        "DimSpecs": _full_attn_dim_spec
-                        if ndim == 4
-                        else _linear_attn_dim_spec,
+                        "DimSpecs": dimspec,
                     }
                 )
         json_spec = {"BufferSpecs": buffer_specs}
