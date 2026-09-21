@@ -285,6 +285,7 @@ class ShmBuffer:
     def get_data(self, current_idx: int = 0):
         start = self.buff_sizes_cum_sum[current_idx - 1] if current_idx > 0 else 0
         end = self.buff_sizes_cum_sum[current_idx]
+        assert self.shared_memory is not None
         assert self.shared_memory.buf is not None
         with memoryview(self.shared_memory.buf[start:end]) as buf:
             yield buf
@@ -673,7 +674,7 @@ class QaicConnector(KVConnectorBase_V1):
         from save_kv_layer is complete before finishing the forward.
 
         This prevents overwrites of paged KV buffer before saving done.
-        NOTE: Currently aysc KV cache transfer is not supported.
+        NOTE: Currently async KV cache transfer is not supported.
         """
         return
 
