@@ -94,7 +94,7 @@ class QaicPrefillBank:
             drain()
             if not self.busy[physical_block]:
                 break
-            if time.monotonic() == deadline:
+            if time.monotonic() >= deadline:
                 raise RuntimeError(
                     "Qaic Prefill Bank timed out while waiting for connector to "
                     f"finish sending physical block : {physical_block}"
@@ -1004,7 +1004,13 @@ class QaicModelRunnerAoT(GPUModelRunner):
         with (
             set_forward_context(None, vllm_config),
             self.maybe_get_kv_connector_output(
-                scheduler_output, wait_for_save=False
+                scheduler_output,
+                wait_for_save=False,
+                # Async kv producers receive connector metadata
+                # when save_kv_layer is called. This path has no
+                # forward & saves immediately. so preserve the
+                # scheduler metadata here
+                connector_metadata=scheduler_output.kv_connector_metadata,
             ) as kv_connector_output,
         ):
             pass
@@ -1372,6 +1378,13 @@ class QaicModelRunnerAoT(GPUModelRunner):
                     dtype=prefill_block_ids.dtype,
                 )
                 self._reserve_prefill_bank(prefill_block_ids, prefill_req_ids)
+                # Nixl/Mooncake uses QPC slots mapped to physical kv blocks
+                # QaicConnector retains the original block-index contract
+                prefill_batch_indices = (
+                    qaic_prefill_slot_ids
+                    if self._uses_torch_view_kv_connector()
+                    else prefill_block_ids
+                )
                 hidden_states_prefill = (
                     self.create_logits_np(len(prefill_cum_sum), self.model.vocab_size)
                     if not self.is_kv_consumer
@@ -1384,7 +1397,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 pending_prefill_exec_queue = self.model(
                     input_ids=prefill_input_ids,
                     positions=prefill_positions,
-                    batch_indices=qaic_prefill_slot_ids,
+                    batch_indices=prefill_batch_indices,
                     is_prompt=True,
                     prefill_cum_sum=prefill_cum_sum,
                     mm_kwargs_list=mm_kwargs_list,
@@ -2076,13 +2089,19 @@ class QaicModelRunnerAoT(GPUModelRunner):
         connector_metadata=None,
         **kwargs,
     ) -> None:
+        # save_kv_layer() validates connector_metadata in kwargs for async
+        # producers.  Keep it separate in this helper's signature for the
+        # bind operation, but forward it as well; otherwise the connector only
+        # sees the metadata in its mutable state and the async-producer check
+        # fails.
+        save_kwargs = dict(kwargs)
         if connector_metadata is not None:
-            kv_connector.bind_connector_metadata(connector_metadata)
+            save_kwargs["connector_metadata"] = connector_metadata
         kv_connector.save_kv_layer(
             layer_name=None,
             kv_layer=None,
             attn_metadata=None,
-            **kwargs,
+            **save_kwargs,
         )
         if kwargs and supports_kw(kv_connector.wait_for_save, "kv_cache_info"):
             kv_connector.wait_for_save(**kwargs)
