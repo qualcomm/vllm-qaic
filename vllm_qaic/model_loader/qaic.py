@@ -12,7 +12,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from queue import Queue
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -90,7 +90,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         pooler_config = vllm_config.model_config.pooler_config
         self._pooler = None
         self.is_pooling_model = False
-        self.task = None
+        self.task: str | None = None
         if vllm_config.model_config.runner_type == "pooling":
             self.is_pooling_model = True
             _token_classify_pooler = pooler_for_token_classify(
@@ -125,15 +125,17 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 self.is_qaic_pooler = True
                 self.normalize = bool(override_qaic_config.get("normalize", False))
                 self.softmax = bool(override_qaic_config.get("softmax", False))
-            # upstream vllm v0.23 removed "score" as a PoolingTask; cross-encoder scoring maps to "classify" instead.
+            # Upstream vLLM v0.23 removed "score" as a PoolingTask;
+            # cross-encoder scoring maps to "classify" instead.
             _raw_task: str | None = override_qaic_config.get("task", None)
-            self.task: str | None = "classify" if _raw_task == "score" else _raw_task
+            self.task = "classify" if _raw_task == "score" else _raw_task
 
         # TODO: Add new variables for turbo
 
         self.config = config
         self.vocab_size = config.get_text_config().vocab_size
         # `long_prefill_token_threshold` will define prefill chunk length
+        self.prefill_seq_len: int
         if self.config.model_type == "whisper":
             # Encoder-decoder models have chunked prefill disabled by vllm,
             # but QAIC still requires a prefill sequence length.
@@ -143,7 +145,13 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             assert "prefill_seq_len" in override_qaic_config, (
                 "Prefill seq_len missing in override_qaic_config"
             )
-            self.prefill_seq_len = override_qaic_config["prefill_seq_len"] if isinstance(override_qaic_config["prefill_seq_len"], (list, tuple)) else int(override_qaic_config["prefill_seq_len"])
+            prefill_seq_len = override_qaic_config["prefill_seq_len"]
+            self.prefill_seq_len = cast(
+                int,
+                prefill_seq_len
+                if isinstance(prefill_seq_len, (list, tuple))
+                else int(prefill_seq_len),
+            )
 
         self.ctx_len = model_config.max_model_len
         self.decode_bsz = vllm_config.scheduler_config.max_num_seqs
@@ -503,7 +511,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         return allowed_seqlens
 
     @property
-    def kv_cache_info(self) -> list[tuple]:  
+    def kv_cache_info(self) -> list[tuple]:
         # [(kv_shape, kv_type, kv_size, kv_kind)]
         return self.session.kv_cache_info
 
@@ -664,7 +672,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     # Single batch-wide bucket chosen before the loop; held constant.
                     if comp_ctx_val is not None:
                         chunk_inputs["comp_ctx_lengths"] = comp_ctx_val
-                    # TODO: Workaround for CCL—LRT requires a buffer matching logits shape
+                    # TODO: Workaround for CCL—LRT requires a buffer
+                    # matching logits shape.
                     if logits is not None:
                         chunk_inputs["logits"] = logits[index : index + 1]
 
@@ -672,7 +681,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     if callback:
                         callback()
                     logger.debug(
-                        "All execObjs allocated; waiting for pending execObj completion."
+                        "All execObjs allocated; waiting for pending execObj "
+                        "completion."
                     )
                     eid = pending_exec_queue.get(timeout=120)
                     self.complete_inf(eid, True, pipeline_prefill_en=True)
@@ -805,12 +815,14 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     ]
 
                 if "num_logits_to_keep" in self.session.input_names:
-                    # SpD target QPC: prefill keeps 1 logit (last token position).
+                    # SpD target QPC: prefill keeps 1 logit (last token
+                    # position).
                     chunk_inputs["num_logits_to_keep"] = np.array([[1]], dtype=np.int64)
 
                 if pending_exec_count == self.session.prefill_num_execObj:
                     logger.debug(
-                        "All execObjs allocated; waiting for pending execObj completion."
+                        "All execObjs allocated; waiting for pending execObj "
+                        "completion."
                     )
                     eid = pending_exec_queue.get()
                     self.session.complete_inf(eid, True)
@@ -968,6 +980,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
 
         Called either immediately (sync path) or after complete_inf (async path).
         """
+        assert self.encode_num_logits_buffer is not None
         output = self.encode_num_logits_buffer
         output_array = output[output_key][: len(prefill_cum_sum)]
         output_tensor = torch.tensor(output_array)
@@ -1034,10 +1047,13 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         Args:
             qpc_inputs: input tensors (e.g. input_ids, attention_mask)
             output_key: key for the output buffer ("output" or "logits")
-            encode_num_logits_buffer: output buffer dict; re-registered when shape changes
+            encode_num_logits_buffer: output buffer dict; re-registered when
+                shape changes
         Returns:
             dict: output buffer dict containing the hidden-state / pooled output
         """
+        assert encode_num_logits_buffer is not None
+        assert output_key is not None
         if (
             self.encode_num_logits_buffer is None
             or encode_num_logits_buffer[output_key].shape
@@ -1045,6 +1061,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         ):
             self.encode_num_logits_buffer = encode_num_logits_buffer
 
+        assert self.encode_num_logits_buffer is not None
         encode_exec_obj_idx = self.session.np_run(
             {**qpc_inputs, **self.encode_num_logits_buffer}
         )
@@ -1054,13 +1071,14 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         else:
             self.encode_execObj_idx = encode_exec_obj_idx
 
+        assert self.encode_num_logits_buffer is not None
         return self.encode_num_logits_buffer
 
     def disagg_dummy_run(self):
         """assert prefill and decode work by running dummy inputs
 
         also creates attention_mask and decode input buffers
-        that will be used throughout the lifeycle of worker
+        that will be used throughout the lifecycle of worker
         """
 
         # Prepare dummy run inputs
@@ -1334,7 +1352,8 @@ def load_qaic_model(
 
     if speculative_model_type not in QAIC_DEVICE_CONFIG:
         raise ValueError(
-            f"Unable to find default profile for model type {speculative_model_type}!!\n"
+            f"Unable to find default profile for model type "
+            f"{speculative_model_type}!!\n"
         )
 
     qaic_compile_config = _get_qaic_compile_config(vllm_config, speculative_model_type)
@@ -1515,23 +1534,24 @@ def load_qaic_model(
                     "skip_lang" in qaic_compile_config.cfg
                     and qaic_compile_config.cfg["skip_lang"]
                 ):
-                    qpc_path = qpc_path.get("vision_qpc_path")
+                    selected_qpc_path = qpc_path.get("vision_qpc_path")
                 elif (
                     "prefill_only" in qaic_compile_config.cfg
                     and qaic_compile_config.cfg["prefill_only"]
                 ):
-                    qpc_path = qpc_path.get("lang_prefill_qpc_path")
+                    selected_qpc_path = qpc_path.get("lang_prefill_qpc_path")
                 elif (
                     "prefill_seq_len" in qaic_compile_config.cfg
                     and qaic_compile_config.cfg["prefill_seq_len"] == 1
                 ):
-                    qpc_path = qpc_path.get("lang_decode_qpc_path")
+                    selected_qpc_path = qpc_path.get("lang_decode_qpc_path")
                 else:
-                    qpc_path = qpc_path.get("lang_qpc_path")
-                if qpc_path is None:
+                    selected_qpc_path = qpc_path.get("lang_qpc_path")
+                if selected_qpc_path is None:
                     raise ValueError(
                         "Failed to extract QPC path from compilation result dictionary"
                     )
+                qpc_path = str(selected_qpc_path)
         except Exception as e:
             logger.error("Failed to transform and compile the model! %s", e)
             raise e
@@ -1996,7 +2016,8 @@ def _get_qaic_compile_config(
             cfg["prefill_seq_len"] = 1
 
         if kv_offload:
-            # Dual QPC approach: select which QPC to load based on which path is skipped.
+            # Dual QPC approach: select which QPC to load based on which
+            # path is skipped.
             skip_lang = cfg.get("skip_lang", False)
             skip_vision = cfg.get("skip_vision", False)
             if not skip_lang and not skip_vision:

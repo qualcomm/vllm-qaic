@@ -244,7 +244,7 @@ class QAICInferenceSession:
         for name in self.output_names:
             if name.startswith("log"):
                 self.prefill_buff_map.append((name, self.binding_index_map[name]))
-    
+
     def _classify_kv_binding(
         self,
         name: str,
@@ -273,7 +273,7 @@ class QAICInferenceSession:
         # Qwen3.5/Qwen3.6 recurrent (linear-attention) states are rank 4,
         # but their last two dimensions are state dimensions rather than
         # (context, head_size).  Do not apply ctx_start slicing to them.
-        _full_state_dim_spec =[
+        _full_state_dim_spec = [
             {"start": "batch_index"},
             {"start": 0},
             {"start": 0},
@@ -281,18 +281,17 @@ class QAICInferenceSession:
         ]
         for binding in self.bindings:
             name = binding.name
-            ndim = len(binding.dims)
             if self._is_kv_cache_name(name) and name.endswith("_RetainedState"):
                 size = aic_to_np_dtype_mapping[binding.type]
                 base_name = name.replace("_RetainedState", "")
                 is_recurrent = "recurrent" in name
                 is_conv = "conv" in name
-                
+
                 if is_recurrent or is_conv:
                     dimspec = _full_state_dim_spec
                 else:
                     dimspec = _full_attn_dim_spec
- 
+
                 buffer_specs.append(
                     {
                         "Name": f"{base_name}.*",

@@ -92,7 +92,7 @@ class ReqMeta:
     is_prefill_partial: bool
     # Block Id of the request
     block_id: int | None = None
-    # Keeping List[str] for backward compatibilty with QAIC handoff server;
+    # Keeping List[str] for backward compatibility with QAIC handoff server;
     # even though will store only KV shm name.
     kv_handoff_metadata: list[str] | None = None
 
@@ -159,10 +159,7 @@ class ShmBuffer:
             kv_shape, kv_type, _ = info[:3]
             kv_kind = info[3]
             _kv_shape = self._get_kv_shape(
-                use_full_kv_transfer, 
-                kv_shape, 
-                num_tokens,
-                kv_kind
+                use_full_kv_transfer, kv_shape, num_tokens, kv_kind
             )
             _bytes_of_buffer = 1
             for dim in _kv_shape:
@@ -192,7 +189,7 @@ class ShmBuffer:
                 self.name = self.shared_memory.name
             except Exception as e:
                 raise ValueError(
-                    "Exception occured during creation of shared memory!"
+                    "Exception occurred during creation of shared memory!"
                 ) from e
         else:
             # we are opening an existing buffer
@@ -216,36 +213,32 @@ class ShmBuffer:
 
         # create list of numpy arrays
         for i, info in enumerate(self.kv_cache_info):
-            kv_shape , kv_type, _ = info[:3]
+            kv_shape, kv_type, _ = info[:3]
             kv_kind = info[3]
-            
+
             with self.get_data(i) as buff:
                 _kv_shape = self._get_kv_shape(
-                    use_full_kv_transfer, 
-                    kv_shape, 
-                    num_tokens, 
-                    kv_kind
+                    use_full_kv_transfer, kv_shape, num_tokens, kv_kind
                 )
                 self.list_of_np_buff.append(
                     np.ndarray(_kv_shape, dtype=kv_type, buffer=buff)
                 )
 
     def _get_kv_shape(
-        self, 
-        use_full_kv_transfer: bool, 
-        kv_shape: tuple, 
+        self,
+        use_full_kv_transfer: bool,
+        kv_shape: tuple,
         num_tokens: int,
         kv_kind: str,
     ) -> tuple:
-        
-        # For models with GDN like qwen3.5/6/8 conv and recurrent state are both rank 4 
+        # For models with GDN like qwen3.5/6/8 conv and recurrent state are both rank 4
         # tensors which we can't slice based the the kv_shape[2]
         # We should only slice the kv$ for FA layers
         if not use_full_kv_transfer and kv_kind == "FA" and len(kv_shape) > 3:
             seq_len = min(num_tokens, kv_shape[2])
             return (1, kv_shape[1], seq_len) + kv_shape[3:]
         # Use batch size 1 and keep other dims intact
-        # Else if current kv$ doesn't belong to FA and is associated with GDN, transfer 
+        # Else if current kv$ doesn't belong to FA and is associated with GDN, transfer
         # complete conv and recurrent states
         return (1,) + kv_shape[1:]
 
@@ -265,6 +258,8 @@ class ShmBuffer:
     def get_data(self, current_idx: int = 0):
         start = self.buff_sizes_cum_sum[current_idx - 1] if current_idx > 0 else 0
         end = self.buff_sizes_cum_sum[current_idx]
+        assert self.shared_memory is not None
+        assert self.shared_memory.buf is not None
         with memoryview(self.shared_memory.buf[start:end]) as buf:
             yield buf
 
@@ -568,7 +563,7 @@ class QaicConnector(KVConnectorBase_V1):
         paged buffer.
 
         This interface will be useful for layer-by-layer pipelining.
-        NOTE: Currently KV cache tranfer is not managed layer by layer.
+        NOTE: Currently KV cache transfer is not managed layer by layer.
 
         Args:
             layer_name: the name of that layer
@@ -640,7 +635,7 @@ class QaicConnector(KVConnectorBase_V1):
         from save_kv_layer is complete before finishing the forward.
 
         This prevents overwrites of paged KV buffer before saving done.
-        NOTE: Currently aysc KV cache tranfer is not supported.
+        NOTE: Currently async KV cache transfer is not supported.
         """
         return
 
