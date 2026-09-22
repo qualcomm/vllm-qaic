@@ -43,9 +43,12 @@ def _patch_graph_pickler_options() -> None:
 def _patch_torch_fp4_dtype():
     """Add torch.float4_e2m1fn_x2 sentinel on CPU-only PyTorch builds.
 
-    ``vllm.ir.tolerances`` references ``torch.float4_e2m1fn_x2`` at module level. That dtype
-    does not exist in the CPU-only PyTorch build used by QAIC. ``torch.float32`` is used as a
-    placeholder because the tolerances dict is only consumed by IR comparison tests, never
+    ``vllm.ir.tolerances`` references ``torch.float4_e2m1fn_x2`` at module level.
+    That dtype
+    does not exist in the CPU-only PyTorch build used by QAIC. ``torch.float32`` is
+    used as a
+    placeholder because the tolerances dict is only consumed by IR comparison tests,
+    never
     during QAIC inference.
     """
     import torch

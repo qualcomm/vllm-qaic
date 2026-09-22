@@ -18,21 +18,20 @@ on HuggingFace model repository.
 import copy
 import random
 from contextlib import contextmanager
-from dataclasses import asdict
-from typing import NamedTuple
+from typing import NamedTuple, cast
 
 import requests
 import torch
 from PIL import Image
 from transformers import AutoTokenizer
 
-from vllm import LLM, EngineArgs, SamplingParams
+from vllm import LLM, SamplingParams
 from vllm.multimodal.image import convert_image_mode
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
 class ModelRequestData(NamedTuple):
-    engine_args: EngineArgs
+    engine_params: dict
     prompts: list[str]
     stop_token_ids: list[int] | None = None
     sampling_params: list[SamplingParams] | None = None
@@ -53,18 +52,18 @@ decode_bsz = 4
 def run_gemma3(questions: list[str], modality: str) -> ModelRequestData:
     assert modality in ("image", "text")
 
-    engine_args = EngineArgs(
-        model="google/gemma-3-4b-it",
-        max_model_len=ctx_len,
-        long_prefill_token_threshold=seq_len,
-        enable_prefix_caching=False,
-        limit_mm_per_prompt={"image": 1},
-        additional_config={
+    engine_params = {
+        "model": "google/gemma-3-4b-it",
+        "max_model_len": ctx_len,
+        "long_prefill_token_threshold": seq_len,
+        "enable_prefix_caching": False,
+        "limit_mm_per_prompt": {"image": 1},
+        "additional_config": {
             "override_qaic_config": {
                 "split_model_io": True,
             },
         },
-    )
+    }
 
     placeholder = "<start_of_image>" if modality == "image" else ""
     prompts = [
@@ -77,7 +76,7 @@ def run_gemma3(questions: list[str], modality: str) -> ModelRequestData:
     ]
 
     return ModelRequestData(
-        engine_args=engine_args,
+        engine_params=engine_params,
         prompts=prompts,
     )
 
@@ -86,19 +85,19 @@ def run_gemma3(questions: list[str], modality: str) -> ModelRequestData:
 def run_gemma4(questions: list[str], modality: str) -> ModelRequestData:
     assert modality in ("image", "text")
 
-    engine_args = EngineArgs(
-        model="google/gemma-4-E2B-it",
-        max_model_len=ctx_len,
-        long_prefill_token_threshold=seq_len,
-        enable_prefix_caching=False,
-        limit_mm_per_prompt={"image": 1},
-        additional_config={
+    engine_params = {
+        "model": "google/gemma-4-E2B-it",
+        "max_model_len": ctx_len,
+        "long_prefill_token_threshold": seq_len,
+        "enable_prefix_caching": False,
+        "limit_mm_per_prompt": {"image": 1},
+        "additional_config": {
             "override_qaic_config": {
                 "use_onnx_subfunctions": False,
                 "split_model_io": True,
             },
         },
-    )
+    }
 
     placeholder = "<|image|>" if modality == "image" else ""
     prompts = [
@@ -107,7 +106,7 @@ def run_gemma4(questions: list[str], modality: str) -> ModelRequestData:
     ]
 
     return ModelRequestData(
-        engine_args=engine_args,
+        engine_params=engine_params,
         prompts=prompts,
     )
 
@@ -118,21 +117,20 @@ def run_internvl(questions: list[str], modality: str) -> ModelRequestData:
 
     model_name = "OpenGVLab/InternVL2_5-1B"
 
-    engine_args = EngineArgs(
-        model=model_name,
-        trust_remote_code=True,
-        max_model_len=ctx_len,
-        long_prefill_token_threshold=seq_len,
-        enable_prefix_caching=False,
-        limit_mm_per_prompt={"image": 1},
-        mm_processor_kwargs={"max_dynamic_patch": 12},
-        additional_config={
+    engine_params = {
+        "model": model_name,
+        "trust_remote_code": True,
+        "max_model_len": ctx_len,
+        "long_prefill_token_threshold": seq_len,
+        "enable_prefix_caching": False,
+        "limit_mm_per_prompt": {"image": 1},
+        "mm_processor_kwargs": {"max_dynamic_patch": 12},
+        "additional_config": {
             "override_qaic_config": {
                 "split_model_io": True,
             },
         },
-        # Default is 12; with the thumbnail, it becomes 13 patches.
-    )
+    }
 
     placeholder = "<image>\n" if modality == "image" else ""
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
@@ -153,7 +151,7 @@ def run_internvl(questions: list[str], modality: str) -> ModelRequestData:
     stop_token_ids = [token_id for token_id in stop_token_ids if token_id is not None]
 
     return ModelRequestData(
-        engine_args=engine_args,
+        engine_params=engine_params,
         prompts=prompts,
         stop_token_ids=stop_token_ids,
     )
@@ -163,24 +161,24 @@ def run_internvl(questions: list[str], modality: str) -> ModelRequestData:
 def run_llava(questions: list[str], modality: str) -> ModelRequestData:
     assert modality in ("image", "text")
 
-    engine_args = EngineArgs(
-        model="llava-hf/llava-1.5-7b-hf",
-        max_model_len=ctx_len,
-        long_prefill_token_threshold=seq_len,
-        enable_prefix_caching=False,
-        limit_mm_per_prompt={"image": 1},
-        additional_config={
+    engine_params = {
+        "model": "llava-hf/llava-1.5-7b-hf",
+        "max_model_len": ctx_len,
+        "long_prefill_token_threshold": seq_len,
+        "enable_prefix_caching": False,
+        "limit_mm_per_prompt": {"image": 1},
+        "additional_config": {
             "override_qaic_config": {
                 "split_model_io": True,
             },
         },
-    )
+    }
 
     placeholder = "<image>\n" if modality == "image" else ""
     prompts = [f"USER: {placeholder}{question}\nASSISTANT:" for question in questions]
 
     return ModelRequestData(
-        engine_args=engine_args,
+        engine_params=engine_params,
         prompts=prompts,
     )
 
@@ -197,25 +195,25 @@ def run_qwen2_5_vl(questions: list[str], modality: str) -> ModelRequestData:
     height = [364, 512]
     width = [532, 910]
 
-    engine_args = EngineArgs(
-        model=model_name,
-        max_model_len=ctx_len,
-        long_prefill_token_threshold=seq_len,
-        enable_prefix_caching=False,
-        mm_processor_kwargs={
+    engine_params = {
+        "model": model_name,
+        "max_model_len": ctx_len,
+        "long_prefill_token_threshold": seq_len,
+        "enable_prefix_caching": False,
+        "mm_processor_kwargs": {
             "min_pixels": 28 * 28,
             "max_pixels": 1280 * 28 * 28,
             "fps": 1,
         },
-        limit_mm_per_prompt={"image": 1},
-        additional_config={
+        "limit_mm_per_prompt": {"image": 1},
+        "additional_config": {
             "override_qaic_config": {
                 "height": height,
                 "width": width,
                 "split_model_io": True,
             },
         },
-    )
+    }
 
     if modality == "image":
         placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
@@ -240,7 +238,7 @@ def run_qwen2_5_vl(questions: list[str], modality: str) -> ModelRequestData:
     ]
 
     return ModelRequestData(
-        engine_args=engine_args,
+        engine_params=engine_params,
         prompts=prompts,
         image_grid_thw=image_grid_thw,
     )
@@ -258,25 +256,25 @@ def run_qwen3_vl(questions: list[str], modality: str) -> ModelRequestData:
     height = [364, 512]
     width = [532, 910]
 
-    engine_args = EngineArgs(
-        model=model_name,
-        max_model_len=ctx_len,
-        long_prefill_token_threshold=seq_len,
-        enable_prefix_caching=False,
-        mm_processor_kwargs={
+    engine_params = {
+        "model": model_name,
+        "max_model_len": ctx_len,
+        "long_prefill_token_threshold": seq_len,
+        "enable_prefix_caching": False,
+        "mm_processor_kwargs": {
             "min_pixels": 28 * 28,
             "max_pixels": 1280 * 28 * 28,
             "fps": 1,
         },
-        limit_mm_per_prompt={"image": 1},
-        additional_config={
+        "limit_mm_per_prompt": {"image": 1},
+        "additional_config": {
             "override_qaic_config": {
                 "height": height,
                 "width": width,
                 "split_model_io": True,
             },
         },
-    )
+    }
 
     if modality == "image":
         placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
@@ -301,7 +299,7 @@ def run_qwen3_vl(questions: list[str], modality: str) -> ModelRequestData:
     ]
 
     return ModelRequestData(
-        engine_args=engine_args,
+        engine_params=engine_params,
         prompts=prompts,
         image_grid_thw=image_grid_thw,
     )
@@ -316,18 +314,18 @@ def run_qwen3_6_vl(questions: list[str], modality: str) -> ModelRequestData:
     height = [354, 512]
     width = [536, 910]
 
-    engine_args = EngineArgs(
-        model=model_name,
-        max_model_len=ctx_len,
-        long_prefill_token_threshold=seq_len,
-        enable_prefix_caching=False,
-        mm_processor_kwargs={
+    engine_params = {
+        "model": model_name,
+        "max_model_len": ctx_len,
+        "long_prefill_token_threshold": seq_len,
+        "enable_prefix_caching": False,
+        "mm_processor_kwargs": {
             "min_pixels": 28 * 28,
             "max_pixels": 1280 * 28 * 28,
             "fps": 1,
         },
-        limit_mm_per_prompt={"image": 1},
-        additional_config={
+        "limit_mm_per_prompt": {"image": 1},
+        "additional_config": {
             "override_qaic_config": {
                 "height": height,
                 "width": width,
@@ -335,7 +333,7 @@ def run_qwen3_6_vl(questions: list[str], modality: str) -> ModelRequestData:
                 "split_model_io": True,
             },
         },
-    )
+    }
 
     if modality == "image":
         placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
@@ -354,7 +352,7 @@ def run_qwen3_6_vl(questions: list[str], modality: str) -> ModelRequestData:
     ]
 
     return ModelRequestData(
-        engine_args=engine_args,
+        engine_params=engine_params,
         prompts=prompts,
         image_grid_thw=image_grid_thw,
     )
@@ -419,8 +417,8 @@ def apply_image_repeat(
     no_yes = [0, 1]
     probs = [1.0 - image_repeat_prob, image_repeat_prob]
 
-    inputs = []
-    inputs_with_empty_media = []
+    inputs: list[dict] = []
+    inputs_with_empty_media: list[dict] = []
     cur_image = images[0]
     for i in range(num_prompts):
         if image_repeat_prob is not None:
@@ -575,17 +573,16 @@ def main(args):
 
     # Disable other modalities to save memory
     default_limits = {"image": 0, "video": 0, "audio": 0}
-    req_data.engine_args.limit_mm_per_prompt = default_limits | dict(
-        req_data.engine_args.limit_mm_per_prompt or {}
+    req_data.engine_params["limit_mm_per_prompt"] = default_limits | dict(
+        req_data.engine_params.get("limit_mm_per_prompt") or {}
     )
 
-    engine_args = asdict(req_data.engine_args) | {
+    engine_args = copy.deepcopy(req_data.engine_params) | {
         "seed": args.seed,
         "mm_processor_cache_gb": 0 if args.disable_mm_processor_cache else 4,
     }
-    # asdict() serializes CompilationConfig as a dict with None sentinel fields
-    # which pydantic rejects when re-validating; drop it to let LLM use defaults.
-    engine_args.pop("compilation_config", None)
+
+    engine_args.setdefault("additional_config", {})
 
     # Set engine args specific to vision encoder
     engine_args_vision = copy.deepcopy(engine_args)
@@ -681,6 +678,7 @@ def main(args):
                     }
                 )
 
+    assert llm_vision is not None
     with time_counter(args.time_generate):
         embeddings = []
         outputs = llm_vision.encode(inputs, pooling_task="embed")
@@ -692,10 +690,11 @@ def main(args):
         for i, input_item in enumerate(inputs):
             # Replace the original image data with the pre-computed vision
             # embeddings so the language model receives features, not raw pixels.
+            mm_data = cast(dict, input_item["multi_modal_data"])
             if req_data.image_grid_thw is None:
-                input_item["multi_modal_data"][modality] = embeddings[i]
+                mm_data[modality] = embeddings[i]
             else:
-                input_item["multi_modal_data"][modality] = {
+                mm_data[modality] = {
                     "image_embeds": embeddings[i],
                     "image_grid_thw": req_data.image_grid_thw,
                 }
@@ -713,9 +712,11 @@ def main(args):
             # been seen, vision embeddings are returned directly from cache
             # without needing to run the encoder on device.
             print(
-                "Sending a second batch of requests with empty media and matching UUIDs."
+                "Sending a second batch of requests with empty media and "
+                "matching UUIDs."
             )
             with time_counter(args.time_generate):
+                assert llm_vision is not None
                 outputs = llm_vision.encode(
                     inputs_with_empty_media, pooling_task="embed"
                 )
@@ -728,12 +729,11 @@ def main(args):
                 for i, input_item in enumerate(inputs_with_empty_media):
                     # Replace the original image data with the new embeddings
                     # so the language model receives pre-computed vision features.
+                    mm_data_empty = cast(dict, input_item["multi_modal_data"])
                     if req_data.image_grid_thw is None:
-                        inputs_with_empty_media[i]["multi_modal_data"][modality] = (
-                            embeddings[i]
-                        )
+                        mm_data_empty[modality] = embeddings[i]
                     else:
-                        inputs_with_empty_media[i]["multi_modal_data"][modality] = {
+                        mm_data_empty[modality] = {
                             "image_embeds": embeddings[i],
                             "image_grid_thw": req_data.image_grid_thw,
                         }

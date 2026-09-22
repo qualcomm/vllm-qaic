@@ -542,7 +542,7 @@ def _run_disagg_vision_language(
     vision_inputs: list,
     request_prompts: list[str],
     sampling_params: SamplingParams,
-) -> None:
+) -> list:
     """Three-stage offline inference for MoE models requiring separate QPCs.
 
     Stage 1 - Vision encoder (main process, runner=pooling): encodes raw
@@ -800,6 +800,8 @@ def main(args):
             )
 
     else:
+        assert llm_vision is not None
+        assert llm_lang is not None
         with time_counter(args.time_generate):
             vision_outputs = llm_vision.encode(vision_inputs, pooling_task="embed")
 

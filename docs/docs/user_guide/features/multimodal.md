@@ -4,7 +4,7 @@ QAIC supports vision-language models (VLMs) using a **kv_offload architecture** 
 
 ## Architecture
 
-```
+```text
 Input (Image + Text)
         |
         v
@@ -21,8 +21,7 @@ Input (Image + Text)
         |
         v
     Generated Text
-```
-
+```text
 The vision encoder runs on one device group and the language decoder on another, allowing independent scaling and optimization.
 
 ## Supported Models
@@ -94,8 +93,7 @@ for inp, emb in zip(inputs, embeddings):
     inp["multi_modal_data"]["image"] = emb.outputs.data
 
 outputs = llm_lang.generate(inputs, SamplingParams(temperature=0.0, max_tokens=64))
-```
-
+```text
 ## Dynamic Resolution (Qwen2.5-VL / Qwen3-VL)
 
 For Qwen VL models, provide lists of heights and widths that the model is compiled for:
@@ -107,8 +105,7 @@ additional_config={
         "width": [532, 910, 1280],   # Supported input widths
     },
 }
-```
-
+```text
 If an input image doesn't match a compiled resolution exactly, it's resized to the best available match.
 
 !!! warning "Constraints"

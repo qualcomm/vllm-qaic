@@ -13,12 +13,12 @@ VLLM_QAIC_VERSION="${VLLM_QAIC_VERSION:-1.22}"
 # === AOT stack ===
 TORCH_VERSION_AOT="${TORCH_VERSION_AOT:-2.7.0+cpu}"
 TORCHVISION_VERSION_AOT="${TORCHVISION_VERSION_AOT:-0.22.0+cpu}"
-QEFF_BRANCH="${QEFF_BRANCH:-release/v1.22.0}"
+QEFF_BRANCH="${QEFF_BRANCH:-main}"
 # TRANSFORMERS_VERSION_AOT="4.55.3"  # optional: uncomment to pin if qefficient's version conflicts
 VLLM_TARGET_DEVICE_AOT="${VLLM_TARGET_DEVICE_AOT:-empty}"
 TRITON_CPU="${TRITON_CPU:-0}"                          # set to 1 to enable
 TRITON_CPU_COMMIT="${TRITON_CPU_COMMIT:-e60f448f8f197073b75d6d3e77347414a5db3ee7}"
-TRITON_CPU_SRC="${TRITON_CPU_SRC:-${HOME}/triton-cpu}"                 # clone destination
+TRITON_CPU_SRC="${TRITON_CPU_SRC:-${SCRIPT_DIR}/../.build/triton-cpu}"                 # clone destination
 TRITON_CPU_COMPILE_MAX_JOBS="${TRITON_CPU_COMPILE_MAX_JOBS:-4}"        # parallel build jobs
 
 # === PYT stack ===

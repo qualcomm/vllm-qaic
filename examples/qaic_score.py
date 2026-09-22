@@ -20,7 +20,7 @@ from vllm.config import PoolerConfig
 def print_scores(query, passages, outputs):
     print("\nGenerated Scores:\n" + "-" * 60)
     print(f"Query: {query!r}")
-    for passage, output in zip(passages, outputs):
+    for passage, output in zip(passages, outputs, strict=False):
         score = output.outputs.score
         print(f"Passage: {passage!r}\nScore:   {score:.4f}")
         print("-" * 60)

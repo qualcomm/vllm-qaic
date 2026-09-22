@@ -8,6 +8,9 @@ vllm/vllm_flash_attn/*
 # triton jit
 .triton
 
+# build output
+.build/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
