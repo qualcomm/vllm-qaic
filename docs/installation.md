@@ -66,7 +66,7 @@ source .venv/bin/activate
 | | AOT (Ahead-of-Time) | PYT (Eager / PyTorch) |
 |---|---|---|
 | Inference engine | QEfficient + QAIC compiler | torch_qaic |
-| torch version | `2.7.0+cpu` | `2.11.0+cpu` |
+| torch version | `2.7.0+cpu` | `2.13.0+cpu` |
 | `torch_qaic` required | No (must **not** be present) | Yes |
 | vllm-qaic wheel tag | `*aot*` | `*pyt*` |
 
@@ -198,8 +198,8 @@ pip install "setuptools>=77.0.3,<80.0.0" setuptools-scm wheel "cmake>=3.26"
 #    and will error if a CUDA torch is present when it imports.
 python -m pip install \
     --index-url https://download.pytorch.org/whl/cpu \
-    "torch==2.11.0+cpu" \
-    "torchvision==0.26.0+cpu" \
+    "torch==2.13.0+cpu" \
+    "torchvision==0.28.0+cpu" \
     "torchaudio==2.11.0+cpu"
 
 # 1b. torch_qaic AFTER torch is confirmed CPU-only
@@ -288,8 +288,8 @@ All `ARG`s are global (declared before the first `FROM`) and re-declared inside 
 | `VLLM_PR` | *(empty)* | Any target: vLLM PR number to fetch (takes priority over `VLLM_BRANCH` and `VLLM_VERSION`) |
 | `VLLM_BRANCH` | *(empty)* | Any target: vLLM branch to clone instead of the pinned `VLLM_VERSION` tag |
 | `VLLM_QAIC_VERSION` | `1.22` | vllm-qaic SDK/version tag (wheel tag/version suffix) |
-| `TORCH_VERSION_PYT` | `2.11.0+cpu` | CPU torch version for PYT |
-| `TORCHVISION_VERSION_PYT` | `0.26.0+cpu` | torchvision version for PYT |
+| `TORCH_VERSION_PYT` | `2.13.0+cpu` | CPU torch version for PYT |
+| `TORCHVISION_VERSION_PYT` | `0.28.0+cpu` | torchvision version for PYT |
 | `TORCHAUDIO_VERSION_PYT` | `2.11.0+cpu` | torchaudio version for PYT |
 | `VLLM_TARGET_DEVICE_PYT` | `empty` | vLLM build target device (`empty` = no C++ compilation) |
 | `TORCH_QAIC_BASE_PATH` | `/opt/qti-aic/integrations/torch_qaic` | SDK path containing `torch_qaic` wheels inside `BASE_IMAGE` |
@@ -449,7 +449,7 @@ After installation, verify the environment is clean:
 # Check torch is CPU-only (no CUDA suffix)
 python -c "import torch; print(torch.__version__)"
 # AOT expected: 2.7.0+cpu
-# PYT expected: 2.11.0+cpu
+# PYT expected: 2.13.0+cpu
 
 # Verify vllm-qaic loads and registers the QAIC platform plugin
 python -c "import vllm_qaic; print('vllm_qaic OK')"
@@ -474,8 +474,8 @@ All version constants are defined in [`scripts/utility.sh`](../scripts/utility.s
 | `VLLM_QAIC_VERSION` | `0.28.0` | vllm-qaic SDK/version tag (used in wheel tag and version suffix) |
 | `TORCH_VERSION_AOT` | `2.7.0+cpu` | CPU torch for AOT (matches QEfficient exact pin) |
 | `TORCHVISION_VERSION_AOT` | `0.22.0+cpu` | torchvision for AOT (keep in sync with torch) |
-| `TORCH_VERSION_PYT` | `2.11.0+cpu` | CPU torch for PYT |
-| `TORCHVISION_VERSION_PYT` | `0.26.0+cpu` | torchvision for PYT (keep in sync with torch) |
+| `TORCH_VERSION_PYT` | `2.13.0+cpu` | CPU torch for PYT |
+| `TORCHVISION_VERSION_PYT` | `0.28.0+cpu` | torchvision for PYT (keep in sync with torch) |
 | `TORCHAUDIO_VERSION_PYT` | `2.11.0+cpu` | torchaudio for PYT (keep in sync with torch) |
 | `QEFF_BRANCH` | `main` | QEfficient branch/tag |
 | `TORCH_QAIC_VERSION` | `0.1.0` | torch_qaic wheel version |

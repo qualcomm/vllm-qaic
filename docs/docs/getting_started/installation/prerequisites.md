@@ -16,7 +16,7 @@ Qualcomm Cloud AI 100 accelerator with QAIC Platform/Apps SDK >= 1.22.0 on Linux
 | Python | 3.12 | 3.12 |
 | QAIC Platform SDK | >= 1.22.0 | >= 1.22.0 |
 | QAIC Apps SDK | >= 1.22.0 | >= 1.22.0 (with `--install-torch-qaic`) |
-| torch | 2.7.0+cpu | 2.10.0+cpu |
+| torch | 2.7.0+cpu | 2.13.0+cpu |
 | vLLM | 0.28.0 | 0.28.0 |
 | QEfficient | main | — |
 
