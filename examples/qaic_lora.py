@@ -43,7 +43,7 @@ llm = LLM(
     # disable_log_stats=False,
     gpu_memory_utilization=1.0,
     enable_lora=True,
-    max_loras=decode_bsz,  # maxium loras to run within a batch,
+    max_loras=decode_bsz,  # maximum loras to run within a batch,
     additional_config={
         "device_group": [0],
         "lora_modules": [
@@ -73,5 +73,6 @@ for output in outputs:
     generated_tokens = output.outputs[0].token_ids
     num_generated_tokens = len(generated_tokens)
     print(
-        f"Prompt: {prompt!r}, Generated text: {generated_text!r}, Num generated tokens: {num_generated_tokens!r}"
+        f"Prompt: {prompt!r}, Generated text: {generated_text!r}, "
+        f"Num generated tokens: {num_generated_tokens!r}"
     )

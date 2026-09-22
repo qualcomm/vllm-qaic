@@ -2,27 +2,3 @@
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 # ------------------------------------------------------------------
-
-ruff
-isort
-pytest
-anyio
-datasets
-evaluate
-nltk
-pytest-asyncio
-pytest-tornasync
-pytest-trio
-pytest-twisted
-rich
-rouge_score
-twisted
-tblib
-onnx_ir==0.2.1
-
-# type checking
-mypy==1.11.1
-types-PyYAML
-types-regex
-types-requests
-types-setuptools
