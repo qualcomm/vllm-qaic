@@ -23,3 +23,9 @@ def register_connector():
         "vllm_qaic.distributed.kv_transfer.kv_connector.v1.qaic_lmcache_connector",
         "QaicLMCacheConnectorV1",
     )
+
+    KVConnectorFactory.register_connector(
+        "QaicNixlConnector",
+        "vllm_qaic.distributed.kv_transfer.kv_connector.v1.qaic_nixl_connector",
+        "QaicNixlConnector",
+    )
