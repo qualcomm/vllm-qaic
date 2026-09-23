@@ -71,6 +71,31 @@
 #       Because vLLM defaults to fork-based subprocesses, patching here (in the
 #       main process before fork) is sufficient.
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#
+# ** 6. File: patch_fp8_scaled_mm.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. vllm.model_executor.kernels.linear._POSSIBLE_FP8_KERNELS
+#   2. vllm.model_executor.kernels.linear._POSSIBLE_FP8_BLOCK_KERNELS
+#    Why:
+#       choose_scaled_mm_linear_kernel() selects an fp8 linear kernel with
+#       possible_kernels[current_platform._enum]. QAIC's enum is
+#       PlatformEnum.OOT, which is absent from every kernel table in
+#       vllm.model_executor.kernels.linear, so the lookup raises KeyError
+#       before any can_implement() check runs. Registering the kernel class
+#       is not sufficient on its own -- the table needs the OOT key.
+#    How:
+#       Insert PlatformEnum.OOT -> [QaicFP8ScaledMMLinearKernel] into the
+#       non-block fp8 kernel table, and
+#       PlatformEnum.OOT -> [QaicFP8BlockScaledMMLinearKernel] into the
+#       block-scaled table. The two cover the two branches of
+#       Fp8LinearMethod.__init__: per-tensor/per-token/per-channel scales, and
+#       block-quantized scales (e.g. DeepSeek's [128, 128] weight blocks).
+#    Note:
+#       QAIC has no per-group fp8 GEMM to call, so the block kernel honours the
+#       group scales above the device op, by folding them into fp16 operands
+#       before a single fused matmul. That is exact: a block scale is constant
+#       along K within a K-tile, so it hoists out of that tile's partial sum.
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # =================
 
 import vllm_qaic.patch.patch_config  # noqa
@@ -80,3 +105,4 @@ import vllm_qaic.patch.patch_rejection_sampler  # noqa
 import vllm_qaic.patch.patch_graph_pickler  # noqa
 import vllm_qaic.patch.patch_mem_utils  # noqa
 import vllm_qaic.patch.patch_block_table  # noqa
+import vllm_qaic.patch.patch_fp8_scaled_mm  # noqa
