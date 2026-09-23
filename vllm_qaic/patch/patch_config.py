@@ -23,7 +23,10 @@ from vllm_qaic.logger import init_logger
 logger = init_logger(__name__)
 
 _QAIC_CACHE_DTYPES = ("mxint8",)
-QaicCacheDType: TypeAlias = CacheDType | Literal["mxint8"]
+# Flattened single Literal (not a Union), else the CLI exposes only "mxint8".
+QaicCacheDType: TypeAlias = Literal[  # type: ignore[valid-type]
+    tuple(dict.fromkeys((*get_args(CacheDType), *_QAIC_CACHE_DTYPES)))
+]
 
 
 @config
@@ -91,9 +94,5 @@ vllm.engine.arg_utils.CacheConfig = QaicCacheConfig
 
 # get_attn_backend() asserts kv_cache_dtype in get_args(CacheDType); rebind that
 # Literal (in its module + the selector that imported it) to include mxint8.
-_QaicCacheDTypeLiteral = Literal[  # type: ignore[valid-type]
-    tuple(dict.fromkeys((*get_args(CacheDType), *_QAIC_CACHE_DTYPES)))
-]
-
-vllm.config.cache.CacheDType = _QaicCacheDTypeLiteral
-vllm.v1.attention.selector.CacheDType = _QaicCacheDTypeLiteral
+vllm.config.cache.CacheDType = QaicCacheDType
+vllm.v1.attention.selector.CacheDType = QaicCacheDType
