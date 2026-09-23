@@ -7,6 +7,16 @@ import random
 
 import pytest
 from vllm import SamplingParams
+from vllm.triton_utils.importing import HAS_TRITON
+
+# DFlash speculative decoding relies on the Triton rejection-sampler kernels
+# (`vllm.v1.sample.rejection_sampler`). On QAIC (CPU) these require a Triton
+# CPU backend, which is only present when vllm-qaic is installed with
+# `TRITON_CPU=1`. Skip the whole module when Triton is unavailable.
+pytestmark = pytest.mark.skipif(
+    not HAS_TRITON,
+    reason="DFlash requires a functional Triton backend (install with TRITON_CPU=1)",
+)
 
 _DFLASH_BLOCK_SIZE = 16
 _DFLASH_SEQ_LEN = 128
