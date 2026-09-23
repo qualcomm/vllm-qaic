@@ -200,6 +200,11 @@ class QaicPlatform(Platform):
                 vllm_config.additional_config = cfg
 
         if cls.is_aot:
+            if vllm_config.model_config.enforce_eager:
+                logger.warning_once(
+                    "setting inference mode to Ahead-of-Time since "
+                    "torch_qaic is not installed"
+                )
             vllm_config.model_config.enforce_eager = False
             device_config.device = torch.device("cpu")
         else:
@@ -210,9 +215,6 @@ class QaicPlatform(Platform):
                 os.environ.get(cls.device_control_env_var) is None
                 and "device_group" in additional_config
             ):
-                logger.warning_once(
-                    "setting inference mode to Eager mode since torch_qaic is installed"
-                )
                 os.environ[cls.device_control_env_var] = additional_config[
                     "device_group"
                 ]
@@ -240,10 +242,10 @@ class QaicPlatform(Platform):
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = cls.get_worker_cls()
 
-        parallel_config.distributed_executor_backend = "uni"
-        if not cls.is_aot and parallel_config.world_size > 1:
-            # uni backend sets qualnet ip while mp backend sets localhost ip
-            parallel_config.distributed_executor_backend = "mp"
+        if parallel_config.world_size > 1:
+            parallel_config.distributed_executor_backend = "uni"
+            if not cls.is_aot:
+                parallel_config.distributed_executor_backend = "mp"
 
         model_config = vllm_config.model_config
         scheduler_config = vllm_config.scheduler_config
