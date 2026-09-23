@@ -202,17 +202,12 @@ class QaicPlatform(Platform):
         if cls.is_aot:
             if vllm_config.model_config.enforce_eager:
                 logger.warning_once(
-                    "setting inference mode to Ahead-of-Time since"
+                    "setting inference mode to Ahead-of-Time since "
                     "torch_qaic is not installed"
                 )
-                vllm_config.model_config.enforce_eager = False
+            vllm_config.model_config.enforce_eager = False
             device_config.device = torch.device("cpu")
         else:
-            if not vllm_config.model_config.enforce_eager:
-                logger.warning_once(
-                    "setting inference mode to Eager mode since torch_qaic is installed"
-                )
-                vllm_config.model_config.enforce_eager = True
             device_config.device = torch.device("qaic")
             # set QAIC_VISIBLE_DEVICES from device_group
             # if not already set
@@ -220,9 +215,6 @@ class QaicPlatform(Platform):
                 os.environ.get(cls.device_control_env_var) is None
                 and "device_group" in additional_config
             ):
-                logger.warning_once(
-                    "setting inference mode to Eager mode since torch_qaic is installed"
-                )
                 os.environ[cls.device_control_env_var] = additional_config[
                     "device_group"
                 ]
@@ -252,8 +244,7 @@ class QaicPlatform(Platform):
 
         if parallel_config.world_size > 1:
             parallel_config.distributed_executor_backend = "uni"
-            if vllm_config.model_config.enforce_eager:
-                # uni backend sets qualnet ip while mp backend sets localhost ip
+            if not cls.is_aot:
                 parallel_config.distributed_executor_backend = "mp"
 
         model_config = vllm_config.model_config
@@ -298,7 +289,7 @@ class QaicPlatform(Platform):
 
         cache_config = vllm_config.cache_config
         if cache_config:
-            if model_config.enforce_eager:
+            if not cls.is_aot:
                 cache_config.block_size = 16
             else:
                 if cache_config.enable_prefix_caching:
@@ -396,7 +387,7 @@ class QaicPlatform(Platform):
         # QAIC_FIXME: default uses torch.compile based custom vllm-backend.
         # Turning off all torch.compile modes to fallback to purely eager for now.
         if compilation_config and compilation_config.mode != CompilationMode.NONE:
-            mode = "eager mode" if vllm_config.model_config.enforce_eager else "AOT"
+            mode = "AoT" if cls.is_aot else "PyT"
             logger.warning_once(
                 "vllm qaic platform doesn't support compilation mode = %s,"
                 "disabling and running with %s...",
