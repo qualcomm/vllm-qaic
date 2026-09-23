@@ -13,7 +13,6 @@ This replaces it with a pure PyTorch/numpy equivalent.
 
 import numpy as np
 import torch
-import vllm.v1.worker.block_table
 from vllm.v1.worker.block_table import BlockTable, PAD_SLOT_ID, SlotMappingMode
 
 
