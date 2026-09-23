@@ -6,11 +6,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Adapted from vllm/vllm/config/cache.py
 
-from typing import Literal, TypeAlias
+from typing import Literal, TypeAlias, get_args
 
 import torch
 import vllm.config
+import vllm.config.cache
 import vllm.engine.arg_utils
+import vllm.v1.attention.selector
 from pydantic import ConfigDict, field_validator
 from pydantic.dataclasses import dataclass
 from vllm.config.cache import CacheConfig, CacheDType
@@ -20,6 +22,7 @@ from vllm_qaic.logger import init_logger
 
 logger = init_logger(__name__)
 
+_QAIC_CACHE_DTYPES = ("mxint8",)
 QaicCacheDType: TypeAlias = CacheDType | Literal["mxint8"]
 
 
@@ -85,3 +88,12 @@ vllm.config.DeviceConfig = QaicDeviceConfig
 
 vllm.engine.arg_utils.DeviceConfig = QaicDeviceConfig
 vllm.engine.arg_utils.CacheConfig = QaicCacheConfig
+
+# get_attn_backend() asserts kv_cache_dtype in get_args(CacheDType); rebind that
+# Literal (in its module + the selector that imported it) to include mxint8.
+_QaicCacheDTypeLiteral = Literal[  # type: ignore[valid-type]
+    tuple(dict.fromkeys((*get_args(CacheDType), *_QAIC_CACHE_DTYPES)))
+]
+
+vllm.config.cache.CacheDType = _QaicCacheDTypeLiteral
+vllm.v1.attention.selector.CacheDType = _QaicCacheDTypeLiteral
