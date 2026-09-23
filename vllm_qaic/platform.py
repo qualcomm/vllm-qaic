@@ -25,6 +25,9 @@ class QaicPlatform(QaicPlatformBase):
         # Adapt the patch here.
         from vllm_qaic import patch  # noqa: F401
 
+        if not cls.is_aot:
+            import vllm_qaic.patch.patch_qaic_triton_import  # noqa
+
         if parser is not None:  # For synchronous vLLM engine
             # disable prefix caching as QAIC backend plugin does not support it
             parser.set_defaults(enable_prefix_caching=False)

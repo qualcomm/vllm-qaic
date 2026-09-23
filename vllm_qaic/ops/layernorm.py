@@ -15,6 +15,7 @@ from vllm.model_executor.layers.layernorm import (
 )
 
 from vllm_qaic._custom_ops import rms_norm_hexagon as _call_hexagon_rms_norm
+from vllm_qaic.ops._triton_flags import triton_op_enabled
 
 
 class QAicRMSNorm(RMSNorm):
@@ -23,6 +24,12 @@ class QAicRMSNorm(RMSNorm):
     When `residual` is provided the kernel fuses the residual add and the
     RMS normalization into a single NSP dispatch, avoiding a round-trip to
     DDR between the two ops.
+
+    When ``VLLM_QAIC_TRITON_RMS_NORM`` is set the no-residual path instead
+    dispatches to vLLM's Triton ``rms_norm_batch_invariant`` kernel. The
+    residual path stays on the Hexagon kernel regardless: vLLM has no
+    pure-Triton fused add+RMS-norm (its residual launcher falls back to the
+    CUDA ``_C`` op).
     """
 
     def forward_oot(
@@ -36,7 +43,14 @@ class QAicRMSNorm(RMSNorm):
             )
             return normed, new_residual
 
-        # No residual: plain normalization only
+        # No residual: plain normalization only.
+        if triton_op_enabled("RMS_NORM"):
+            from vllm.model_executor.layers.batch_invariant import (
+                rms_norm_batch_invariant,
+            )
+
+            return rms_norm_batch_invariant(x, self.weight, self.variance_epsilon)
+
         return F.rms_norm(x, [self.hidden_size], self.weight, self.variance_epsilon)
 
 
