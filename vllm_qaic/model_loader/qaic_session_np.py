@@ -459,6 +459,15 @@ class QAICInferenceSession:
             return buffer.astype(np.float32, copy=False)
         return buffer
 
+    def _to_lrt_argument(self, binding_index: int, buffer: Any) -> np.ndarray:
+        """Adapt one binding array to qaicrt's supported buffer formats."""
+        lrt_buffer = self._to_lrt_buffer(binding_index, buffer)
+        if self.bindings[binding_index].type == getattr(aicapi, "BFLOAT16_TYPE", 11):
+            # qaicrt's buffer bridge does not support ml_dtypes' PEP 3118 ``E``
+            # format. This is a zero-copy bit view for that boundary.
+            return lrt_buffer.view(np.uint16)
+        return lrt_buffer
+
     def get_tuple_list_from_dict(self, dict_in):
         # Convert the buffer_dict to a list of tuples.
         buffer_idx_to_buffer = []
@@ -467,11 +476,10 @@ class QAICInferenceSession:
                 logger.warning("Buffer: %s not found", buffer_name)
                 continue
             buffer_index: int = self.binding_index_map[buffer_name]
-            if buffer is None:
-                continue
-            buffer_idx_to_buffer.append(
-                (buffer_index, self._to_lrt_buffer(buffer_index, buffer))
-            )
+            if buffer is not None:
+                buffer_idx_to_buffer.append(
+                    (buffer_index, self._to_lrt_argument(buffer_index, buffer))
+                )
         return buffer_idx_to_buffer
 
     def extract_outputs(self, input_dict):
@@ -565,7 +573,7 @@ class QAICInferenceSession:
                 "buffers must be a list of numpy arrays or a dictionary of numpy arrays"
             )
             slices_as_tuple_list = [
-                (name[1], self._to_lrt_buffer(name[1], buff))
+                (name[1], self._to_lrt_argument(name[1], buff))
                 for name, buff in zip(buff_map, buffers, strict=False)
             ]
         else:
