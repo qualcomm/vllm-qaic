@@ -10,6 +10,7 @@ from queue import Queue
 from typing import Any
 
 import numpy as np
+import torch
 
 from vllm_qaic.logger import init_logger
 
@@ -31,7 +32,59 @@ import QAicApi_pb2 as aicapi
 
 logger = init_logger(__name__)
 
+# Keep this raw-carrier convention in lockstep with QEfficient cloud_infer:
+# NumPy is deliberately fooled into seeing float16 solely for its two-byte
+# itemsize. LRT receives the unchanged IEEE BF16 bits, never numeric FP16.
+BFLOAT16_STORAGE_DTYPE = np.dtype(np.float16)
+
+
+def float_to_bfloat16_storage(values: Any) -> np.ndarray:
+    """Return QEff's fake-float16 carrier containing raw BF16 bit patterns.
+
+    QEfficient uses ``tensor.to(torch.bfloat16).view(torch.int16).numpy()
+    .view(np.float16)`` for BF16 host buffers. Mirror that bit-cast here so a
+    QEff carrier can pass through this plugin unchanged. A NumPy float16 input
+    is therefore already raw BF16 storage, not a numeric FP16 tensor.
+    """
+    from_torch = isinstance(values, torch.Tensor)
+    if from_torch:
+        tensor = values.detach()
+        if tensor.device.type != "cpu":
+            tensor = tensor.cpu()
+        tensor = tensor.contiguous()
+        if tensor.dtype == torch.bfloat16:
+            # Match QEff's int16-to-float16 view chain without Tensor.numpy(BF16).
+            return tensor.view(torch.int16).numpy().view(BFLOAT16_STORAGE_DTYPE)
+        array = tensor.numpy()
+    else:
+        array = np.asarray(values)
+
+    array = np.ascontiguousarray(array)
+    if not from_torch and array.dtype == BFLOAT16_STORAGE_DTYPE:
+        return array
+    if not array.flags.writeable:
+        array = array.copy()
+    # Match QEff's numerical-to-BF16 conversion before relabeling the raw bytes.
+    return (
+        torch.from_numpy(array)
+        .to(torch.bfloat16)
+        .view(torch.int16)
+        .numpy()
+        .view(BFLOAT16_STORAGE_DTYPE)
+    )
+
+
+def bfloat16_storage_to_float32(values: np.ndarray) -> np.ndarray:
+    """Decode QEff's fake-float16 BF16 carrier for vLLM host-side consumers."""
+    storage = np.ascontiguousarray(values)
+    if storage.dtype != BFLOAT16_STORAGE_DTYPE:
+        raise TypeError("Expected QEff's float16 carrier for raw BF16 storage")
+    return (storage.view(np.uint16).astype(np.uint32) << np.uint32(16)).view(np.float32)
+
+
 aic_to_np_dtype_mapping = {
+    # Match QEff's mapping: BF16 is a fake float16 view only for LRT itemsize.
+    getattr(aicapi, "BFLOAT16_TYPE", 11): BFLOAT16_STORAGE_DTYPE,
     aicapi.FLOAT_TYPE: np.dtype(np.float32),
     aicapi.FLOAT_16_TYPE: np.dtype(np.float16),
     aicapi.INT8_Q_TYPE: np.dtype(np.int8),
@@ -425,8 +478,35 @@ class QAICInferenceSession:
             self.program.deactivate()
             self.activate_done = False
 
+    def is_bfloat16_binding(self, binding_name: str) -> bool:
+        """Return whether a named QPC binding has BF16 element storage."""
+        if binding_name not in self.binding_index_map:
+            return False
+        return self.bindings[self.binding_index_map[binding_name]].type == getattr(
+            aicapi, "BFLOAT16_TYPE", 11
+        )
+
+    def _to_lrt_buffer(self, binding_index: int, buffer: Any) -> np.ndarray:
+        """Create a contiguous raw-memory buffer suitable for an LRT binding."""
+        binding = self.bindings[binding_index]
+        if binding.type == getattr(aicapi, "BFLOAT16_TYPE", 11):
+            # LRT needs raw BF16 bits, not a numerical float16 conversion.
+            return float_to_bfloat16_storage(buffer)
+        if isinstance(buffer, torch.Tensor):
+            buffer = buffer.detach()
+            if buffer.device.type != "cpu":
+                buffer = buffer.cpu()
+            buffer = buffer.contiguous().numpy()
+        return np.ascontiguousarray(buffer)
+
+    def to_host_array(self, binding_name: str, buffer: np.ndarray) -> np.ndarray:
+        """Decode a BF16 binding to float32; leave all other bindings unchanged."""
+        if self.is_bfloat16_binding(binding_name):
+            return bfloat16_storage_to_float32(buffer)
+        return buffer
+
     def get_tuple_list_from_dict(self, dict_in):
-        # Convert the buffer_dict to a list of tuples
+        # Convert the buffer_dict to a list of tuples.
         buffer_idx_to_buffer = []
         for buffer_name, buffer in dict_in.items():
             if buffer_name not in self.binding_index_map:
@@ -435,7 +515,9 @@ class QAICInferenceSession:
             buffer_index: int = self.binding_index_map[buffer_name]
             if buffer is None:
                 continue
-            buffer_idx_to_buffer.append((buffer_index, buffer))
+            buffer_idx_to_buffer.append(
+                (buffer_index, self._to_lrt_buffer(buffer_index, buffer))
+            )
         return buffer_idx_to_buffer
 
     def extract_outputs(self, input_dict):
@@ -529,7 +611,8 @@ class QAICInferenceSession:
                 "buffers must be a list of numpy arrays or a dictionary of numpy arrays"
             )
             slices_as_tuple_list = [
-                (name[1], buff) for name, buff in zip(buff_map, buffers, strict=False)
+                (name[1], self._to_lrt_buffer(name[1], buff))
+                for name, buff in zip(buff_map, buffers, strict=False)
             ]
         else:
             slices_as_tuple_list = self.get_tuple_list_from_dict(buffers)
@@ -540,8 +623,12 @@ class QAICInferenceSession:
         return buffers
 
     def _make_inputs_contiguous(self, inputs: dict) -> None:
-        for k, v in inputs.items():
-            inputs[k] = np.ascontiguousarray(v)
+        for name, buffer in inputs.items():
+            if name not in self.binding_index_map:
+                continue
+            binding_index = self.binding_index_map[name]
+            # Apply the same BF16 packing to the direct np_run input path.
+            inputs[name] = self._to_lrt_buffer(binding_index, buffer)
 
     def np_run(
         self,
