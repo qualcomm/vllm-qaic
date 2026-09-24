@@ -1,0 +1,143 @@
+[
+  {
+    "model": "Alibaba-NLP/gte-Qwen2-7B-instruct"
+  },
+  {
+    "model": "Alibaba-NLP/gte-modernbert-base"
+  },
+  {
+    "model": "Alibaba-NLP/gte-multilingual-base"
+  },
+  {
+    "model": "BAAI/bge-base-en-v1.5"
+  },
+  {
+    "model": "BAAI/bge-large-en-v1.5"
+  },
+  {
+    "model": "BAAI/bge-multilingual-gemma2"
+  },
+  {
+    "model": "BAAI/bge-small-en-v1.5"
+  },
+  {
+    "model": "NovaSearch/stella_en_1.5B_v5"
+  },
+  {
+    "model": "Qwen/Qwen3-Embedding-0.6B"
+  },
+  {
+    "model": "Snowflake/snowflake-arctic-embed-m-long"
+  },
+  {
+    "model": "Snowflake/snowflake-arctic-embed-m-v2.0"
+  },
+  {
+    "model": "Snowflake/snowflake-arctic-embed-xs"
+  },
+  {
+    "model": "google/embeddinggemma-300m"
+  },
+  {
+    "model": "ibm-granite/granite-embedding-107m-multilingual"
+  },
+  {
+    "model": "ibm-granite/granite-embedding-125m-english"
+  },
+  {
+    "model": "ibm-granite/granite-embedding-278m-multilingual"
+  },
+  {
+    "model": "ibm-granite/granite-embedding-30m-english"
+  },
+  {
+    "model": "intfloat/e5-large-v2"
+  },
+  {
+    "model": "intfloat/e5-mistral-7b-instruct"
+  },
+  {
+    "model": "intfloat/multilingual-e5-large"
+  },
+  {
+    "model": "jinaai/jina-embeddings-v2-base-code"
+  },
+  {
+    "model": "naver/splade-v3"
+  },
+  {
+    "model": "nomic-ai/nomic-embed-text-v1"
+  },
+  {
+    "model": "nomic-ai/nomic-embed-text-v1.5"
+  },
+  {
+    "model": "nomic-ai/nomic-embed-text-v2-moe"
+  },
+  {
+    "model": "nvidia/llama-nemotron-embed-1b-v2"
+  },
+  {
+    "model": "parasail-ai/GritLM-7B-vllm"
+  },
+  {
+    "model": "sentence-transformers/all-roberta-large-v1"
+  },
+  {
+    "model": "sentence-transformers/multi-qa-mpnet-base-cos-v1"
+  },
+  {
+    "model": "ssmits/Qwen2-7B-Instruct-embed-base"
+  },
+  {
+    "model": "ai21labs/Jamba-tiny-reward-dev"
+  },
+  {
+    "model": "nie3e/sentiment-polish-gpt2-small"
+  },
+  {
+    "model": "Alibaba-NLP/gte-multilingual-reranker-base"
+  },
+  {
+    "model": "BAAI/bge-reranker-v2-gemma"
+  },
+  {
+    "model": "BAAI/bge-reranker-v2-m3"
+  },
+  {
+    "model": "Qwen/Qwen3-Reranker-0.6B"
+  },
+  {
+    "model": "cross-encoder/ms-marco-MiniLM-L-6-v2"
+  },
+  {
+    "model": "cross-encoder/quora-roberta-base"
+  },
+  {
+    "model": "mixedbread-ai/mxbai-rerank-base-v2"
+  },
+  {
+    "model": "nvidia/llama-nemotron-rerank-1b-v2"
+  },
+  {
+    "model": "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
+  },
+  {
+    "model": "Qwen/Qwen2.5-Math-PRM-7B"
+  },
+  {
+    "model": "internlm/internlm2-1_8b-reward"
+  },
+  {
+    "model": "internlm/internlm2-7b-reward"
+  },
+  {
+    "model": "peiyi9979/math-shepherd-mistral-7b-prm"
+  },
+  {
+    "model": "boltuix/NeuroBERT-NER"
+  },
+  {
+    "model": "disham993/electrical-ner-ModernBERT-base"
+  }
+]

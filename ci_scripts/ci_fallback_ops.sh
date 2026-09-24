@@ -11,8 +11,8 @@
 #   bash ci_fallback_ops.sh [OPTIONS]
 #
 # Options:
-#   --type       llm|vlm|all    Model type to run (default: all)
-#   --model      <model_id>     Run a single model directly (requires --type llm|vlm)
+#   --type       llm|vlm|embed|all  Model type to run (default: all)
+#   --model      <model_id>     Run a single model directly (requires --type llm|vlm|embed)
 #   --priority   P0|P1|P2       Priority tier filter (default: all)
 #   --family     <name>         Run only models matching this family name
 #   --tp-size    <N>            Default tensor parallel size (default: 4). A model
@@ -35,6 +35,7 @@
 #   bash ci_fallback_ops.sh --type vlm --model Qwen/Qwen-VL
 #   bash ci_fallback_ops.sh --type llm --delete-hf-checkpoint
 #   bash ci_fallback_ops.sh --type llm --ref v0.23.0
+#   bash ci_fallback_ops.sh --type embed --model BAAI/bge-base-en-v1.5
 #
 # To add a new model type (e.g. embedding):
 #   1. Add entry to RUNNER_MAP, JSON_PREFIX below
@@ -60,32 +61,32 @@ REF=""
 # Off by default: a sweep must never evict a checkpoint unless explicitly asked,
 # since the HF cache is usually shared between engineers.
 DELETE_HF_CHECKPOINT="0"
-SLEEP_BETWEEN=10
+SLEEP_BETWEEN=40
 
 # QAIC runtime environment
 export QAIC_FORCE_PLATFORM_QCCL=1
 export QAIC_QCCL_ALGO=tree
-export QAIC_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export QAIC_VISIBLE_DEVICES=20,21,22,23,24,25,26,27
 
 # Model type registry 
 # To support a new model type:
 #   1. Add its name to ALL_TYPES (controls run order for --type all)
 #   2. Add one entry to each of RUNNER_MAP, JSON_PREFIX
 #   3. Create the corresponding run_<type>.py in eager/
-ALL_TYPES=("llm" "vlm")
+ALL_TYPES=("llm" "vlm" "embed")
 
 #python scripts
 declare -A RUNNER_MAP=(
     ["llm"]="run_llms.py"
     ["vlm"]="run_vlms.py"
-    # ["embedding"]="run_embeddings.py"
+    ["embed"]="run_embed.py"
     # ["spd"]="run_spd.py"
 )
 #model list
 declare -A JSON_PREFIX=(
     ["llm"]="llm_models"
     ["vlm"]="vlm_models"
-    # ["embedding"]="embedding_models"
+    ["embed"]="embed_models"
     # ["spd"]="spd_models"
 )
 
@@ -108,7 +109,7 @@ done
 
 # --model requires a specific type (not "all")
 if [ -n "$MODEL" ] && [ "$TYPE" = "all" ]; then
-    echo "Error: --model requires --type llm|vlm (not 'all')"
+    echo "Error: --model requires --type llm|vlm|embed (not 'all')"
     exit 1
 fi
 
