@@ -1,0 +1,4 @@
+{
+  "P0": ["qwen", "gemma", "phi", "deepseek", "gptoss"],
+  "P1": "*"
+}
