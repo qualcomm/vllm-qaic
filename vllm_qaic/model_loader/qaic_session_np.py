@@ -9,6 +9,7 @@ import sys
 from queue import Queue
 from typing import Any
 
+import ml_dtypes
 import numpy as np
 import torch
 
@@ -32,59 +33,13 @@ import QAicApi_pb2 as aicapi
 
 logger = init_logger(__name__)
 
-# Keep this raw-carrier convention in lockstep with QEfficient cloud_infer:
-# NumPy is deliberately fooled into seeing float16 solely for its two-byte
-# itemsize. LRT receives the unchanged IEEE BF16 bits, never numeric FP16.
-BFLOAT16_STORAGE_DTYPE = np.dtype(np.float16)
-
-
-def float_to_bfloat16_storage(values: Any) -> np.ndarray:
-    """Return QEff's fake-float16 carrier containing raw BF16 bit patterns.
-
-    QEfficient uses ``tensor.to(torch.bfloat16).view(torch.int16).numpy()
-    .view(np.float16)`` for BF16 host buffers. Mirror that bit-cast here so a
-    QEff carrier can pass through this plugin unchanged. A NumPy float16 input
-    is therefore already raw BF16 storage, not a numeric FP16 tensor.
-    """
-    from_torch = isinstance(values, torch.Tensor)
-    if from_torch:
-        tensor = values.detach()
-        if tensor.device.type != "cpu":
-            tensor = tensor.cpu()
-        tensor = tensor.contiguous()
-        if tensor.dtype == torch.bfloat16:
-            # Match QEff's int16-to-float16 view chain without Tensor.numpy(BF16).
-            return tensor.view(torch.int16).numpy().view(BFLOAT16_STORAGE_DTYPE)
-        array = tensor.numpy()
-    else:
-        array = np.asarray(values)
-
-    array = np.ascontiguousarray(array)
-    if not from_torch and array.dtype == BFLOAT16_STORAGE_DTYPE:
-        return array
-    if not array.flags.writeable:
-        array = array.copy()
-    # Match QEff's numerical-to-BF16 conversion before relabeling the raw bytes.
-    return (
-        torch.from_numpy(array)
-        .to(torch.bfloat16)
-        .view(torch.int16)
-        .numpy()
-        .view(BFLOAT16_STORAGE_DTYPE)
-    )
-
-
-def bfloat16_storage_to_float32(values: np.ndarray) -> np.ndarray:
-    """Decode QEff's fake-float16 BF16 carrier for vLLM host-side consumers."""
-    storage = np.ascontiguousarray(values)
-    if storage.dtype != BFLOAT16_STORAGE_DTYPE:
-        raise TypeError("Expected QEff's float16 carrier for raw BF16 storage")
-    return (storage.view(np.uint16).astype(np.uint32) << np.uint32(16)).view(np.float32)
+# ``ml_dtypes`` provides NumPy with a real BF16 dtype while preserving the
+# two-byte element size required by LRT.
+BFLOAT16_DTYPE = np.dtype(ml_dtypes.bfloat16)
 
 
 aic_to_np_dtype_mapping = {
-    # Match QEff's mapping: BF16 is a fake float16 view only for LRT itemsize.
-    getattr(aicapi, "BFLOAT16_TYPE", 11): BFLOAT16_STORAGE_DTYPE,
+    getattr(aicapi, "BFLOAT16_TYPE", 11): BFLOAT16_DTYPE,
     aicapi.FLOAT_TYPE: np.dtype(np.float32),
     aicapi.FLOAT_16_TYPE: np.dtype(np.float16),
     aicapi.INT8_Q_TYPE: np.dtype(np.int8),
@@ -487,22 +442,21 @@ class QAICInferenceSession:
         )
 
     def _to_lrt_buffer(self, binding_index: int, buffer: Any) -> np.ndarray:
-        """Create a contiguous raw-memory buffer suitable for an LRT binding."""
-        binding = self.bindings[binding_index]
-        if binding.type == getattr(aicapi, "BFLOAT16_TYPE", 11):
-            # LRT needs raw BF16 bits, not a numerical float16 conversion.
-            return float_to_bfloat16_storage(buffer)
+        """Create a contiguous NumPy buffer matching the QPC binding dtype."""
         if isinstance(buffer, torch.Tensor):
             buffer = buffer.detach()
             if buffer.device.type != "cpu":
                 buffer = buffer.cpu()
+            buffer = buffer.float() if buffer.dtype == torch.bfloat16 else buffer
             buffer = buffer.contiguous().numpy()
-        return np.ascontiguousarray(buffer)
+        binding = self.bindings[binding_index]
+        dtype = aic_to_np_dtype_mapping[binding.type]
+        return np.ascontiguousarray(buffer, dtype=dtype)
 
     def to_host_array(self, binding_name: str, buffer: np.ndarray) -> np.ndarray:
-        """Decode a BF16 binding to float32; leave all other bindings unchanged."""
+        """Convert BF16 output to FP32 only for host-side vLLM consumers."""
         if self.is_bfloat16_binding(binding_name):
-            return bfloat16_storage_to_float32(buffer)
+            return buffer.astype(np.float32, copy=False)
         return buffer
 
     def get_tuple_list_from_dict(self, dict_in):

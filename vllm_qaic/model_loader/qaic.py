@@ -1020,7 +1020,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         output = self.encode_num_logits_buffer
         assert output is not None, "encode buffer not initialized"
         output_array = output[output_key][: len(prefill_cum_sum)]
-        # Decode QEff's float16 storage view before vLLM consumes BF16 outputs.
+        # Convert native NumPy BF16 output before vLLM consumes it.
         output_array = self.session.to_host_array(output_key, output_array)
         output_tensor = torch.tensor(output_array)
 

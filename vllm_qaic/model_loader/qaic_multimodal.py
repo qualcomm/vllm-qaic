@@ -139,7 +139,7 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
             self.decode_batch_inputs.update(self.default_mm_kwargs)
 
     def _is_bfloat16_binding(self, binding_name: str | None) -> bool:
-        """Keep fake-float16 handling limited to actual QPC BF16 bindings."""
+        """Limit BF16-specific handling to actual QPC BF16 bindings."""
         return binding_name is not None and self.session.is_bfloat16_binding(
             binding_name
         )
@@ -164,13 +164,13 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
             return [self._to_np(item, dtype, binding_name) for item in t]
 
         if isinstance(t, torch.Tensor):
-            # NumPy cannot materialize BF16; retain numerical FP32 until LRT packs it.
+            # Use FP32 staging for Torch BF16 tensors until LRT converts them.
             t = t.float() if t.dtype == torch.bfloat16 else t
             t = t.numpy()
 
         array = np.asarray(t)
         if self._is_bfloat16_binding(binding_name):
-            # Only QAICInferenceSession may create QEff's fake float16 carrier.
+            # _to_lrt_buffer converts this host array to the QPC binding dtype.
             return array.astype(np.float32, copy=False)
         if dtype is not None:
             return array.astype(dtype, copy=False)
@@ -197,7 +197,7 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
                 list(tensor.shape),
                 list(target_dims),
             )
-        # Reserve fake float16 only for raw LRT buffers, never numerical padding.
+        # Keep padding numerical until _to_lrt_buffer converts it for the QPC.
         output_dtype = np.float32 if self._is_bfloat16_binding(binding_name) else dtype
         padded = np.zeros(target_dims, dtype=output_dtype)
         slices = tuple(
@@ -226,7 +226,7 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
                 "Vision embeddings are missing from session input names. "
                 "This is unexpected and may indicate a compiler regression."
             )
-            # Preserve BF16 values through FP32 because NumPy cannot expose BF16.
+            # Use FP32 staging when no matching QPC binding is available.
             mm_kwargs["vision_embeds"] = self._to_np(image_embeds)
             return
 
@@ -513,7 +513,8 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
             session_input.update(mm_output[i])
             exec_obj_idx = self.session.np_run(session_input, is_prefill=False)
             self.session.complete_inf(exec_obj_idx, is_prefill=False)
-            # Decode each vision output before it is reused by the language QPC.
+            # Convert each vision output for host-side reshaping before language
+            # inference.
             for output_name, output_buffer in mm_output[i].items():
                 mm_output[i][output_name] = self.session.to_host_array(
                     output_name, output_buffer
