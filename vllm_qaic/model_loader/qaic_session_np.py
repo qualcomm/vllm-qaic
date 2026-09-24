@@ -9,6 +9,7 @@ import sys
 from queue import Queue
 from typing import Any
 
+import ml_dtypes
 import numpy as np
 
 from vllm_qaic.logger import init_logger
@@ -31,7 +32,13 @@ import QAicApi_pb2 as aicapi
 
 logger = init_logger(__name__)
 
+# ``ml_dtypes`` provides NumPy with a real BF16 dtype while preserving the
+# two-byte element size required by LRT.
+BFLOAT16_DTYPE = np.dtype(ml_dtypes.bfloat16)
+
+
 aic_to_np_dtype_mapping = {
+    getattr(aicapi, "BFLOAT16_TYPE", 11): BFLOAT16_DTYPE,
     aicapi.FLOAT_TYPE: np.dtype(np.float32),
     aicapi.FLOAT_16_TYPE: np.dtype(np.float16),
     aicapi.INT8_Q_TYPE: np.dtype(np.int8),
@@ -425,17 +432,41 @@ class QAICInferenceSession:
             self.program.deactivate()
             self.activate_done = False
 
+    def _to_lrt_buffer(self, binding_index: int, buffer: Any) -> np.ndarray:
+        """Create a contiguous NumPy buffer matching the QPC binding dtype."""
+        binding = self.bindings[binding_index]
+        return np.ascontiguousarray(buffer, dtype=aic_to_np_dtype_mapping[binding.type])
+
+    def to_host_array(self, binding_name: str, buffer: np.ndarray) -> np.ndarray:
+        """Convert BF16 output to FP32 only for host-side vLLM consumers."""
+        binding_index = self.binding_index_map.get(binding_name)
+        if binding_index is not None and self.bindings[binding_index].type == getattr(
+            aicapi, "BFLOAT16_TYPE", 11
+        ):
+            return buffer.astype(np.float32, copy=False)
+        return buffer
+
+    def _to_lrt_argument(self, binding_index: int, buffer: Any) -> np.ndarray:
+        """Adapt one binding array to qaicrt's supported buffer formats."""
+        lrt_buffer = self._to_lrt_buffer(binding_index, buffer)
+        if self.bindings[binding_index].type == getattr(aicapi, "BFLOAT16_TYPE", 11):
+            # qaicrt's buffer bridge does not support ml_dtypes' PEP 3118 ``E``
+            # format. This is a zero-copy bit view for that boundary.
+            return lrt_buffer.view(np.uint16)
+        return lrt_buffer
+
     def get_tuple_list_from_dict(self, dict_in):
-        # Convert the buffer_dict to a list of tuples
+        # Convert the buffer_dict to a list of tuples.
         buffer_idx_to_buffer = []
         for buffer_name, buffer in dict_in.items():
             if buffer_name not in self.binding_index_map:
                 logger.warning("Buffer: %s not found", buffer_name)
                 continue
             buffer_index: int = self.binding_index_map[buffer_name]
-            if buffer is None:
-                continue
-            buffer_idx_to_buffer.append((buffer_index, buffer))
+            if buffer is not None:
+                buffer_idx_to_buffer.append(
+                    (buffer_index, self._to_lrt_argument(buffer_index, buffer))
+                )
         return buffer_idx_to_buffer
 
     def extract_outputs(self, input_dict):
@@ -529,7 +560,8 @@ class QAICInferenceSession:
                 "buffers must be a list of numpy arrays or a dictionary of numpy arrays"
             )
             slices_as_tuple_list = [
-                (name[1], buff) for name, buff in zip(buff_map, buffers, strict=False)
+                (name[1], self._to_lrt_argument(name[1], buff))
+                for name, buff in zip(buff_map, buffers, strict=False)
             ]
         else:
             slices_as_tuple_list = self.get_tuple_list_from_dict(buffers)
@@ -540,8 +572,12 @@ class QAICInferenceSession:
         return buffers
 
     def _make_inputs_contiguous(self, inputs: dict) -> None:
-        for k, v in inputs.items():
-            inputs[k] = np.ascontiguousarray(v)
+        for name, buffer in inputs.items():
+            if name not in self.binding_index_map:
+                continue
+            binding_index = self.binding_index_map[name]
+            # Apply the same BF16 packing to the direct np_run input path.
+            inputs[name] = self._to_lrt_buffer(binding_index, buffer)
 
     def np_run(
         self,

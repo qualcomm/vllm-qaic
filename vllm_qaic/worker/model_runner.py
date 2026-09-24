@@ -1003,6 +1003,15 @@ class QaicModelRunnerAoT(GPUModelRunner):
         num_decodes,
         spec_decode_metadata=None,
     ):
+        # Convert native NumPy BF16 logits before handing them to vLLM.
+        if hidden_states_decode is not None:
+            hidden_states_decode = self.model.session.to_host_array(  # type: ignore[has-type]
+                "logits", hidden_states_decode
+            )
+        if hidden_states_prefill is not None:
+            hidden_states_prefill = self.model.session.to_host_array(  # type: ignore[has-type]
+                "logits", hidden_states_prefill
+            )
         if (
             hidden_states_decode is not None
             and self.max_decode_tokens > 1

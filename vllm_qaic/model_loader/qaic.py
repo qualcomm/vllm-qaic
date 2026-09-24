@@ -1018,6 +1018,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         output = self.encode_num_logits_buffer
         assert output is not None, "encode buffer not initialized"
         output_array = output[output_key][: len(prefill_cum_sum)]
+        # Convert native NumPy BF16 output before vLLM consumes it.
+        output_array = self.session.to_host_array(output_key, output_array)
         output_tensor = torch.tensor(output_array)
 
         if not self.is_qaic_pooler and output_key != "logits":
@@ -1780,6 +1782,45 @@ def is_json_serializable(obj):
         return False
 
 
+# Native AI200 BF16 cannot coexist with compiler paths that rewrite its format.
+_BFLOAT16_FORBIDDEN_COMPILE_OPTIONS = (
+    "convert_to_fp16",
+    "mxfp6_matmul",
+    "allow_mxint8_mdp_io",
+    "mxint8_kv_cache",
+)
+
+
+def _compile_option_is_enabled(value: Any) -> bool:
+    """Treat CLI-style false values as disabled before validating BF16 flags."""
+    if isinstance(value, str):
+        return value.strip().lower() not in {"", "0", "false", "none", "null"}
+    return bool(value)
+
+
+def _validate_native_bfloat16_compile_config(
+    vllm_config: VllmConfig, cfg: dict[str, Any]
+) -> None:
+    """Reject options that would alter the native AI200 BF16 execution path."""
+    if vllm_config.model_config.dtype != torch.bfloat16:
+        return
+    if cfg.get("aic_hw_version") != "ai200":
+        raise ValueError(
+            "Native QAIC bfloat16 compilation requires aic_hw_version='ai200'."
+        )
+    # These options change BF16 storage or compute precision on the compiler path.
+    forbidden = [
+        option
+        for option in _BFLOAT16_FORBIDDEN_COMPILE_OPTIONS
+        if _compile_option_is_enabled(cfg.get(option))
+    ]
+    if forbidden:
+        raise ValueError(
+            "Native QAIC bfloat16 must not use compiler options: "
+            f"{', '.join(forbidden)}."
+        )
+
+
 def get_hf_model(
     model_config: ModelConfig,
     qaic_config: dict | None = None,
@@ -1850,6 +1891,11 @@ def get_hf_model(
         "config": hf_config,
         "kv_offload": kv_offload,
     }
+    # Match QEfficient's native-BF16 inference path explicitly. Forwarding
+    # vLLM's resolved dtype makes the from_pretrained contract unambiguous and
+    # prevents an implicit dtype choice from changing the export/QPC cache.
+    if model_config.dtype == torch.bfloat16:
+        args["torch_dtype"] = torch.bfloat16
 
     if override_qaic_config and override_qaic_config.get("pretrained_extra_args", None):
         args.update(override_qaic_config["pretrained_extra_args"])
@@ -2019,8 +2065,9 @@ def _get_qaic_compile_config(
         "compile_only": False,
     }
     cfg.update(_clean_config(override_qaic_config, vllm_config))
-    # update through environment variable
+    # Update through environment variable before validating the final BF16 config.
     cfg.update(_clean_config(QAIC_DEVICE_CONFIG[speculative_model_type]))
+    _validate_native_bfloat16_compile_config(vllm_config, cfg)
     # set aic num core as per the hw if not provided
     if cfg["num_cores"] is None:
         _hw_num_cores = 16

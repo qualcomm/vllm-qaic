@@ -4,6 +4,8 @@
 # ------------------------------------------------------------------
 
 numba
+# Native NumPy bfloat16 dtype for QAIC BF16 host buffers.
+ml-dtypes>=0.5.0
 timm==1.0.14
 soundfile==0.13.1
 librosa==0.10.2
