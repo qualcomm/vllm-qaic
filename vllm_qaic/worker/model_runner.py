@@ -1388,7 +1388,6 @@ class QaicModelRunnerAoT(GPUModelRunner):
                     kv_connector_output,
                 )
             else:
-                assert pending_prefill_exec_queue is not None
                 async_output = QaicAsyncPoolingModelRunnerOutput(
                     model_runner=self,
                     pending_prefill_exec_queue=pending_prefill_exec_queue,

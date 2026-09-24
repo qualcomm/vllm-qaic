@@ -11,7 +11,6 @@ from typing import Any
 
 import ml_dtypes
 import numpy as np
-import torch
 
 from vllm_qaic.logger import init_logger
 
@@ -433,29 +432,17 @@ class QAICInferenceSession:
             self.program.deactivate()
             self.activate_done = False
 
-    def is_bfloat16_binding(self, binding_name: str) -> bool:
-        """Return whether a named QPC binding has BF16 element storage."""
-        if binding_name not in self.binding_index_map:
-            return False
-        return self.bindings[self.binding_index_map[binding_name]].type == getattr(
-            aicapi, "BFLOAT16_TYPE", 11
-        )
-
     def _to_lrt_buffer(self, binding_index: int, buffer: Any) -> np.ndarray:
         """Create a contiguous NumPy buffer matching the QPC binding dtype."""
-        if isinstance(buffer, torch.Tensor):
-            buffer = buffer.detach()
-            if buffer.device.type != "cpu":
-                buffer = buffer.cpu()
-            buffer = buffer.float() if buffer.dtype == torch.bfloat16 else buffer
-            buffer = buffer.contiguous().numpy()
         binding = self.bindings[binding_index]
-        dtype = aic_to_np_dtype_mapping[binding.type]
-        return np.ascontiguousarray(buffer, dtype=dtype)
+        return np.ascontiguousarray(buffer, dtype=aic_to_np_dtype_mapping[binding.type])
 
     def to_host_array(self, binding_name: str, buffer: np.ndarray) -> np.ndarray:
         """Convert BF16 output to FP32 only for host-side vLLM consumers."""
-        if self.is_bfloat16_binding(binding_name):
+        binding_index = self.binding_index_map.get(binding_name)
+        if binding_index is not None and self.bindings[binding_index].type == getattr(
+            aicapi, "BFLOAT16_TYPE", 11
+        ):
             return buffer.astype(np.float32, copy=False)
         return buffer
 

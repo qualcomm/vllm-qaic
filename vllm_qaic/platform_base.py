@@ -140,9 +140,8 @@ class QaicPlatform(Platform):
 
     @classmethod
     def check_if_supports_dtype(cls, dtype: torch.dtype):
-        # Keep worker-side validation consistent with the plugin dtype contract.
-        if dtype not in [torch.bfloat16, torch.float16, torch.float32]:
-            raise ValueError(f"QAIC does not support model dtype {dtype}.")
+        # for eager mode
+        return dtype in [torch.bfloat16, torch.float16, torch.float32]
 
     @classmethod
     def inference_mode(cls):

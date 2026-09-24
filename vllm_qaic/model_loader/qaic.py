@@ -135,14 +135,12 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
 
         self.config = config
         self.vocab_size = config.get_text_config().vocab_size
-        # `long_prefill_token_threshold` will define prefill chunk length.
-        # Compiler profiles may supply a scalar or specialized shape list.
-        self.prefill_seq_len: Any
+        # `long_prefill_token_threshold` will define prefill chunk length
         if self.config.model_type == "whisper":
             # Encoder-decoder models have chunked prefill disabled by vllm,
             # but QAIC still requires a prefill sequence length.
             # For whisper, the prefill sequence length is fixed to 1.
-            self.prefill_seq_len = 1
+            self.prefill_seq_len: int = 1
         else:
             assert "prefill_seq_len" in override_qaic_config, (
                 "Prefill seq_len missing in override_qaic_config"
@@ -1070,8 +1068,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
     def run_encode(
         self,
         qpc_inputs: dict,
-        output_key: str,
-        encode_num_logits_buffer: dict,
+        output_key: str | None = None,
+        encode_num_logits_buffer: dict | None = None,
     ) -> dict:
         """Run encode (embedding) inference on the QPC.
 
@@ -1461,7 +1459,7 @@ def load_qaic_model(
         )
 
     qaic_compile_config = _get_qaic_compile_config(vllm_config, speculative_model_type)
-    qpc_path: str | None = qaic_compile_config.qpc_path
+    qpc_path = qaic_compile_config.qpc_path
 
     # set lora max adapters
     if vllm_config.lora_config:
@@ -1659,10 +1657,6 @@ def load_qaic_model(
         except Exception as e:
             logger.error("Failed to transform and compile the model! %s", e)
             raise e
-
-    # Session creation requires the selected component QPC, never a missing path.
-    if qpc_path is None:
-        raise ValueError("QAIC model loading requires a compiled QPC path")
 
     # dump adaptername_to_id to folder for the first compilation
     if vllm_config.lora_config and not os.path.exists(
