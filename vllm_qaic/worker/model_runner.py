@@ -1003,6 +1003,16 @@ class QaicModelRunnerAoT(GPUModelRunner):
         num_decodes,
         spec_decode_metadata=None,
     ):
+        # QEff labels raw BF16 bytes as float16 for NumPy's two-byte itemsize;
+        # decode that fake carrier before handing logits to vLLM.
+        if hidden_states_decode is not None:
+            hidden_states_decode = self.model.session.to_host_array(  # type: ignore[has-type]
+                "logits", hidden_states_decode
+            )
+        if hidden_states_prefill is not None:
+            hidden_states_prefill = self.model.session.to_host_array(  # type: ignore[has-type]
+                "logits", hidden_states_prefill
+            )
         if (
             hidden_states_decode is not None
             and self.max_decode_tokens > 1
@@ -1379,6 +1389,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
                     kv_connector_output,
                 )
             else:
+                assert pending_prefill_exec_queue is not None
                 async_output = QaicAsyncPoolingModelRunnerOutput(
                     model_runner=self,
                     pending_prefill_exec_queue=pending_prefill_exec_queue,

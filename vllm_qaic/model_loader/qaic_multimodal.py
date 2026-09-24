@@ -138,7 +138,18 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
                     )
             self.decode_batch_inputs.update(self.default_mm_kwargs)
 
-    def _to_np(self, t, dtype: np.dtype | None = None) -> np.ndarray | list[np.ndarray]:
+    def _is_bfloat16_binding(self, binding_name: str | None) -> bool:
+        """Keep fake-float16 handling limited to actual QPC BF16 bindings."""
+        return binding_name is not None and self.session.is_bfloat16_binding(
+            binding_name
+        )
+
+    def _to_np(
+        self,
+        t,
+        dtype: np.dtype | None = None,
+        binding_name: str | None = None,
+    ) -> np.ndarray | list[np.ndarray]:
         """
         Convert a tensor, numpy array, or list thereof to numpy array(s).
         - Single tensors/arrays are converted directly.
@@ -149,18 +160,28 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
         """
         if isinstance(t, list):
             if len(t) == 1:
-                return self._to_np(t[0], dtype)
-            return [self._to_np(item, dtype) for item in t]
+                return self._to_np(t[0], dtype, binding_name)
+            return [self._to_np(item, dtype, binding_name) for item in t]
 
         if isinstance(t, torch.Tensor):
+            # NumPy cannot materialize BF16; retain numerical FP32 until LRT packs it.
+            t = t.float() if t.dtype == torch.bfloat16 else t
             t = t.numpy()
 
+        array = np.asarray(t)
+        if self._is_bfloat16_binding(binding_name):
+            # Only QAICInferenceSession may create QEff's fake float16 carrier.
+            return array.astype(np.float32, copy=False)
         if dtype is not None:
-            return t.astype(dtype, copy=False)
-        return t
+            return array.astype(dtype, copy=False)
+        return array
 
     def _pad_or_crop(
-        self, tensor: torch.Tensor, target_dims: list | tuple, dtype: np.dtype
+        self,
+        tensor: torch.Tensor,
+        target_dims: list | tuple,
+        dtype: np.dtype,
+        binding_name: str | None = None,
     ) -> np.ndarray:
         """
         Pad or crop a tensor to the specified target dimensions, returning
@@ -176,11 +197,15 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
                 list(tensor.shape),
                 list(target_dims),
             )
-        padded = np.zeros(target_dims, dtype=dtype)
+        # Reserve fake float16 only for raw LRT buffers, never numerical padding.
+        output_dtype = np.float32 if self._is_bfloat16_binding(binding_name) else dtype
+        padded = np.zeros(target_dims, dtype=output_dtype)
         slices = tuple(
             slice(0, min(s, t)) for s, t in zip(tensor.shape, target_dims, strict=False)
         )
-        padded[slices] = tensor[slices]
+        source = tensor.detach().cpu()
+        source = source.float() if source.dtype == torch.bfloat16 else source
+        padded[slices] = source.numpy()[slices]
         return padded
 
     def _process_vision_embeds(
@@ -201,7 +226,8 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
                 "Vision embeddings are missing from session input names. "
                 "This is unexpected and may indicate a compiler regression."
             )
-            mm_kwargs["vision_embeds"] = image_embeds.numpy()
+            # Preserve BF16 values through FP32 because NumPy cannot expose BF16.
+            mm_kwargs["vision_embeds"] = self._to_np(image_embeds)
             return
 
         embed_shape, embed_dtype = embed_info  # unpack (list[int], dtype)
@@ -232,16 +258,28 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
                 if deepstack_features is not None:
                     deepstack_features = deepstack_features.reshape(deepstack_dims)
             else:
-                image_embeds = self._pad_or_crop(image_embeds, embed_shape, embed_dtype)
+                image_embeds = self._pad_or_crop(
+                    image_embeds,
+                    embed_shape,
+                    embed_dtype,
+                    binding_name="vision_embeds",
+                )
                 if deepstack_features is not None and deepstack_dims is not None:
                     deepstack_features = self._pad_or_crop(
-                        deepstack_features, deepstack_dims, embed_dtype
+                        deepstack_features,
+                        deepstack_dims,
+                        embed_dtype,
+                        binding_name="deepstack_features",
                     )
 
-        mm_kwargs["vision_embeds"] = np.asarray(image_embeds, dtype=embed_dtype)
+        mm_kwargs["vision_embeds"] = self._to_np(
+            image_embeds, embed_dtype, binding_name="vision_embeds"
+        )
         if deepstack_features is not None:
-            mm_kwargs["deepstack_features"] = np.asarray(
-                deepstack_features, dtype=embed_dtype
+            mm_kwargs["deepstack_features"] = self._to_np(
+                deepstack_features,
+                embed_dtype,
+                binding_name="deepstack_features",
             )
 
     def _init_vision_outputs(
@@ -333,7 +371,7 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
             # However currently it's not supported, thus padding
             target_dims, dtype = self.mm_input_info["pixel_values"]
             kwargs["pixel_values"] = [
-                self._pad_or_crop(pv, target_dims, dtype)
+                self._pad_or_crop(pv, target_dims, dtype, binding_name="pixel_values")
                 if list(pv.shape) != target_dims
                 else pv
                 for pv in pixel_values_list
@@ -379,9 +417,11 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
             raise ValueError(f"Unsupported multimodal inputs {kwargs.keys()}")
 
         valid_input = {
+            # Preserve numerical input until the session applies QEff's raw BF16 view.
             k: self._to_np(
                 v,
-                self.mm_input_info.get(k, (None, None))[1],  # get dtype
+                self.mm_input_info.get(k, (None, None))[1],
+                binding_name=k,
             )
             for k, v in kwargs.items()
             if k in self.session.binding_index_map
@@ -473,6 +513,11 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
             session_input.update(mm_output[i])
             exec_obj_idx = self.session.np_run(session_input, is_prefill=False)
             self.session.complete_inf(exec_obj_idx, is_prefill=False)
+            # Decode each vision output before it is reused by the language QPC.
+            for output_name, output_buffer in mm_output[i].items():
+                mm_output[i][output_name] = self.session.to_host_array(
+                    output_name, output_buffer
+                )
             if len(mm_output[i]) == 1:
                 feature = next(iter(mm_output[i].values()))
             elif "deepstack_features" in mm_output[i]:  # For Qwen3VL
