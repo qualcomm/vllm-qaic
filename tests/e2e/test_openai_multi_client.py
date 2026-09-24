@@ -54,10 +54,18 @@ async def _client(base_url: str, model_name: str, sample_prompts: list[str]):
 
 @pytest.mark.asyncio
 @pytest.mark.qaic_test_config(
-    model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-    ctx_len=256,
-    dtype="mxfp6",
-    kv_dtype="mxint8",
+    {
+        "aot": dict(
+            model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+            ctx_len=256,
+            dtype="mxfp6",
+            kv_dtype="mxint8",
+        ),
+        "eager": dict(
+            model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+            ctx_len=256,
+        ),
+    }
 )
 async def test_multiple_client(server, model_name, sample_prompts):
     await asyncio.gather(

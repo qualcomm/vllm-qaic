@@ -203,6 +203,7 @@ class QaicWorkerPyt(QaicWorker):
         )
         assert self.model_config.enforce_eager
         self.use_v2_model_runner = False
+        self.vllm_config.kernel_config.enable_jit_warmup = False
         self.parallel_config.disable_custom_all_reduce = True
         self.profiler_config = vllm_config.profiler_config
 

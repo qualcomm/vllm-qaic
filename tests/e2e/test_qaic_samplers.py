@@ -9,13 +9,21 @@ import pytest
 from vllm import SamplingParams
 
 
+@pytest.mark.qaic_test_config(
+    {
+        "aot": dict(
+            model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+            ctx_len=256,
+            dtype="mxfp6",
+            kv_dtype="mxint8",
+        ),
+        "eager": dict(
+            model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+            ctx_len=256,
+        ),
+    }
+)
 class TestQaicSamplers:
-    @pytest.mark.qaic_test_config(
-        model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-        ctx_len=256,
-        dtype="mxfp6",
-        kv_dtype="mxint8",
-    )
     def test_presence_penalty(self, qaic_model, sample_prompts):
         prompt = sample_prompts[:4]
         outputDict = {p: [] for p in prompt}
@@ -32,12 +40,6 @@ class TestQaicSamplers:
         for key in outputDict:
             assert outputDict[key] is not None, "Output text not generated!!!"
 
-    @pytest.mark.qaic_test_config(
-        model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-        ctx_len=256,
-        dtype="mxfp6",
-        kv_dtype="mxint8",
-    )
     def test_frequency_penalty(self, qaic_model, sample_prompts):
         prompt = sample_prompts[:4]
         outputDict = {p: [] for p in prompt}
@@ -54,12 +56,6 @@ class TestQaicSamplers:
         for key in outputDict:
             assert outputDict[key] is not None, "Output text not generated!!!"
 
-    @pytest.mark.qaic_test_config(
-        model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-        ctx_len=256,
-        dtype="mxfp6",
-        kv_dtype="mxint8",
-    )
     def test_repetition_penalty(self, qaic_model, sample_prompts):
         prompt = sample_prompts[:4]
         outputDict = {p: [] for p in prompt}
@@ -76,12 +72,6 @@ class TestQaicSamplers:
         for key in outputDict:
             assert outputDict[key] is not None, "Output text not generated!!!"
 
-    @pytest.mark.qaic_test_config(
-        model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-        ctx_len=256,
-        dtype="mxfp6",
-        kv_dtype="mxint8",
-    )
     def test_topp(self, qaic_model, sample_prompts):
         prompt = sample_prompts[:4]
         outputDict = {p: [] for p in prompt}
@@ -96,12 +86,6 @@ class TestQaicSamplers:
         for key in outputDict:
             assert outputDict[key] is not None, "Output text not generated!!!"
 
-    @pytest.mark.qaic_test_config(
-        model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-        ctx_len=256,
-        dtype="mxfp6",
-        kv_dtype="mxint8",
-    )
     def test_topk(self, qaic_model, sample_prompts):
         prompt = sample_prompts[:4]
         outputDict = {p: [] for p in prompt}
@@ -116,12 +100,6 @@ class TestQaicSamplers:
         for key in outputDict:
             assert outputDict[key] is not None, "Output text not generated!!!"
 
-    @pytest.mark.qaic_test_config(
-        model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-        ctx_len=256,
-        dtype="mxfp6",
-        kv_dtype="mxint8",
-    )
     def test_minp(self, qaic_model, sample_prompts):
         prompt = sample_prompts[:4]
         outputDict = {p: [] for p in prompt}
@@ -136,12 +114,6 @@ class TestQaicSamplers:
         for key in outputDict:
             assert outputDict[key] is not None, "Output text not generated!!!"
 
-    @pytest.mark.qaic_test_config(
-        model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-        ctx_len=256,
-        dtype="mxfp6",
-        kv_dtype="mxint8",
-    )
     def test_random_samplers(self, qaic_model, sample_prompts):
         prompt = sample_prompts[:6]
         outputDict = {p: [] for p in prompt}
@@ -164,12 +136,6 @@ class TestQaicSamplers:
         for key in outputDict:
             assert outputDict[key] is not None, "Output text not generated!!!"
 
-    @pytest.mark.qaic_test_config(
-        model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-        ctx_len=256,
-        dtype="mxfp6",
-        kv_dtype="mxint8",
-    )
     def test_mixed_samplers(self, qaic_model, sample_prompts):
         prompt = sample_prompts[:4]
         outputDict = {p: [] for p in prompt}

@@ -8,13 +8,21 @@ import random
 import pytest
 
 
+@pytest.mark.qaic_test_config(
+    {
+        "aot": dict(
+            model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+            ctx_len=256,
+            dtype="mxfp6",
+            kv_dtype="mxint8",
+        ),
+        "eager": dict(
+            model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+            ctx_len=256,
+        ),
+    }
+)
 class TestQaicOutputConsistency:
-    @pytest.mark.qaic_test_config(
-        model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-        ctx_len=256,
-        dtype="mxfp6",
-        kv_dtype="mxint8",
-    )
     def test_output_consistency(self, qaic_model, sampling_params, sharegpt_prompts):
         prompts = sharegpt_prompts(1)
         output = qaic_model.generate(prompts, sampling_params)
@@ -26,12 +34,6 @@ class TestQaicOutputConsistency:
             "Outputs from different slots for same prompt does not match!!"
         )
 
-    @pytest.mark.qaic_test_config(
-        model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-        ctx_len=256,
-        dtype="mxfp6",
-        kv_dtype="mxint8",
-    )
     def test_generate(self, qaic_model, sampling_params, sharegpt_prompts):
         prompts = sharegpt_prompts(10)
         output_dict: dict[str, list[str]] = {p: [] for p in prompts}
