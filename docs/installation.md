@@ -260,8 +260,8 @@ All `ARG`s are global (declared before the first `FROM`) and re-declared inside 
 | `VLLM_VERSION` | `0.23.0` | vLLM release tag to install |
 | `VLLM_PR` | *(empty)* | Any target: vLLM PR number to fetch (takes priority over `VLLM_BRANCH` and `VLLM_VERSION`) |
 | `VLLM_BRANCH` | *(empty)* | Any target: vLLM branch to clone instead of the pinned `VLLM_VERSION` tag |
-| `VLLM_QAIC_VERSION` | `1.22` | vllm-qaic SDK/version tag (wheel tag/version suffix) |
-| `QEFF_BRANCH` | `release/v1.22.0` | QEfficient branch/tag to install |
+| `VLLM_QAIC_VERSION` | `1.23` | vllm-qaic SDK/version tag (wheel tag/version suffix) |
+| `QEFF_BRANCH` | `release/v1.23.0` | QEfficient branch/tag to install |
 | `TORCH_VERSION_AOT` | `2.7.0+cpu` | CPU torch version for AOT |
 | `TORCHVISION_VERSION_AOT` | `0.22.0+cpu` | torchvision version for AOT |
 | `TRITON_CPU` | `1` | Set to `1` to build the triton-cpu backend (AOT SpD); Docker defaults ON, unlike `install.sh`'s default OFF |
@@ -287,9 +287,9 @@ All `ARG`s are global (declared before the first `FROM`) and re-declared inside 
 | `VLLM_VERSION` | `0.23.0` | vLLM release tag to install |
 | `VLLM_PR` | *(empty)* | Any target: vLLM PR number to fetch (takes priority over `VLLM_BRANCH` and `VLLM_VERSION`) |
 | `VLLM_BRANCH` | *(empty)* | Any target: vLLM branch to clone instead of the pinned `VLLM_VERSION` tag |
-| `VLLM_QAIC_VERSION` | `1.22` | vllm-qaic SDK/version tag (wheel tag/version suffix) |
-| `TORCH_VERSION_PYT` | `2.11.0+cpu` | CPU torch version for PYT |
-| `TORCHVISION_VERSION_PYT` | `0.26.0+cpu` | torchvision version for PYT |
+| `VLLM_QAIC_VERSION` | `1.23` | vllm-qaic SDK/version tag (wheel tag/version suffix) |
+| `TORCH_VERSION_PYT` | `2.13.0+cpu` | CPU torch version for PYT |
+| `TORCHVISION_VERSION_PYT` | `0.28.0+cpu` | torchvision version for PYT |
 | `TORCHAUDIO_VERSION_PYT` | `2.11.0+cpu` | torchaudio version for PYT |
 | `VLLM_TARGET_DEVICE_PYT` | `empty` | vLLM build target device (`empty` = no C++ compilation) |
 | `TORCH_QAIC_BASE_PATH` | `/opt/qti-aic/integrations/torch_qaic` | SDK path containing `torch_qaic` wheels inside `BASE_IMAGE` |
@@ -471,13 +471,13 @@ All version constants are defined in [`scripts/utility.sh`](../scripts/utility.s
 | Constant | Value | Description |
 |---|---|---|
 | `VLLM_VERSION` | `0.23.0` | vLLM release tag |
-| `VLLM_QAIC_VERSION` | `0.23.0` | vllm-qaic SDK/version tag (used in wheel tag and version suffix) |
+| `VLLM_QAIC_VERSION` | `1.23` | vllm-qaic SDK/version tag (used in wheel tag and version suffix) |
 | `TORCH_VERSION_AOT` | `2.7.0+cpu` | CPU torch for AOT (matches QEfficient exact pin) |
 | `TORCHVISION_VERSION_AOT` | `0.22.0+cpu` | torchvision for AOT (keep in sync with torch) |
-| `TORCH_VERSION_PYT` | `2.11.0+cpu` | CPU torch for PYT |
-| `TORCHVISION_VERSION_PYT` | `0.26.0+cpu` | torchvision for PYT (keep in sync with torch) |
+| `TORCH_VERSION_PYT` | `2.13.0+cpu` | CPU torch for PYT |
+| `TORCHVISION_VERSION_PYT` | `0.28.0+cpu` | torchvision for PYT (keep in sync with torch) |
 | `TORCHAUDIO_VERSION_PYT` | `2.11.0+cpu` | torchaudio for PYT (keep in sync with torch) |
-| `QEFF_BRANCH` | `main` | QEfficient branch/tag |
+| `QEFF_BRANCH` | `release/v1.23.0` | QEfficient branch/tag |
 | `TORCH_QAIC_VERSION` | `0.1.0` | torch_qaic wheel version |
 | `VLLM_TARGET_DEVICE_AOT` | `empty` | vLLM build target for AOT mode |
 | `VLLM_TARGET_DEVICE_PYT` | `empty` | vLLM build target for PYT mode |
