@@ -35,8 +35,8 @@ This guide covers installing `vllm-qaic` in both **AOT** (Ahead-of-Time compiled
 | Hardware | Qualcomm Cloud AI 100 / Cloud AI 080 |
 | OS | Linux (Ubuntu 22.04+) |
 | Python | 3.12 |
-| QAIC Platform SDK | >= 1.22.0 |
-| QAIC Apps SDK | >= 1.22.0 (PYT mode requires `--install-torch-qaic` flag) |
+| QAIC Platform SDK | >= 1.23.0 |
+| QAIC Apps SDK | >= 1.23.0 (PYT mode requires `--install-torch-qaic` flag) |
 
 Install the QAIC SDK before proceeding:
 
@@ -257,18 +257,18 @@ All `ARG`s are global (declared before the first `FROM`) and re-declared inside 
 | `PYTHON_VERSION` | `3.12` | Python version (`3.10`/`3.11`/`3.12`), provisioned via `uv python install` |
 | `RUST_VERSION` | `1.90` | Pinned Rust toolchain image tag (`rust:<ver>-slim`); only used when `VLLM_BUILD_RUST=1` |
 | `RUST_IMAGE` | `docker.io/library/rust:${RUST_VERSION}-slim` | Full image ref for the Rust toolchain. Override to pull from a mirror or internal registry; supplies its own tag, so it takes precedence over `RUST_VERSION` |
-| `VLLM_VERSION` | `0.23.0` | vLLM release tag to install |
+| `VLLM_VERSION` | `0.30.0` | vLLM release tag to install |
 | `VLLM_PR` | *(empty)* | Any target: vLLM PR number to fetch (takes priority over `VLLM_BRANCH` and `VLLM_VERSION`) |
 | `VLLM_BRANCH` | *(empty)* | Any target: vLLM branch to clone instead of the pinned `VLLM_VERSION` tag |
-| `VLLM_QAIC_VERSION` | `1.22` | vllm-qaic SDK/version tag (wheel tag/version suffix) |
-| `QEFF_BRANCH` | `release/v1.22.0` | QEfficient branch/tag to install |
+| `VLLM_QAIC_VERSION` | `1.24` | vllm-qaic SDK/version tag (wheel tag/version suffix) |
+| `QEFF_BRANCH` | `main` | QEfficient branch/tag to install |
 | `TORCH_VERSION_AOT` | `2.7.0+cpu` | CPU torch version for AOT |
 | `TORCHVISION_VERSION_AOT` | `0.22.0+cpu` | torchvision version for AOT |
 | `TRITON_CPU` | `1` | Set to `1` to build the triton-cpu backend (AOT SpD); Docker defaults ON, unlike `install.sh`'s default OFF |
 | `TRITON_CPU_COMMIT` | `e60f448f8f197073b75d6d3e77347414a5db3ee7` | Pinned triton-cpu commit hash |
 | `TRITON_CPU_COMPILE_MAX_JOBS` | `4` | Parallel build jobs for triton-cpu compilation |
 | `VLLM_BUILD_RUST` | `1` | Set to `1` to build vLLM's experimental Rust OpenAI frontend (`vllm-rs`) |
-| `VLLM_QAIC_GIT_REF` | `v0.23.0` | `release` target: vllm-qaic git tag/branch to clone |
+| `VLLM_QAIC_GIT_REF` | `v0.30.0` | `release` target: vllm-qaic git tag/branch to clone |
 | `VLLM_QAIC_PR` | *(empty)* | `ci` target: PR number to fetch (takes priority over `VLLM_QAIC_BRANCH`) |
 | `VLLM_QAIC_BRANCH` | *(empty)* | `ci` target: branch to fetch |
 | `QEFF_PR` | *(empty)* | `dev` target: QEfficient PR to install editable (overrides `QEFF_BRANCH`) |
@@ -284,10 +284,10 @@ All `ARG`s are global (declared before the first `FROM`) and re-declared inside 
 | `PYTHON_VERSION` | `3.12` | Python version (`3.10`/`3.11`/`3.12`), provisioned via `uv python install` |
 | `RUST_VERSION` | `1.90` | Pinned Rust toolchain image tag (`rust:<ver>-slim`); only used when `VLLM_BUILD_RUST=1` |
 | `RUST_IMAGE` | `docker.io/library/rust:${RUST_VERSION}-slim` | Full image ref for the Rust toolchain. Override to pull from a mirror or internal registry; supplies its own tag, so it takes precedence over `RUST_VERSION` |
-| `VLLM_VERSION` | `0.23.0` | vLLM release tag to install |
+| `VLLM_VERSION` | `0.30.0` | vLLM release tag to install |
 | `VLLM_PR` | *(empty)* | Any target: vLLM PR number to fetch (takes priority over `VLLM_BRANCH` and `VLLM_VERSION`) |
 | `VLLM_BRANCH` | *(empty)* | Any target: vLLM branch to clone instead of the pinned `VLLM_VERSION` tag |
-| `VLLM_QAIC_VERSION` | `1.22` | vllm-qaic SDK/version tag (wheel tag/version suffix) |
+| `VLLM_QAIC_VERSION` | `1.24` | vllm-qaic SDK/version tag (wheel tag/version suffix) |
 | `TORCH_VERSION_PYT` | `2.13.0+cpu` | CPU torch version for PYT |
 | `TORCHVISION_VERSION_PYT` | `0.28.0+cpu` | torchvision version for PYT |
 | `TORCHAUDIO_VERSION_PYT` | `2.11.0+cpu` | torchaudio version for PYT |
@@ -295,7 +295,7 @@ All `ARG`s are global (declared before the first `FROM`) and re-declared inside 
 | `TORCH_QAIC_BASE_PATH` | `/opt/qti-aic/integrations/torch_qaic` | SDK path containing `torch_qaic` wheels inside `BASE_IMAGE` |
 | `QAIC_DEVICE_ARCH` | `v68` | `v68` = AI 100 series, `v81` = AI 200 series (includes BF16 kernels); controls which Hexagon kernel C++ sources compile |
 | `VLLM_BUILD_RUST` | `1` | Set to `1` to build vLLM's experimental Rust OpenAI frontend (`vllm-rs`) |
-| `VLLM_QAIC_GIT_REF` | `v0.23.0` | `release` target: vllm-qaic git tag/branch to clone |
+| `VLLM_QAIC_GIT_REF` | `v0.30.0` | `release` target: vllm-qaic git tag/branch to clone |
 | `VLLM_QAIC_PR` | *(empty)* | `ci` target: PR number to fetch (takes priority over `VLLM_QAIC_BRANCH`) |
 | `VLLM_QAIC_BRANCH` | *(empty)* | `ci` target: branch to fetch |
 | `WHEEL_NAME` | *(empty)* | `wheel` target: rename the built wheel to this filename before exporting it (empty = `uv build`'s own name). See [Overriding the wheel filename](#overriding-the-wheel-filename) |
@@ -304,15 +304,15 @@ All `ARG`s are global (declared before the first `FROM`) and re-declared inside 
 
 ```bash
 # Release (default pins)
-docker build --target release -f docker/Dockerfile.aot -t vllm-qaic-aot:1.22 .
-docker build --target release -f docker/Dockerfile.pyt -t vllm-qaic-pyt:1.22 .
+docker build --target release -f docker/Dockerfile.aot -t vllm-qaic-aot:1.24 .
+docker build --target release -f docker/Dockerfile.pyt -t vllm-qaic-pyt:1.24 .
 
 # Release (override version / device arch)
 docker build --target release -f docker/Dockerfile.aot \
-  --build-arg VLLM_QAIC_GIT_REF=v1.23 --build-arg QEFF_BRANCH=release/v1.23.0 \
+  --build-arg VLLM_QAIC_GIT_REF=v1.24 --build-arg QEFF_BRANCH=main \
   -t vllm-qaic-aot:1.23 .
 docker build --target release -f docker/Dockerfile.pyt \
-  --build-arg QAIC_DEVICE_ARCH=v81 -t vllm-qaic-pyt:1.22-v81 .
+  --build-arg QAIC_DEVICE_ARCH=v81 -t vllm-qaic-pyt:1.24-v81 .
 
 # CI (current checkout)
 docker build --target ci -f docker/Dockerfile.aot -t vllm-qaic-aot:ci .
@@ -393,13 +393,13 @@ The script forwards it as the `RUST_IMAGE` build-arg (same passthrough shape as 
 `--wheel-name` replaces the filename `uv build` would generate. The script forwards it to the Dockerfile's `wheel` stage as the `WHEEL_NAME` build-arg, and that stage renames the wheel before BuildKit exports it — so the file that lands in `--outdir` already carries the custom name:
 
 ```bash
-# AOT wheel as dist/aot/vllm_qaic-1.22.0+aot-py3-none-any.whl
+# AOT wheel as dist/aot/vllm_qaic-1.24.0+aot-py3-none-any.whl
 ./scripts/build_wheels.sh aot --outdir ./dist \
-    --wheel-name vllm_qaic-1.22.0+aot-py3-none-any.whl
+    --wheel-name vllm_qaic-1.24.0+aot-py3-none-any.whl
 
-# PYT wheel as dist/pyt/py312/vllm_qaic-1.22.0+pyt-cp312-cp312-linux_x86_64.whl
+# PYT wheel as dist/pyt/py312/vllm_qaic-1.24.0+pyt-cp312-cp312-linux_x86_64.whl
 ./scripts/build_wheels.sh pyt --outdir ./dist \
-    --wheel-name vllm_qaic-1.22.0+pyt-cp312-cp312-linux_x86_64.whl
+    --wheel-name vllm_qaic-1.24.0+pyt-cp312-cp312-linux_x86_64.whl
 ```
 
 Notes:
