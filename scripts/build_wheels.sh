@@ -236,8 +236,11 @@ RUN_STATUS=0
 report_wheel() {
     local label="$1"
     local pattern="$2"
-    local whl
-    whl=$(ls ${pattern} 2>/dev/null | head -1)
+    local -a matches
+    # shellcheck disable=SC2206  # intentional glob expansion of pattern
+    matches=( ${pattern} )
+    local whl=""
+    [ -e "${matches[0]}" ] && whl="${matches[0]}"
     if [ -n "${whl}" ]; then
         echo "  ${label}: FOUND (${whl})"
     else

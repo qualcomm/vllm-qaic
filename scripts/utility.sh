@@ -7,7 +7,7 @@
 # Source this file from other scripts: source "$(dirname "$0")/utility.sh"
 
 # === Common ===
-VLLM_VERSION="${VLLM_VERSION:-0.23.0}"
+VLLM_VERSION="${VLLM_VERSION:-0.30.0}"
 VLLM_QAIC_VERSION="${VLLM_QAIC_VERSION:-1.22}"
 
 # === AOT stack ===
@@ -22,11 +22,11 @@ TRITON_CPU_SRC="${TRITON_CPU_SRC:-${SCRIPT_DIR}/../.build/triton-cpu}"          
 TRITON_CPU_COMPILE_MAX_JOBS="${TRITON_CPU_COMPILE_MAX_JOBS:-4}"        # parallel build jobs
 
 # === PYT stack ===
-TORCH_VERSION_PYT="${TORCH_VERSION_PYT:-2.11.0+cpu}"
+TORCH_VERSION_PYT="${TORCH_VERSION_PYT:-2.13.0+cpu}"
 TORCH_QAIC_VERSION="${TORCH_QAIC_VERSION:-0.1.0}"
 # TRANSFORMERS_VERSION_PYT="4.57.3"  # optional: uncomment to pin if torch_qaic's version conflicts
 VLLM_TARGET_DEVICE_PYT="${VLLM_TARGET_DEVICE_PYT:-empty}"
-TORCHVISION_VERSION_PYT="${TORCHVISION_VERSION_PYT:-0.26.0+cpu}"
+TORCHVISION_VERSION_PYT="${TORCHVISION_VERSION_PYT:-0.28.0+cpu}"
 TORCHAUDIO_VERSION_PYT="${TORCHAUDIO_VERSION_PYT:-2.11.0+cpu}"
 
 # === Paths ===

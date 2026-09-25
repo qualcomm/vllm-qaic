@@ -90,24 +90,8 @@ function install_vllm_plugin() {
         mode="$1"
         cd "${VLLM_DIR}"
         ./scripts/install.sh "$mode"
-        #install test dependencies
-        pip3 install anyio
-        pip3 install datasets
-        pip3 install evaluate
-        pip3 install nltk
-        pip3 install pytest
-        pip3 install pytest-asyncio
-        pip3 install pytest-tornasync
-        pip3 install pytest-trio
-        pip3 install pytest-twisted
-        pip3 install rich
-        pip3 install rouge_score
-        pip3 install twisted
-        pip3 install librosa
-        pip3 install soundfile
-        pip3 install tblib
-        pip3 install onnx_ir==0.2.1 # required by layerwise export in qeff main branch
-        pip3 install 'fastapi<0.137'
+        # install test dependencies (single source of truth: requirements/test.txt)
+        pip3 install -r requirements/test.txt
 }
 
 function execute_tests() {

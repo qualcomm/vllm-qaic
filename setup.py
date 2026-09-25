@@ -23,7 +23,7 @@ def load_module_from_path(module_name, path):
     return module
 
 
-VERSION = "0.23.0.dev0"
+VERSION = "0.30.0.dev0"
 ROOT_DIR = Path(__file__).parent
 logger = logging.getLogger(__name__)
 
@@ -237,7 +237,7 @@ def _is_qaic() -> bool:
 
 def get_qaic_sdk_version():
     """Get the QAIC sdk version."""
-    return "1.22"
+    return "1.24"
 
 
 def get_requirements(filename=None) -> list[str]:

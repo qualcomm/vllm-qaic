@@ -3,8 +3,6 @@
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 # ------------------------------------------------------------------
 
-ruff
-isort
 pytest
 anyio
 datasets
@@ -19,10 +17,3 @@ rouge_score
 twisted
 tblib
 onnx_ir==0.2.1
-
-# type checking
-mypy==1.11.1
-types-PyYAML
-types-regex
-types-requests
-types-setuptools
