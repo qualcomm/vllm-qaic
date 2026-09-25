@@ -53,6 +53,16 @@ Do the steps in order. Commit in small, single-purpose, signed-off commits.
   pre-commit hook versions still match.
 - Update the docs: replace old vLLM (and torch, if changed) version numbers in
   the docs folder. This is easy to forget.
+- Bump the QAIC SDK version everywhere it appears: the SDK-version helper in the
+  package build, the SDK-version constant in the install scripts, and both
+  Dockerfiles (the AOT and the PYT one). Also update the minimum-SDK numbers in
+  the docs.
+- Set the QEfficient source. For a rebase, use QEfficient `main` (or a
+  fixed commit SHA from the tip of `main` for a reproducible build). Keep
+  this consistent across the install scripts and both Dockerfiles.
+- Update the build args in both Dockerfiles and the docs tables to match all of
+  the above (vLLM version, SDK version, QEfficient source, git ref). The PYT
+  Dockerfile also carries the PYT torch versions, so update those there too.
 
 ### Step 2 - Adapt the plugin to upstream API changes
 
