@@ -94,6 +94,10 @@ class QaicPlatform(Platform):
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
         return "qaic"
+    
+    @classmethod
+    def discover_numa_topology(cls) -> list[list[int]]:
+        return []
 
     @classmethod
     def get_device_uuid(cls, device_id: int = 0) -> str:
@@ -151,7 +155,7 @@ class QaicPlatform(Platform):
     def set_device(cls, device: torch.device):
         # Not Implemented for aot
         if isinstance(qaic, PlaceholderModule):
-            raise NotImplementedError
+            return
         # for eager mode
         qaic.set_device(device)
 
