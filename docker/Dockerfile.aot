@@ -28,16 +28,16 @@
 # Build commands
 # --------------
 #   # Standalone base (push to registry for reuse):
-#   docker build --target aot-base -t vllm-qaic-aot-base:1.22 .
+#   docker build --target aot-base -t vllm-qaic-aot-base:1.24 .
 #
 #   # Release (default pins):
-#   docker build --target release -t vllm-qaic-aot:1.22 .
+#   docker build --target release -t vllm-qaic-aot:1.24 .
 #
 #   # Release (override version):
 #   docker build --target release \
-#     --build-arg VLLM_QAIC_GIT_REF=v1.22 \
-#     --build-arg QEFF_BRANCH=release/v1.22.0 \
-#     -t vllm-qaic-aot:1.22 .
+#     --build-arg VLLM_QAIC_GIT_REF=v1.24 \
+#     --build-arg QEFF_BRANCH=main \
+#     -t vllm-qaic-aot:1.24 .
 #
 #   # CI (current checkout):
 #   docker build --target ci -t vllm-qaic-aot:ci .
@@ -62,18 +62,18 @@
 #
 #   # Wheel with an overridden filename:
 #   docker buildx build --target wheel -t vllm-qaic-aot-wheel \
-#     --build-arg WHEEL_NAME=vllm_qaic-1.22.0+aot-py3-none-any.whl \
+#     --build-arg WHEEL_NAME=vllm_qaic-1.24.0+aot-py3-none-any.whl \
 #     --output type=local,dest=./dist/aot .
 #
 #   # Any target — also build vllm's experimental Rust OpenAI frontend
 #   # (vllm-rs). See docs/installation.md for known caveats.
 #   docker build --target release --build-arg VLLM_BUILD_RUST=1 \
-#     -t vllm-qaic-aot:1.22-rust .
+#     -t vllm-qaic-aot:1.24-rust .
 #
 #   # Rust toolchain from a mirror / internal registry instead of Docker Hub:
 #   docker build --target release --build-arg VLLM_BUILD_RUST=1 \
 #     --build-arg RUST_IMAGE=my.registry.internal:5000/mirror/rust:1.90-slim \
-#     -t vllm-qaic-aot:1.22-rust .
+#     -t vllm-qaic-aot:1.24-rust .
 #
 # The BASE_IMAGE must have the QAIC Platform and Apps SDKs installed
 # (i.e. /opt/qti-aic/ present) so that vllm-qaic can load at runtime.
@@ -108,9 +108,9 @@ ARG RUST_IMAGE="docker.io/library/rust:${RUST_VERSION}-slim"
 # All vars use ${VAR:-default} in utility.sh so passing --build-arg takes
 # precedence without changing the script.
 # ---------------------------------------------------------------------------
-ARG VLLM_VERSION="0.23.0"
-ARG VLLM_QAIC_VERSION="1.22"
-ARG QEFF_BRANCH="release/v1.22.0"
+ARG VLLM_VERSION="0.30.0"
+ARG VLLM_QAIC_VERSION="1.24"
+ARG QEFF_BRANCH="main"
 ARG TORCH_VERSION_AOT="2.7.0+cpu"
 ARG TORCHVISION_VERSION_AOT="0.22.0+cpu"
 ARG VLLM_TARGET_DEVICE_AOT="empty"
@@ -138,7 +138,7 @@ ARG VLLM_BRANCH=""
 # ---------------------------------------------------------------------------
 # Release-specific
 # ---------------------------------------------------------------------------
-ARG VLLM_QAIC_GIT_REF="v0.23.0"
+ARG VLLM_QAIC_GIT_REF="v0.30.0"
 
 # ---------------------------------------------------------------------------
 # CI-specific (both empty → use build-context COPY)
@@ -237,9 +237,9 @@ SHELL ["/bin/bash", "-c"]
 # when declared after an ENV instruction in Docker BuildKit.
 ARG VENV="/opt/venv-aot"
 ARG PYTHON_VERSION="3.12"
-ARG VLLM_VERSION="0.23.0"
-ARG VLLM_QAIC_VERSION="1.22"
-ARG QEFF_BRANCH="release/v1.22.0"
+ARG VLLM_VERSION="0.30.0"
+ARG VLLM_QAIC_VERSION="1.24"
+ARG QEFF_BRANCH="main"
 ARG TORCH_VERSION_AOT="2.7.0+cpu"
 ARG TORCHVISION_VERSION_AOT="0.22.0+cpu"
 ARG VLLM_TARGET_DEVICE_AOT="empty"
@@ -384,8 +384,8 @@ ENV VLLM_PLUGINS="qaic"
 FROM aot-base AS release-builder
 
 ARG VENV="/opt/venv-aot"
-ARG VLLM_VERSION="0.23.0"
-ARG VLLM_QAIC_VERSION="1.22"
+ARG VLLM_VERSION="0.30.0"
+ARG VLLM_QAIC_VERSION="1.24"
 ARG VLLM_QAIC_GIT_REF="main"
 
 # Clone the pinned git ref, overlay our fixed setup.py (which supports
@@ -417,8 +417,8 @@ ENV PATH="${VENV}/bin:${PATH}" \
 FROM aot-base AS ci-builder
 
 ARG VENV="/opt/venv-aot"
-ARG VLLM_VERSION="0.23.0"
-ARG VLLM_QAIC_VERSION="1.22"
+ARG VLLM_VERSION="0.30.0"
+ARG VLLM_QAIC_VERSION="1.24"
 ARG VLLM_QAIC_PR=""
 ARG VLLM_QAIC_BRANCH=""
 
@@ -467,9 +467,9 @@ ENV PATH="${VENV}/bin:${PATH}" \
 FROM aot-base AS dev-builder
 
 ARG VENV="/opt/venv-aot"
-ARG VLLM_VERSION="0.23.0"
-ARG VLLM_QAIC_VERSION="1.22"
-ARG QEFF_BRANCH="release/v1.22.0"
+ARG VLLM_VERSION="0.30.0"
+ARG VLLM_QAIC_VERSION="1.24"
+ARG QEFF_BRANCH="main"
 ARG QEFF_PR=""
 ARG VLLM_TARGET_DEVICE_AOT="empty"
 ARG VLLM_PR=""
@@ -556,13 +556,13 @@ CMD ["bash"]
 #
 #   # Custom wheel filename:
 #   docker buildx build --target wheel -f docker/Dockerfile.aot \
-#     --build-arg WHEEL_NAME=vllm_qaic-1.22.0+aot-py3-none-any.whl \
+#     --build-arg WHEEL_NAME=vllm_qaic-1.24.0+aot-py3-none-any.whl \
 #     --output type=local,dest=./dist/aot .
 # ===========================================================================
 FROM aot-base AS wheel-builder
 
-ARG VLLM_VERSION="0.23.0"
-ARG VLLM_QAIC_VERSION="1.22"
+ARG VLLM_VERSION="0.30.0"
+ARG VLLM_QAIC_VERSION="1.24"
 ARG WHEEL_NAME=""
 
 # WHEEL_NAME rename: the wheel's own name comes from setup.py's package name

@@ -38,14 +38,14 @@
 # Build commands
 # --------------
 #   # Standalone base:
-#   docker build --target pyt-base -t vllm-qaic-pyt-base:1.22 .
+#   docker build --target pyt-base -t vllm-qaic-pyt-base:1.24 .
 #
 #   # Release (default pins):
-#   docker build --target release -f docker/Dockerfile.pyt -t vllm-qaic-pyt:1.22 .
+#   docker build --target release -f docker/Dockerfile.pyt -t vllm-qaic-pyt:1.24 .
 #
 #   # Release (AI200 device):
 #   docker build --target release -f docker/Dockerfile.pyt \
-#     --build-arg QAIC_DEVICE_ARCH=v81 -t vllm-qaic-pyt:1.22-v81 .
+#     --build-arg QAIC_DEVICE_ARCH=v81 -t vllm-qaic-pyt:1.24-v81 .
 #
 #   # CI (current checkout):
 #   docker build --target ci -f docker/Dockerfile.pyt -t vllm-qaic-pyt:ci .
@@ -65,19 +65,19 @@
 #   # Wheel with an overridden filename:
 #   docker buildx build --target wheel -f docker/Dockerfile.pyt \
 #     --build-arg PYTHON_VERSION=3.11 \
-#     --build-arg WHEEL_NAME=vllm_qaic-1.22.0+pyt-cp311-cp311-linux_x86_64.whl \
+#     --build-arg WHEEL_NAME=vllm_qaic-1.24.0+pyt-cp311-cp311-linux_x86_64.whl \
 #     --output type=local,dest=./dist/pyt/py311 .
 #
 #   # Any target — also build vllm's experimental Rust OpenAI frontend
 #   # (vllm-rs). See docs/installation.md for known caveats.
 #   docker build --target release -f docker/Dockerfile.pyt \
-#     --build-arg VLLM_BUILD_RUST=1 -t vllm-qaic-pyt:1.22-rust .
+#     --build-arg VLLM_BUILD_RUST=1 -t vllm-qaic-pyt:1.24-rust .
 #
 #   # Rust toolchain from a mirror / internal registry instead of Docker Hub:
 #   docker build --target release -f docker/Dockerfile.pyt \
 #     --build-arg VLLM_BUILD_RUST=1 \
 #     --build-arg RUST_IMAGE=my.registry.internal:5000/mirror/rust:1.90-slim \
-#     -t vllm-qaic-pyt:1.22-rust .
+#     -t vllm-qaic-pyt:1.24-rust .
 #
 # The BASE_IMAGE must have the QAIC Platform and Apps SDKs installed
 # (i.e. /opt/qti-aic/ present with torch_qaic wheels).
@@ -110,10 +110,10 @@ ARG RUST_IMAGE="docker.io/library/rust:${RUST_VERSION}-slim"
 # ---------------------------------------------------------------------------
 # Shared stack version pins — defaults mirror scripts/utility.sh.
 # ---------------------------------------------------------------------------
-ARG VLLM_VERSION="0.23.0"
-ARG VLLM_QAIC_VERSION="1.22"
-ARG TORCH_VERSION_PYT="2.11.0+cpu"
-ARG TORCHVISION_VERSION_PYT="0.26.0+cpu"
+ARG VLLM_VERSION="0.30.0"
+ARG VLLM_QAIC_VERSION="1.24"
+ARG TORCH_VERSION_PYT="2.13.0+cpu"
+ARG TORCHVISION_VERSION_PYT="0.28.0+cpu"
 ARG TORCHAUDIO_VERSION_PYT="2.11.0+cpu"
 ARG VLLM_TARGET_DEVICE_PYT="empty"
 ARG TORCH_QAIC_BASE_PATH="/opt/qti-aic/integrations/torch_qaic"
@@ -140,7 +140,7 @@ ARG VLLM_BRANCH=""
 # ---------------------------------------------------------------------------
 # Release-specific
 # ---------------------------------------------------------------------------
-ARG VLLM_QAIC_GIT_REF="v0.23.0"
+ARG VLLM_QAIC_GIT_REF="v0.30.0"
 
 # ---------------------------------------------------------------------------
 # CI-specific (both empty → use build-context COPY)
@@ -221,10 +221,10 @@ SHELL ["/bin/bash", "-c"]
 # instruction can lose their RUN-scope binding in Docker BuildKit.
 ARG VENV="/opt/venv-pyt"
 ARG PYTHON_VERSION="3.12"
-ARG VLLM_VERSION="0.23.0"
-ARG VLLM_QAIC_VERSION="1.22"
-ARG TORCH_VERSION_PYT="2.11.0+cpu"
-ARG TORCHVISION_VERSION_PYT="0.26.0+cpu"
+ARG VLLM_VERSION="0.30.0"
+ARG VLLM_QAIC_VERSION="1.24"
+ARG TORCH_VERSION_PYT="2.13.0+cpu"
+ARG TORCHVISION_VERSION_PYT="0.28.0+cpu"
 ARG TORCHAUDIO_VERSION_PYT="2.11.0+cpu"
 ARG VLLM_TARGET_DEVICE_PYT="empty"
 ARG TORCH_QAIC_BASE_PATH="/opt/qti-aic/integrations/torch_qaic"
@@ -349,9 +349,9 @@ ENV VLLM_PLUGINS="qaic"
 FROM pyt-base AS release-builder
 
 ARG VENV="/opt/venv-pyt"
-ARG VLLM_VERSION="0.23.0"
-ARG VLLM_QAIC_VERSION="1.22"
-ARG VLLM_QAIC_GIT_REF="v0.23.0"
+ARG VLLM_VERSION="0.30.0"
+ARG VLLM_QAIC_VERSION="1.24"
+ARG VLLM_QAIC_GIT_REF="v0.30.0"
 ARG QAIC_DEVICE_ARCH="v68"
 
 COPY setup.py /src/vllm-qaic-setup.py
@@ -383,8 +383,8 @@ ENV PATH="${VENV}/bin:${PATH}" \
 FROM pyt-base AS ci-builder
 
 ARG VENV="/opt/venv-pyt"
-ARG VLLM_VERSION="0.23.0"
-ARG VLLM_QAIC_VERSION="1.22"
+ARG VLLM_VERSION="0.30.0"
+ARG VLLM_QAIC_VERSION="1.24"
 ARG VLLM_QAIC_PR=""
 ARG VLLM_QAIC_BRANCH=""
 ARG QAIC_DEVICE_ARCH="v68"
@@ -434,8 +434,8 @@ ENV PATH="${VENV}/bin:${PATH}" \
 FROM pyt-base AS dev-builder
 
 ARG VENV="/opt/venv-pyt"
-ARG VLLM_VERSION="0.23.0"
-ARG VLLM_QAIC_VERSION="1.22"
+ARG VLLM_VERSION="0.30.0"
+ARG VLLM_QAIC_VERSION="1.24"
 ARG QAIC_DEVICE_ARCH="v68"
 ARG VLLM_TARGET_DEVICE_PYT="empty"
 ARG VLLM_PR=""
@@ -507,13 +507,13 @@ CMD ["bash"]
 #
 #   # Custom wheel filename:
 #   docker buildx build --target wheel -f docker/Dockerfile.pyt \
-#     --build-arg WHEEL_NAME=vllm_qaic-1.22.0+pyt-cp311-cp311-linux_x86_64.whl \
+#     --build-arg WHEEL_NAME=vllm_qaic-1.24.0+pyt-cp311-cp311-linux_x86_64.whl \
 #     --output type=local,dest=./dist/pyt/py311 .
 # ===========================================================================
 FROM pyt-base AS wheel-builder
 
-ARG VLLM_VERSION="0.23.0"
-ARG VLLM_QAIC_VERSION="1.22"
+ARG VLLM_VERSION="0.30.0"
+ARG VLLM_QAIC_VERSION="1.24"
 ARG QAIC_DEVICE_ARCH="v68"
 ARG WHEEL_NAME=""
 
