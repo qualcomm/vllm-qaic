@@ -71,11 +71,6 @@ class QaicPlatform(Platform):
 
     @classmethod
     def import_kernels(cls) -> None:
-        # QAIC has no CUDA kernels. Skip all kernel imports — importing vllm._C
-        # on non-CUDA hardware triggers a C++ bad_alloc/terminate (SIGABRT), which
-        # Python's except ImportError cannot catch. vllm._moe_C is also skipped
-        # since QAIC uses its own on-chip operators, not CUDA MoE kernels.
-        # TODO: import Hexagon/QAIC-specific .so here when available.
         pass
 
     @classmethod
@@ -422,11 +417,11 @@ class QaicPlatform(Platform):
             )
             assert (
                 not vllm_config.speculative_config
-                or vllm_config.speculative_config.method in ["ngram", "draft_model"]
+                or vllm_config.speculative_config.method
+                in ["ngram", "draft_model", "suffix"]
             ), (
-                "PLD and DLM based SPD Types are supported with Disaggregated "
-                "serving, other SPD types such as Turbo is not yet supported "
-                "with Disaggregated serving for QAIC backend"
+                "Only ngram, suffix, and draft_model based SPD types are "
+                "supported with Disaggregated serving for QAIC backend"
             )
             assert not (
                 vllm_config.kv_transfer_config.kv_role != "kv_producer"
