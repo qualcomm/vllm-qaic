@@ -314,6 +314,7 @@ class QaicAsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         # 3. Book keep to update input batch
         (
             num_nans_in_logits,
+            _num_nans,
             logprobs_lists,
             valid_sampled_token_ids,
             prompt_logprobs_dict,
@@ -2001,13 +2002,24 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 continue
             flat_kv_payload = kv_cache_tensor.size // dtype_size // num_blocks // 2
 
-            for layer_name in kv_cache_tensor.shared_by:
+            # vLLM 0.30 represents the layer covered by a KV cache 
+            # allocation in layers. Older KVCacheTensor used "shared_by"
+            # for this field 
+            layer_names = getattr(kv_cache_tensor, "layers", None)
+            if layer_names is None:
+                layer_names = kv_cache_tensor.shared_by
+            
+            for layer_name in layer_names:
                 layer_idx = self._parse_kv_layer_idx(layer_name)
                 layer_tensors.setdefault(
                     layer_idx,
                     torch.empty((2, num_blocks, flat_kv_payload), dtype=torch_dtype),
                 )
-                kv_cache_layers[layer_name] = layer_tensors[layer_idx]
+                # The QAIC execution view is indexed as [KV, block, ...],
+                # # while NIXL interprets dimension 0 as the block dimension.
+                # Register a transposed view with NIXL without changing the
+                # QAIC-facing tensor used below.
+                kv_cache_layers[layer_name] = layer_tensors[layer_idx].transpose(0, 1)
 
         if not layer_tensors:
             raise RuntimeError("No KV cache layers found for NIXL registration.")
