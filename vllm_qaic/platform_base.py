@@ -281,6 +281,8 @@ class QaicPlatform(Platform):
             scheduler_config.long_prefill_token_threshold = model_config.max_model_len
 
         if not cls.is_aot:
+            # TODO: Re-enable JIT warmup once QAIC JIT support is fully onboarded.
+            vllm_config.kernel_config.enable_jit_warmup = False
             assert vllm_config.kv_transfer_config is None, (
                 "QAIC eager mode does not support disaggregated serving"
             )
