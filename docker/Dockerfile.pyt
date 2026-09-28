@@ -140,7 +140,7 @@ ARG VLLM_BRANCH=""
 # ---------------------------------------------------------------------------
 # Release-specific
 # ---------------------------------------------------------------------------
-ARG VLLM_QAIC_GIT_REF="v0.30.0"
+ARG VLLM_QAIC_GIT_REF="main"
 
 # ---------------------------------------------------------------------------
 # CI-specific (both empty → use build-context COPY)
@@ -351,7 +351,7 @@ FROM pyt-base AS release-builder
 ARG VENV="/opt/venv-pyt"
 ARG VLLM_VERSION="0.30.0"
 ARG VLLM_QAIC_VERSION="1.24"
-ARG VLLM_QAIC_GIT_REF="v0.30.0"
+ARG VLLM_QAIC_GIT_REF="main"
 ARG QAIC_DEVICE_ARCH="v68"
 
 COPY setup.py /src/vllm-qaic-setup.py

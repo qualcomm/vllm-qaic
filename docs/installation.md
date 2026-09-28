@@ -268,7 +268,7 @@ All `ARG`s are global (declared before the first `FROM`) and re-declared inside 
 | `TRITON_CPU_COMMIT` | `e60f448f8f197073b75d6d3e77347414a5db3ee7` | Pinned triton-cpu commit hash |
 | `TRITON_CPU_COMPILE_MAX_JOBS` | `4` | Parallel build jobs for triton-cpu compilation |
 | `VLLM_BUILD_RUST` | `1` | Set to `1` to build vLLM's experimental Rust OpenAI frontend (`vllm-rs`) |
-| `VLLM_QAIC_GIT_REF` | `v0.30.0` | `release` target: vllm-qaic git tag/branch to clone |
+| `VLLM_QAIC_GIT_REF` | `main` | `release` target: vllm-qaic git tag/branch to clone |
 | `VLLM_QAIC_PR` | *(empty)* | `ci` target: PR number to fetch (takes priority over `VLLM_QAIC_BRANCH`) |
 | `VLLM_QAIC_BRANCH` | *(empty)* | `ci` target: branch to fetch |
 | `QEFF_PR` | *(empty)* | `dev` target: QEfficient PR to install editable (overrides `QEFF_BRANCH`) |
@@ -295,7 +295,7 @@ All `ARG`s are global (declared before the first `FROM`) and re-declared inside 
 | `TORCH_QAIC_BASE_PATH` | `/opt/qti-aic/integrations/torch_qaic` | SDK path containing `torch_qaic` wheels inside `BASE_IMAGE` |
 | `QAIC_DEVICE_ARCH` | `v68` | `v68` = AI 100 series, `v81` = AI 200 series (includes BF16 kernels); controls which Hexagon kernel C++ sources compile |
 | `VLLM_BUILD_RUST` | `1` | Set to `1` to build vLLM's experimental Rust OpenAI frontend (`vllm-rs`) |
-| `VLLM_QAIC_GIT_REF` | `v0.30.0` | `release` target: vllm-qaic git tag/branch to clone |
+| `VLLM_QAIC_GIT_REF` | `main` | `release` target: vllm-qaic git tag/branch to clone |
 | `VLLM_QAIC_PR` | *(empty)* | `ci` target: PR number to fetch (takes priority over `VLLM_QAIC_BRANCH`) |
 | `VLLM_QAIC_BRANCH` | *(empty)* | `ci` target: branch to fetch |
 | `WHEEL_NAME` | *(empty)* | `wheel` target: rename the built wheel to this filename before exporting it (empty = `uv build`'s own name). See [Overriding the wheel filename](#overriding-the-wheel-filename) |
