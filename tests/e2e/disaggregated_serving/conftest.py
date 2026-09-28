@@ -4,6 +4,7 @@
 # ------------------------------------------------------------------
 """Shared disaggregated-serving test helpers"""
 
+import json
 import logging
 import os
 import signal
@@ -190,7 +191,8 @@ def disagg_server(request, _disagg_test_config):
         f"--decode-port={test_config['decode_worker_ports']}",
         f"--decode-max-num-seqs={decode_bsz}",
         f"--max-model-len={ctx_len}",
-        f"--prefill-long-prefill-token-threshold={seq_len}",
+        "--prefill-override-qaic-config",
+        json.dumps({"prefill_seq_len": seq_len}),
         f"--kv-handOff-port={kv_handoff_port}",
     ]
 
