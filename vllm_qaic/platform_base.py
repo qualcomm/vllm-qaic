@@ -300,6 +300,8 @@ class QaicPlatform(Platform):
         if cache_config:
             if model_config.enforce_eager:
                 cache_config.block_size = 16
+                # FIXME remove below hard-coding once PagedAttention is enabled
+                cache_config.enable_prefix_caching = False
             else:
                 if cache_config.enable_prefix_caching:
                     cache_config.enable_prefix_caching = False
