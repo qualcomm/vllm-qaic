@@ -8,12 +8,12 @@
 
 # === Common ===
 VLLM_VERSION="${VLLM_VERSION:-0.23.0}"
-VLLM_QAIC_VERSION="${VLLM_QAIC_VERSION:-1.22}"
+VLLM_QAIC_VERSION="${VLLM_QAIC_VERSION:-1.23}"
 
 # === AOT stack ===
 TORCH_VERSION_AOT="${TORCH_VERSION_AOT:-2.7.0+cpu}"
 TORCHVISION_VERSION_AOT="${TORCHVISION_VERSION_AOT:-0.22.0+cpu}"
-QEFF_BRANCH="${QEFF_BRANCH:-main}"
+QEFF_BRANCH="${QEFF_BRANCH:-release/v1.23.0}"
 # TRANSFORMERS_VERSION_AOT="4.55.3"  # optional: uncomment to pin if qefficient's version conflicts
 VLLM_TARGET_DEVICE_AOT="${VLLM_TARGET_DEVICE_AOT:-empty}"
 TRITON_CPU="${TRITON_CPU:-0}"                          # set to 1 to enable
