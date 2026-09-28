@@ -16,6 +16,7 @@ logger = init_logger(__name__)
 _rms_norm_kernel = _qaic_custom_ops.rms_norm_dispatch
 _NSP_COUNT = current_platform.get_num_cores()
 _THREAD_COUNT = current_platform.get_num_hvx_threads()
+_HMX_THREAD_COUNT = _THREAD_COUNT + 1
 
 
 def rms_norm_hexagon(
@@ -60,6 +61,22 @@ _FP32_SCORING = os.environ.get("QAIC_ROUTER_FP32_SCORING", "0") == "1"
 def _kernel(name: str):
     """Return a compiled QAIC Hexagon kernel by exported symbol name."""
     return getattr(_qaic_custom_ops, name)
+
+
+_paged_attention_store_kernel = _kernel("multinsp_multithreaded_paged_attention_store")
+_paged_attention_hvx_kernel = _kernel("multinsp_multithreaded_paged_attention")
+_paged_attention_hmx_prefill_cache_kernel = _kernel(
+    "multinsp_multithreaded_paged_attention_hmx_prefill"
+)
+_paged_attention_hmx_prefill_kernel = _kernel(
+    "multinsp_multithreaded_paged_attention_hmx_prefill_direct"
+)
+_paged_attention_hmx_decode_kernel = _kernel(
+    "multinsp_multithreaded_paged_attention_hmx_decode"
+)
+_paged_attention_hmx_decode_cache_kernel = _kernel(
+    "multinsp_multithreaded_paged_attention_hmx_decode_cache"
+)
 
 
 def _kernel_score_mode(scoring_func: int) -> int:
@@ -334,4 +351,217 @@ def regular_topk(
         routed_scaling_factor,
         use_bias,
         _scoring_func_id(scoring_func),
+    )
+
+
+@torch.library.custom_op(
+    "qaic::paged_attention",
+    mutates_args=("key_cache", "value_cache"),
+    device_types="qaic",
+)
+def _paged_attention_op(
+    query: Tensor,
+    key: Tensor,
+    value: Tensor,
+    key_cache: Tensor,
+    value_cache: Tensor,
+    block_table: Tensor,
+    slot_mapping: Tensor,
+    query_start_loc: Tensor,
+    seq_lens: Tensor,
+    scale: float,
+    causal: bool,
+    write_cache: bool,
+) -> Tensor:
+    """Run QAIC paged attention over vLLM block-cache metadata."""
+    query = query.contiguous()
+    if write_cache:
+        key = key.contiguous()
+        value = value.contiguous()
+    if (
+        block_table.device != query.device
+        or block_table.dtype != torch.int32
+        or not block_table.is_contiguous()
+    ):
+        block_table = block_table.to(
+            device=query.device, dtype=torch.int32
+        ).contiguous()
+    if write_cache and (
+        slot_mapping.device != query.device
+        or slot_mapping.dtype != torch.int32
+        or not slot_mapping.is_contiguous()
+    ):
+        slot_mapping = slot_mapping.to(
+            device=query.device, dtype=torch.int32
+        ).contiguous()
+    if (
+        query_start_loc.device != query.device
+        or query_start_loc.dtype != torch.int32
+        or not query_start_loc.is_contiguous()
+    ):
+        query_start_loc = query_start_loc.to(
+            device=query.device, dtype=torch.int32
+        ).contiguous()
+    if (
+        seq_lens.device != query.device
+        or seq_lens.dtype != torch.int32
+        or not seq_lens.is_contiguous()
+    ):
+        seq_lens = seq_lens.to(device=query.device, dtype=torch.int32).contiguous()
+
+    output = torch.empty_like(query)
+
+    num_tokens = query.shape[0]
+    num_heads = query.shape[1]
+    head_dim = query.shape[2]
+    num_kv_heads = key_cache.shape[1]
+    block_size = key_cache.shape[2]
+    num_reqs = seq_lens.shape[0]
+    max_blocks_per_seq = block_table.shape[1]
+
+    backend = os.environ.get("QAIC_PAGED_ATTN_BACKEND")
+    if backend is None:
+        backend = "hvx" if os.environ.get("QAIC_PAGED_ATTN_HMX", "1") == "0" else "hmx"
+    backend = backend.lower()
+    if backend not in ("hmx", "hvx"):
+        raise RuntimeError(
+            f"QAIC_PAGED_ATTN_BACKEND must be 'hmx' or 'hvx', got {backend!r}"
+        )
+
+    use_hmx = backend == "hmx"
+    is_decode = num_tokens == num_reqs
+    hmx_supported = head_dim > 0 and num_kv_heads > 0 and num_heads % num_kv_heads == 0
+    if use_hmx and not hmx_supported:
+        raise RuntimeError(
+            "HMX paged attention requested for unsupported shape: "
+            f"tokens={num_tokens}, reqs={num_reqs}, heads={num_heads}, "
+            f"kv_heads={num_kv_heads}, head_dim={head_dim}"
+        )
+    if not use_hmx and head_dim > 256:
+        raise RuntimeError(
+            "HVX paged attention supports head_dim <= 256; "
+            f"got head_dim={head_dim}. Set QAIC_PAGED_ATTN_BACKEND=hmx."
+        )
+
+    if use_hmx:
+        if is_decode:
+            attn_kernel = (
+                _paged_attention_hmx_decode_kernel
+                if write_cache
+                else _paged_attention_hmx_decode_cache_kernel
+            )
+        else:
+            attn_kernel = (
+                _paged_attention_hmx_prefill_kernel
+                if write_cache
+                else _paged_attention_hmx_prefill_cache_kernel
+            )
+    else:
+        attn_kernel = _paged_attention_hvx_kernel
+
+    fused_hmx_store = use_hmx and write_cache
+
+    if not fused_hmx_store and write_cache:
+        _paged_attention_store_kernel[_NSP_COUNT, _THREAD_COUNT](
+            key,
+            value,
+            key_cache,
+            value_cache,
+            slot_mapping,
+            num_tokens,
+            num_kv_heads,
+            head_dim,
+            block_size,
+        )
+    if use_hmx and not write_cache:
+        attn_kernel[_NSP_COUNT, _HMX_THREAD_COUNT](
+            query,
+            key_cache,
+            value_cache,
+            output,
+            block_table,
+            query_start_loc,
+            seq_lens,
+            num_reqs,
+            num_tokens,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            block_size,
+            max_blocks_per_seq,
+            int(causal),
+            float(scale),
+        )
+    elif use_hmx:
+        attn_kernel[_NSP_COUNT, _HMX_THREAD_COUNT](
+            query,
+            key,
+            value,
+            key_cache,
+            value_cache,
+            slot_mapping,
+            output,
+            block_table,
+            query_start_loc,
+            seq_lens,
+            num_reqs,
+            num_tokens,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            block_size,
+            max_blocks_per_seq,
+            int(causal),
+            float(scale),
+        )
+    else:
+        attn_kernel[_NSP_COUNT, _THREAD_COUNT](
+            query,
+            key_cache,
+            value_cache,
+            output,
+            block_table,
+            query_start_loc,
+            seq_lens,
+            num_reqs,
+            num_tokens,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            block_size,
+            max_blocks_per_seq,
+            int(causal),
+            float(scale),
+        )
+    return output
+
+
+def paged_attention(
+    query: Tensor,
+    key: Tensor,
+    value: Tensor,
+    key_cache: Tensor,
+    value_cache: Tensor,
+    block_table: Tensor,
+    slot_mapping: Tensor,
+    query_start_loc: Tensor,
+    seq_lens: Tensor,
+    scale: float,
+    causal: bool = True,
+    write_cache: bool = True,
+) -> Tensor:
+    """Public test/development entry point for the QAIC paged-attention MVP."""
+    return _paged_attention_op(
+        query,
+        key,
+        value,
+        key_cache,
+        value_cache,
+        block_table,
+        slot_mapping,
+        query_start_loc,
+        seq_lens,
+        scale,
+        causal,
+        write_cache,
     )
