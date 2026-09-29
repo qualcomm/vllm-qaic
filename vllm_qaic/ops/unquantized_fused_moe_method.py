@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 import torch
@@ -45,10 +46,93 @@ class QAicUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         shared_experts_input: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Compute unquantized MoE on QAIC by batching tokens per expert."""
+        activation = getattr(layer.activation, "value", layer.activation)
+        apply_router_weight_on_input = layer.apply_router_weight_on_input
+
+        qaic_kernel_activations = {
+            "silu",
+            "gelu",
+            "gelu_tanh",
+            "swigluoai",
+            "swiglustep",
+            "silu_no_mul",
+            "gelu_no_mul",
+            "gelu_tanh_no_mul",
+            "relu2_no_mul",
+        }
+        if x.dtype == torch.float16 and activation in qaic_kernel_activations:
+            kernel = os.environ.get("QAIC_UNQUANTIZED_FUSED_MOE_KERNEL", "hmx").lower()
+            if kernel == "hmx":
+                from vllm_qaic._custom_ops import (
+                    unquantized_fused_moe_hmx as unquantized_fused_moe_impl,
+                )
+            elif kernel == "hvx":
+                from vllm_qaic._custom_ops import (
+                    unquantized_fused_moe_hvx as unquantized_fused_moe_impl,
+                )
+            else:
+                raise ValueError(
+                    "QAIC_UNQUANTIZED_FUSED_MOE_KERNEL must be 'hvx' or 'hmx', "
+                    f"got {kernel!r}"
+                )
+
+            return unquantized_fused_moe_impl(
+                x=x,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                w13_weight=layer.w13_weight,
+                w2_weight=layer.w2_weight,
+                w13_bias=layer.w13_bias if self.moe.has_bias else None,
+                w2_bias=layer.w2_bias if self.moe.has_bias else None,
+                activation=activation,
+                has_bias=self.moe.has_bias,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                expert_map=layer.expert_map,
+            )
+
+        return self._forward_per_expert(layer, x, topk_weights, topk_ids)
+
+    def _gate_up_matmul(
+        self,
+        layer: FusedMoE,  # type: ignore[name-defined] # noqa: F821
+        w13_input: torch.Tensor,
+        expert_id: int,
+    ) -> torch.Tensor:
+        """Gate/up projection for one expert. Overridable by quantized methods."""
+        return w13_input @ layer.w13_weight[expert_id].t()
+
+    def _down_matmul(
+        self,
+        layer: FusedMoE,  # type: ignore[name-defined] # noqa: F821
+        hidden: torch.Tensor,
+        expert_id: int,
+    ) -> torch.Tensor:
+        """Down projection for one expert. Overridable by quantized methods."""
+        return hidden @ layer.w2_weight[expert_id].t()
+
+    def _forward_per_expert(
+        self,
+        layer: FusedMoE,  # type: ignore[name-defined] # noqa: F821
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        """Per-expert PyTorch MoE loop, used when the fused kernel can't be.
+
+        The two matmuls go through ``_gate_up_matmul``/``_down_matmul`` so that
+        quantized subclasses can substitute a packed-weight kernel without
+        reimplementing routing, activation, or the weighted reduce.
+        """
         num_tokens = x.shape[0]
         top_k = topk_ids.shape[1]
         activation = getattr(layer.activation, "value", layer.activation)
         is_no_mul = activation.endswith("_no_mul")
+        apply_router_weight_on_input = layer.apply_router_weight_on_input
+
+        if layer.expert_map is not None:
+            raise NotImplementedError(
+                "QAIC unquantized fused MoE fallback does not support expert_map."
+            )
 
         token_idx = (
             torch.arange(num_tokens, device=x.device)
@@ -84,10 +168,12 @@ class QAicUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             weights = sorted_weights[offset : offset + count]
             tgt_idx = sorted_token_idx[offset : offset + count]
 
-            w13 = layer.w13_weight[expert_id]
-            w2 = layer.w2_weight[expert_id]
-
-            gate_up = tokens @ w13.t()
+            w13_input = (
+                weights.unsqueeze(-1) * tokens
+                if apply_router_weight_on_input
+                else tokens
+            )
+            gate_up = self._gate_up_matmul(layer, w13_input, expert_id)
             if self.moe.has_bias:
                 gate_up = gate_up + layer.w13_bias[expert_id]
 
@@ -96,6 +182,8 @@ class QAicUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                     hidden = F.silu(gate_up)
                 elif activation == "gelu_no_mul":
                     hidden = F.gelu(gate_up)
+                elif activation == "gelu_tanh_no_mul":
+                    hidden = F.gelu(gate_up, approximate="tanh")
                 else:
                     hidden = F.relu(gate_up).square()
             elif activation == "swigluoai":
@@ -103,19 +191,31 @@ class QAicUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 gate = gate.clamp(max=7.0)
                 up = up.clamp(-7.0, 7.0)
                 hidden = (up + 1) * (gate * torch.sigmoid(gate * 1.702))
+            elif activation == "swiglustep":
+                half = gate_up.shape[-1] // 2
+                gate, up = gate_up[..., :half], gate_up[..., half:]
+                gate = F.silu(gate).clamp(max=7.0)
+                up = up.clamp(-7.0, 7.0)
+                hidden = gate * up
             else:
                 half = gate_up.shape[-1] // 2
                 gate, up = gate_up[..., :half], gate_up[..., half:]
                 if activation == "silu":
                     hidden = F.silu(gate) * up
-                else:
+                elif activation == "gelu":
                     hidden = F.gelu(gate) * up
+                else:
+                    hidden = F.gelu(gate, approximate="tanh") * up
 
-            expert_out = hidden @ w2.t()
+            expert_out = self._down_matmul(layer, hidden, expert_id)
             if self.moe.has_bias:
                 expert_out = expert_out + layer.w2_bias[expert_id]
-            weighted_out = weights.unsqueeze(-1) * expert_out
-            out.index_put_((tgt_idx,), weighted_out, accumulate=True)
+            weighted_out = (
+                expert_out
+                if apply_router_weight_on_input
+                else weights.unsqueeze(-1) * expert_out
+            )
+            out.index_put_((tgt_idx,), weighted_out.to(out.dtype), accumulate=True)
             offset += count
 
         return out

@@ -330,8 +330,8 @@ class QAicAttentionBackendImpl(AttentionImpl):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        attn_metadata: QAicAttentionMetadata | None,
-        output: torch.Tensor | None = None,
+        attn_metadata: QAicAttentionMetadata,
+        output: torch.Tensor,
     ) -> torch.Tensor:
         """
         Run SDPA for decode attention across a batch of sequences.
@@ -433,24 +433,44 @@ class QAicAttentionBackendImpl(AttentionImpl):
             Lq = num_new
             Lk = new_cached
 
-            # Decode (Lq=1): full KV context, no mask needed.
-            # Prefill / chunked-prefill: causal mask over [Lq x Lk].
-            if Lq == 1:
-                mask = None
+            # Causal mask over [Lq x Lk]. Query row qi sits at absolute
+            # position (Lk - Lq) + qi in the sequence, so the same expression
+            # covers decode (Lq == 1) and prefill/chunked-prefill alike, and
+            # lets the sliding window be applied per query row rather than
+            # only along a fixed diagonal.
+            q_pos = torch.arange(Lk - Lq, Lk, device=q.device).unsqueeze(1)
+            k_pos = torch.arange(Lk, device=q.device).unsqueeze(0)
+            mask = k_pos <= q_pos
+            left = self.sliding_window[0]
+            if left != -1:
+                mask = mask & ((q_pos - k_pos) <= left)
+
+            if self.sinks is None:
+                sdpa_out = torch.nn.functional.scaled_dot_product_attention(
+                    q[None],  # [1, num_heads, Lq, head_size]
+                    k[None],
+                    v[None],
+                    attn_mask=mask,
+                    dropout_p=0.0,
+                    is_causal=False,
+                    scale=self.scale,
+                )  # [1, num_heads, Lq, head_size]
             else:
-                mask = torch.ones(Lq, Lk, device=q.device, dtype=torch.bool).tril(
-                    diagonal=(Lk - Lq)
+                # Attention sinks (gpt-oss): a learned per-head logit that
+                # joins the softmax denominator but contributes no value row,
+                # so it damps attention when no key is a good match. SDPA has
+                # no way to express that, hence the explicit scoring here.
+                scores = torch.matmul(q.float(), k.float().transpose(-1, -2))
+                scores = scores * self.scale
+                scores = scores.masked_fill(~mask, float("-inf"))
+                sink = (
+                    self.sinks.to(scores.dtype)
+                    .view(-1, 1, 1)
+                    .expand(scores.shape[0], Lq, 1)
                 )
-            # breakpoint()
-            sdpa_out = torch.nn.functional.scaled_dot_product_attention(
-                q[None],  # [1, num_heads, Lq, head_size]
-                k[None],
-                v[None],
-                attn_mask=mask,
-                dropout_p=0.0,
-                is_causal=False,
-                scale=self.scale,
-            )  # [1, num_heads, Lq, head_size]
+                probs = torch.softmax(torch.cat([scores, sink], dim=-1), dim=-1)
+                # Drop the sink column before the value matmul.
+                sdpa_out = torch.matmul(probs[..., :Lk], v.float()).to(q.dtype)[None]
 
             output[tok_start:tok_end] = sdpa_out.squeeze(0).movedim(1, 0)
 
