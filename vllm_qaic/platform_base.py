@@ -84,9 +84,8 @@ class QaicPlatform(Platform):
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
-        # Advertise BF16 so vLLM preserves an explicit native-AI200 request;
-        # check_and_update_config below rejects BF16 on non-AI200 targets.
-        return [torch.bfloat16, torch.float16, torch.float32]
+        # check_and_update_config restricts native BF16 to AI200 configurations.
+        return [torch.float16, torch.float32, torch.bfloat16]
 
     @classmethod
     def is_aot_inference(cls) -> bool:
