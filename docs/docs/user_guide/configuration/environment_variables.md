@@ -8,6 +8,8 @@ QAIC-specific environment variables that control plugin behavior.
 |----------|------|---------|-------------|
 | `VLLM_QAIC_COMPILER_ARGS` | str | None | Extra arguments passed to the QAIC compiler during QPC compilation |
 | `VLLM_QAIC_DFS_EN` | bool | True | Enable/disable DFS (Dynamic Frequency Scaling) on the device |
+| `VLLM_QAIC_FP8_BLOCK_MM_DISABLE` | bool | False | Force block-scaled FP8 linear layers onto the PyTorch path, bypassing the fused NSP kernel. Escape hatch for A/B comparison |
+| `VLLM_QAIC_FP8_BLOCK_MM_MAX_M` | int | 32 | Largest `M` routed to the fused block-scaled FP8 NSP kernel. Above this the compute-bound PyTorch/HMX path is used |
 | `VLLM_QAIC_MAX_CPU_THREADS` | int | None | Maximum CPU threads for host-side processing |
 | `VLLM_QAIC_MOS` | int | None | MOS (Memory Operating State) setting for the device |
 | `VLLM_QAIC_NUM_CORES` | int | None | Number of NSP cores to allocate per device (overrides `additional_config`) |
