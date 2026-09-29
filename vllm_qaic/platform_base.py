@@ -214,18 +214,6 @@ class QaicPlatform(Platform):
                 )
                 vllm_config.model_config.enforce_eager = True
             device_config.device = torch.device("qaic")
-            # set QAIC_VISIBLE_DEVICES from device_group
-            # if not already set
-            if (
-                os.environ.get(cls.device_control_env_var) is None
-                and "device_group" in additional_config
-            ):
-                logger.warning_once(
-                    "setting inference mode to Eager mode since torch_qaic is installed"
-                )
-                os.environ[cls.device_control_env_var] = additional_config[
-                    "device_group"
-                ]
 
         # Shorthand used throughout this method
         override_qaic_config = additional_config.get("override_qaic_config", {})
