@@ -1,16 +1,15 @@
 ---
 name: vllm-qaic-code-review
-description: Repo-specific code review for vllm-qaic. Auto-detects PyT/AoT mode from the diff, spawns the matching rule overlays, anchors every finding to a real diff line. Args (PR#, file, Change-Id, fork-branch URL, or --runs=2) are passed the same way as to the /vqreview command this skill mirrors.
+description: Repo-specific code review for vllm-qaic. Auto-detects PyT/AoT mode from the diff, spawns the matching rule overlays, anchors every finding to a real diff line. Use when asked to review vllm-qaic changes — the working tree, a PR number, a path, or a fork branch URL. Accepts `--runs=2` to review twice and vote.
 ---
 
 # vllm-qaic-code-review — vllm-qaic code review
 
-Rules are mined from 1,079 human reviewer comments (GitHub `vllm-qaic`, Gerrit
-`qranium/vllm`, Gerrit `qranium/qaic-disagg`). Provenance and per-rule evidence:
-`/local/mnt3/workspace/agokhale/agent_setup/harvest/RULES.md`. Worker contract:
-`vllm-qaic-code-review` agent — canonical at
-`skills_studio/agents/vllm-qaic-code-review.md` in this repo, mirrored at
-`~/.claude/agents/vllm-qaic-code-review.md` for invocation from anywhere.
+Rules were mined from roughly a thousand human reviewer comments on this
+project's own review history — they encode what reviewers here actually ask for,
+not generic Python or vLLM advice. The worker contract lives in the
+`vllm-qaic-code-review` agent (`skills_studio/agents/vllm-qaic-code-review.md`;
+activate it with `make claude` or `make codex` from the repo root).
 
 Args: `$ARGUMENTS`
 
@@ -24,8 +23,8 @@ Pick the first that applies:
 |---|---|
 | empty | `git --no-pager diff --no-color HEAD` |
 | `<N>` (digits) | `gh pr diff <N> --repo qualcomm/vllm-qaic` |
-| `I<40 hex>` | Gerrit Change-Id — fetch via `curl -s -n "https://review.qualcomm.com/a/changes/?q=<id>&o=CURRENT_REVISION"`, then diff that revision |
 | a GitHub branch link — `https://github.com/<owner>/<repo>/tree/<branch>`, or a repo URL (`git@github.com:<owner>/<repo>.git` / `https://github.com/<owner>/<repo>`) plus a branch name given in prose | Clone-and-checkout workflow — see **Step 1a** |
+| a commit or revision range (`<sha>`, `<base>..<head>`) | `git --no-pager diff --no-color <range>` |
 | a path | `git --no-pager diff --no-color HEAD -- <path>` |
 
 Also note `--runs=2` if present (see Step 3).
@@ -34,10 +33,10 @@ If the diff is empty, say so and stop.
 
 **Transport.** If the diff is ≤ ~50 KB, inline it in each agent prompt. If
 larger, pass each agent the exact command to re-run instead. Never write a
-diff file *inside* a repo checkout — this repo's CI checkouts are read-only
-and a stray tracked-looking file would dirty `git status`. A scratch file for
-transport (e.g. handing an inline-sized diff to several subagent prompts at
-once) belongs under `/tmp`, never inside any clone.
+diff file *inside* a repo checkout — CI checkouts are read-only and a stray
+tracked-looking file would dirty `git status`. A scratch file for transport
+(e.g. handing an inline-sized diff to several subagent prompts at once) belongs
+in a temporary directory, never inside any clone.
 
 ## Step 1a — Cloning a fork + branch
 
@@ -47,13 +46,11 @@ with a branch name. Fixed procedure, run it the same way every time:
 1. **Parse** `<owner>`, `<repo>`, `<branch>` from the input. A `/tree/<branch>`
    URL segment can itself contain `/` (branch names like `dev/v0.30.0`) — take
    everything after `/tree/` as the branch, not just the first segment.
-2. **Location.** Clone into
-   `/local/mnt3/workspace/agokhale/agent_setup/review/<repo>-<owner>` (e.g.
-   `/local/mnt3/workspace/agokhale/agent_setup/review/vllm-qaic-quic-sanising`)
-   — an absolute path, so this works the same regardless of the invoking
-   directory. **Never** into the primary working clone of `vllm-qaic`
-   (`/local/mnt3/workspace/agokhale/vllm-qaic`). A review must not touch the
-   user's own checkout.
+2. **Location.** Clone into a scratch directory **outside** any existing
+   checkout: `${TMPDIR:-/tmp}/vllm-qaic-review/<owner>-<repo>`. **Never** clone
+   into the user's own working clone of `vllm-qaic`, and never nest the clone
+   inside it — a review must not touch the checkout the user is working in.
+   State the path you chose before cloning.
 3. **Reuse, don't re-clone.** If that directory already exists as a git repo,
    `cd` into it and `git fetch origin` instead of cloning fresh.
 4. **Clone.** `git clone --no-single-branch git@github.com:<owner>/<repo>.git <path>`.
@@ -86,6 +83,10 @@ Classify every changed file:
 | `vllm/**` (upstream) | **shared** — fires `patch.no_direct_upstream_edit` |
 | `tests/**`, `examples/**`, `docs/**`, `ci_scripts/**`, `setup.py`, `requirements/**` | **shared** (plus **pyt** if under an `eager/` test path) |
 | `scripts/utility.sh`, `docker/Dockerfile.aot`, `docker/Dockerfile.pyt`, `docs/installation.md` (version tables) | **shared** — build/version-pin files; fires `build.qaic_sdk_version_sync` / `build.torch_version_sync` |
+| `skills_studio/**`, `*.md`, `Makefile`, dotfiles | **shared** — no mode signal, but still publicly visible: fires `leak.no_machine_specific_path` / `leak.no_internal_reference` |
+
+Rules 33–34 (`leak.*`) are **not** routed — they apply to every changed file in
+every bucket, including files whose only change is prose.
 
 Then decide which roles to spawn:
 
@@ -94,13 +95,15 @@ Then decide which roles to spawn:
 - Both, **or any `shared` path that contains an `is_aot` / `enforce_eager`
   branch in the diff** → spawn `shared` + `aot` + `pyt`, and say so:
   *"Diff straddles shared code; reviewing both modes."*
+- Only **documentation, assistant assets, or other no-mode-signal files** →
+  spawn `shared` alone. Don't ask which mode to review; there is no mode
+  question, and the `leak.*` rules still have to run.
 
-**When to stop and ask.** If routing is genuinely ambiguous — a new file whose
-mode you cannot infer, a diff touching only build/config with no mode signal, or
-a `shared` file where you cannot tell which mode the changed branch serves —
-**do not guess**. Use `AskUserQuestion` with the specific files listed, offering:
-review as AoT / review as PyT / review both. Ambiguity here is exactly what the
-user asked to be consulted on.
+**When to stop and ask.** If routing is genuinely ambiguous — a new *code* file
+whose mode you cannot infer, or a `shared` file where you cannot tell which mode
+the changed branch serves — **do not guess**. Use `AskUserQuestion` with the
+specific files listed, offering: review as AoT / review as PyT / review both.
+Ambiguity here is exactly what the user asked to be consulted on.
 
 Print the routing decision before Step 3.
 
@@ -123,7 +126,7 @@ Paste the matching block verbatim into that role's prompt.
 
 ---
 
-#### ROLE: shared — 32 rules
+#### ROLE: shared — 34 rules
 
 | # | Rule | Severity | Trigger |
 |---|---|---|---|
@@ -159,6 +162,21 @@ Paste the matching block verbatim into that role's prompt.
 | 30 | `change.derive_dont_duplicate` | non-blocking | Value taken as a new arg/env/param when already reachable from an object in scope (`vllm_config`, `cache_config`, `self.*`), or two parameters introduced for one quantity |
 | 31 | `build.qaic_sdk_version_sync` | BLOCKING | Diff changes `get_qaic_sdk_version()` in `setup.py`, `VLLM_QAIC_VERSION` in `scripts/utility.sh`, any `ARG VLLM_QAIC_VERSION` in `docker/Dockerfile.aot` / `docker/Dockerfile.pyt`, or a `VLLM_QAIC_VERSION` row in a `docs/installation.md` reference table — read the other sources directly from `[REPO CHECKOUT PATH]`; fail if they don't all agree with the value the diff introduces, and fail if a docs table row shows a value copy-pasted from a different constant (e.g. a `VLLM_QAIC_VERSION` row showing `VLLM_VERSION`'s value) |
 | 32 | `build.torch_version_sync` | BLOCKING | Diff changes a `TORCH_VERSION_AOT` / `TORCHVISION_VERSION_AOT` pin in `scripts/utility.sh` or `docker/Dockerfile.aot`, a `TORCH_VERSION_PYT` / `TORCHVISION_VERSION_PYT` / `TORCHAUDIO_VERSION_PYT` pin in `scripts/utility.sh` or `docker/Dockerfile.pyt`, or the matching row in a `docs/installation.md` reference table — read the sibling files directly from `[REPO CHECKOUT PATH]`; fail if the AOT trio, PYT trio, or a docs table row disagree (check every `ARG` occurrence across build stages, not just the first) |
+| 33 | `leak.no_machine_specific_path` | BLOCKING | Added line hard-codes an absolute path that exists only on one machine or one person's account — a user home, a personal or team workspace tree, a network/scratch mount, a nightly-build or artifact drop directory, or a specific developer checkout — instead of deriving it from a CLI arg, env var, config value, or repo-relative path. Applies to docs, tests, CI scripts, Dockerfiles, and assistant assets exactly as to library code. See the carve-out for paths that are legitimately absolute |
+| 34 | `leak.no_internal_reference` | BLOCKING | Added line names something a reader outside the company cannot resolve, in what is a **public** repository: an internal code-review or Git server URL, an internal package index or artifact host, an internal-only project or mirror name, a lab/host/device identifier, an individual's username or email address, or any credential, token, or key. Quote the minimal substring needed to anchor, and describe the class of leak in `message` — never reproduce a secret's value in the finding |
+
+**Note on rules 33–34.** This repository is public. These two rules are the last
+gate before a local convenience becomes a permanent part of public history —
+and unlike most rules here, a miss cannot be fixed by a follow-up commit,
+because the value stays in the git history. Apply them to **every** changed
+file, including Markdown, CI scripts, and the assistant assets under
+`skills_studio/`, which are as publicly visible as the plugin source. They are
+the one place where the review is looking at what the text *says*, not at what
+the code *does*, so a path or URL inside a comment, docstring, or prose
+paragraph counts exactly as much as one in a string literal. Both have
+carve-outs in the agent contract — read them before firing, since legitimate
+absolute paths (the documented SDK install tree, container-internal paths,
+temporary directories) are common in this repo and must not be flagged.
 
 **Note on rules 31–32.** These are the only shared rules needing more than the
 diff: detecting drift against an untouched sibling file requires reading
@@ -223,9 +241,11 @@ every role's YAML plus `[FULL DIFF]`. The merger must:
 
 1. **Re-verify every anchor** — re-grep the diff for each `quoted_line`. Drop
    any `fail` whose quote is not a literal substring. This is a hard gate.
-2. **Surface cross-mode findings first.** Any finding with
-   `affects_other_mode: true` leads the report — it is the bug class the
-   single-mode reviewer misses and the whole reason both overlays run.
+2. **Surface `leak.*` findings first, then cross-mode findings.** A `leak.*`
+   finding leads the report: it is the only class here that a follow-up commit
+   cannot fix, because the value survives in git history. Next, any finding with
+   `affects_other_mode: true` — the bug class the single-mode reviewer misses and
+   the whole reason both overlays run.
 3. **Dedupe** across roles by `(file, line, rule)`.
 4. **Under `--runs=2` only**: union runs A and B by `(file, line, rule)`, attach
    `votes: k/2`. Votes annotate confidence; they do not gate the verdict.
@@ -240,9 +260,12 @@ every role's YAML plus `[FULL DIFF]`. The merger must:
 
 ## Step 5 — Output
 
-```
+```text
 Routing: <files> → roles <shared, aot, pyt>
-Coverage: shared 29/29 (2 failed, 9 n/a) · aot 8/8 (1 failed, 5 n/a)
+Coverage: shared 34/34 (2 failed, 9 n/a) · aot 8/8 (1 failed, 5 n/a)
+
+## Leaks (machine-specific paths, internal references)
+<leak.* findings, or "none">
 
 ## Cross-mode hazards
 <findings with affects_other_mode, or "none">
