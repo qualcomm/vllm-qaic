@@ -62,6 +62,11 @@ def _kernel(name: str):
     return getattr(_qaic_custom_ops, name)
 
 
+def _device_grid(x: Tensor | None = None) -> tuple[int, int]:
+    """Return the default launch grid for direct QAIC kernel tests."""
+    return (_NSP_COUNT, _THREAD_COUNT)
+
+
 def _kernel_score_mode(scoring_func: int) -> int:
     """Map public scoring id to the fp16/fp32 score-mode id expected by kernels.
 
@@ -123,7 +128,9 @@ def _grouped_topk_router_op(
 
     num_tokens = x.shape[0]
     num_experts = x.shape[1]
-    topk_weights = torch.empty((num_tokens, topk), dtype=torch.float32, device=x.device)
+    topk_weights = torch.empty(
+        (num_tokens, topk), dtype=torch.float32, device=x.device
+    )
     topk_ids = torch.empty((num_tokens, topk), dtype=torch.int32, device=x.device)
 
     kernel = _kernel("multinsp_multithreaded_grouped_topk_router")
@@ -191,7 +198,9 @@ def _topk_router_op(
 
     num_tokens = x.shape[0]
     num_experts = x.shape[1]
-    topk_weights = torch.empty((num_tokens, topk), dtype=torch.float32, device=x.device)
+    topk_weights = torch.empty(
+        (num_tokens, topk), dtype=torch.float32, device=x.device
+    )
     topk_ids = torch.empty((num_tokens, topk), dtype=torch.int32, device=x.device)
 
     kernel = _kernel("multinsp_multithreaded_topk_router")
@@ -207,6 +216,51 @@ def _topk_router_op(
         float(routed_scaling_factor),
         int(use_bias),
         _kernel_score_mode(scoring_func),
+    )
+    return topk_weights, topk_ids
+
+
+@torch.library.custom_op(
+    "qaic::gemma4_topk_router", mutates_args=(), device_types="qaic"
+)
+def _gemma4_topk_router_op(
+    x: Tensor,
+    per_expert_scale: Tensor,
+    topk: int,
+) -> tuple[Tensor, Tensor]:
+    """Low-level QAIC custom-op wrapper for Gemma4 MoE routing.
+
+    Gemma4 routing selects top-k experts from fp32 router logits, normalizes the
+    selected logits with a selected-only softmax, and folds
+    ``per_expert_scale[topk_ids]`` into the returned routing weights.
+
+    Args:
+        x: Router logits, shape (num_tokens, num_experts), dtype float32.
+        per_expert_scale: Per-expert scale, shape (num_experts,), dtype float32.
+        topk: Number of experts to select per token. The Hexagon implementation
+              currently supports topk <= 32.
+
+    Returns:
+        (topk_weights, topk_ids): weight tensor (num_tokens, topk) float32 and
+        expert-index tensor (num_tokens, topk) int32.
+    """
+
+    num_tokens = x.shape[0]
+    num_experts = x.shape[1]
+    topk_weights = torch.empty(
+        (num_tokens, topk), dtype=torch.float32, device=x.device
+    )
+    topk_ids = torch.empty((num_tokens, topk), dtype=torch.int32, device=x.device)
+
+    kernel = _kernel("multinsp_multithreaded_gemma4_topk_router")
+    kernel[_NSP_COUNT, _THREAD_COUNT](
+        x,
+        per_expert_scale,
+        topk_weights,
+        topk_ids,
+        num_tokens,
+        num_experts,
+        topk,
     )
     return topk_weights, topk_ids
 
@@ -335,3 +389,45 @@ def regular_topk(
         use_bias,
         _scoring_func_id(scoring_func),
     )
+
+
+def gemma4_topk(
+    x: Tensor,
+    topk: int,
+    per_expert_scale: Tensor,
+) -> tuple[Tensor, Tensor]:
+    """Run the QAIC Gemma4 router for fp32 logits.
+
+    This is intentionally separate from ``regular_topk`` because Gemma4 folds a
+    learned per-expert scale into the selected routing weights and its router
+    projection produces fp32 logits.
+    """
+    if x.dtype != torch.float32:
+        raise TypeError(f"gemma4_topk expects fp32 router logits, got {x.dtype}")
+    if x.dim() != 2:
+        raise ValueError(
+            f"gemma4_topk expects rank-2 logits, got shape {tuple(x.shape)}"
+        )
+    if topk <= 0 or topk > 32:
+        raise ValueError(f"gemma4_topk supports 1 <= topk <= 32, got {topk}")
+    if topk > x.shape[-1]:
+        raise ValueError(
+            f"gemma4_topk requires topk <= num_experts, got {topk} > {x.shape[-1]}"
+        )
+    if x.shape[-1] > 1024:
+        raise ValueError(f"gemma4_topk supports <=1024 experts, got {x.shape[-1]}")
+    if per_expert_scale.numel() != x.shape[-1]:
+        raise ValueError(
+            "per_expert_scale must have one element per expert: "
+            f"got {per_expert_scale.numel()} for {x.shape[-1]} experts"
+        )
+
+    x = x.contiguous()
+    if per_expert_scale.dtype != torch.float32 or per_expert_scale.device != x.device:
+        per_expert_scale = per_expert_scale.to(
+            device=x.device, dtype=torch.float32
+        ).contiguous()
+    else:
+        per_expert_scale = per_expert_scale.contiguous()
+
+    return _gemma4_topk_router_op(x, per_expert_scale, topk)
