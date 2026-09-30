@@ -80,3 +80,5 @@ import vllm_qaic.patch.patch_rejection_sampler  # noqa
 import vllm_qaic.patch.patch_graph_pickler  # noqa
 import vllm_qaic.patch.patch_mem_utils  # noqa
 import vllm_qaic.patch.patch_block_table  # noqa
+import vllm_qaic.patch.patch_fp8_kernels  # noqa
+import vllm_qaic.patch.patch_qwen3_5  # noqa
