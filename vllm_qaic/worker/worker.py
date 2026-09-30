@@ -144,7 +144,7 @@ class QaicWorker(WorkerBase):
             return None
 
         tp_rank = get_tp_group().rank_in_group
-        return {tp_rank: metadata}
+        return {(0, tp_rank): metadata}
 
     @torch.inference_mode()
     def sample_tokens(
@@ -631,6 +631,23 @@ class QaicWorkerPyt(QaicWorker):
 
 
 class QaicWorkerAoT(QaicWorker):
+    def _expected_num_gpu_blocks(self) -> int:
+        if self.cache_config.num_gpu_blocks_override:
+            return self.cache_config.num_gpu_blocks_override + 1
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        if (
+            kv_transfer_config is not None
+            and kv_transfer_config.kv_connector
+            in (
+                "NixlConnector",
+                "MooncakeConnector",
+            )
+            and kv_transfer_config.kv_role == "kv_producer"
+        ):
+            return 2 * self.scheduler_config.max_num_seqs + 1
+
+        return self.scheduler_config.max_num_seqs + 1
+
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_cpu_blocks = num_cpu_blocks
         # disable sliding window
@@ -640,7 +657,8 @@ class QaicWorkerAoT(QaicWorker):
         if not self.cache_config.enable_prefix_caching:
             self.cache_config.num_gpu_blocks = num_gpu_blocks
             # Sanity check: AOT requires exact block count; eager is flexible
-            assert num_gpu_blocks == self.scheduler_config.max_num_seqs + 1
+            expected_num_gpu_blocks = self._expected_num_gpu_blocks()
+            assert num_gpu_blocks == expected_num_gpu_blocks
             return
         else:
             raise NotImplementedError("prefix caching is not supported on QAIC in V1")
@@ -703,11 +721,7 @@ class QaicWorkerAoT(QaicWorker):
         pass
 
     def determine_available_memory(self) -> int:
-        num_gpu_blocks = (
-            self.cache_config.num_gpu_blocks_override
-            if self.cache_config.num_gpu_blocks_override
-            else self.scheduler_config.max_num_seqs
-        ) + 1
+        num_gpu_blocks = self._expected_num_gpu_blocks()
         # adapted from get_uniform_page_size
         page_sizes = set(
             layer.page_size_bytes for layer in self.get_kv_cache_spec().values()
