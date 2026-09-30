@@ -43,6 +43,19 @@ For more information about Qualcomm Cloud AI 100, check out:
     - [Qualcomm Cloud AI SDK](https://www.qualcomm.com/artificial-intelligence/data-center/cloud-ai-100-ultra#Software) >= 1.22.0
     - vLLM v0.23.0
 
+### Validated Qwen3-ASR Environment
+
+The Qwen3-ASR QAIC validation used these exact versions:
+
+| Component | Version |
+|---|---|
+| QAIC Platform SDK | `AIC.1.22.0.99` |
+| QAIC Apps SDK | `AIC.1.22.0.99` |
+| Transformers | `5.14.1` |
+| QEfficient | `1.23.0.dev0` |
+| PyTorch | `2.7.0+cpu` |
+| vLLM | `0.23.0` |
+
 ## Getting Started
 
 Please use the following recommended versions to get started quickly:
