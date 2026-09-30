@@ -150,6 +150,53 @@ python examples/qaic_qwen3_asr.py /path/to/audio.wav \
 ```
 
 The example keeps model loading outside the timed request and accepts the QPC, device group, compiler checkout, prefill length, encoder context, and generation limit through command-line options or environment variables.
+
+## Qwen3-ASR Server
+
+The following configuration matches the Qwen3-ASR QPC used for QAIC validation:
+
+- Model: `Qwen/Qwen3-ASR-0.6B-hf`
+- AOT mode with a precompiled QPC
+- One QAIC device, selected by its QID
+- `prefill_seq_len=512`
+- `encoder_ctx_len=3000`
+- `max_model_len=512`
+- Greedy transcription with up to 128 generated tokens
+
+Set the QPC and visible device before starting the server:
+
+```bash
+export QAIC_VISIBLE_DEVICES=0
+export VLLM_QAIC_QPC_PATH=/path/to/qpc
+
+# Optional when testing an unreleased local QEfficient checkout:
+# export VLLM_QAIC_EFFICIENT_TRANSFORMERS=/path/to/efficient-transformers
+```
+
+Start the OpenAI-compatible vLLM server:
+
+```bash
+vllm serve Qwen/Qwen3-ASR-0.6B-hf \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --task transcription \
+  --max-num-seqs 1 \
+  --max-model-len 512 \
+  --max-num-batched-tokens 512 \
+  --limit-mm-per-prompt '{"audio": 1}' \
+  --additional-config '{"device_group":[0],"override_qaic_config":{"prefill_seq_len":512,"encoder_ctx_len":3000}}'
+```
+
+Submit an audio file after the server is ready:
+
+```bash
+curl -X POST http://localhost:8000/v1/audio/transcriptions \
+  -F file=@/path/to/audio.wav \
+  -F model=Qwen/Qwen3-ASR-0.6B-hf
+```
+
+The first server start includes model and QPC loading. Keep the server alive when measuring request latency so initialization is not included in every request. See the [Qwen3-ASR guide](docs/docs/user_guide/features/qwen3_asr.md) for the direct one-file test and persistent benchmark.
+
 ## Models Supported
 
 ### Ahead-of-Time Compiled Mode
