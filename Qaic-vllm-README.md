@@ -56,6 +56,21 @@ The Qwen3-ASR QAIC validation used these exact versions:
 | PyTorch | `2.7.0+cpu` |
 | vLLM | `0.23.0` |
 
+### Qwen3-ASR Pull Requests
+
+The Qwen3-ASR integration is tested with these pull requests:
+
+| Component | Pull request |
+|---|---|
+| efficient-transformers / QEfficient | https://github.com/quic/efficient-transformers/pull/1276 |
+| vLLM-QAIC | https://github.com/qualcomm/vllm-qaic/pull/146 |
+
+The AOT runtime dependency file is:
+
+```text
+requirements-qwen3-asr-aot.txt
+```
+
 ## Getting Started
 
 Please use the following recommended versions to get started quickly:
@@ -163,6 +178,140 @@ python examples/qaic_qwen3_asr.py /path/to/audio.wav \
 ```
 
 The example keeps model loading outside the timed request and accepts the QPC, device group, compiler checkout, prefill length, encoder context, and generation limit through command-line options or environment variables.
+
+### Reproducible Qwen3-ASR Setup
+
+The following commands fetch the exact PRs used for Qwen3-ASR. Run them on a
+Linux host with Python 3.12, a compatible Qualcomm Cloud AI SDK, and an
+available AI100 device.
+
+```bash
+mkdir qwen3-asr-qaic
+cd qwen3-asr-qaic
+
+git clone https://github.com/quic/efficient-transformers.git efficient-transformers
+cd efficient-transformers
+git fetch origin pull/1276/head:qeff-pr-1276
+git checkout qeff-pr-1276
+cd ..
+
+git clone https://github.com/qualcomm/vllm-qaic.git vllm-qaic
+cd vllm-qaic
+git fetch origin pull/146/head:vllm-qaic-pr-146
+git checkout vllm-qaic-pr-146
+cd ..
+
+python3.12 -m venv .venv
+source .venv/bin/activate
+
+python -m pip install \
+  -r vllm-qaic/requirements-qwen3-asr-aot.txt
+
+python -m pip install \
+  --editable ./efficient-transformers \
+  --no-deps
+
+cd vllm-qaic
+./scripts/install.sh aot
+python -m pip install \
+  --editable . \
+  --no-build-isolation
+cd ..
+
+# The installer may install upstream QEfficient; restore the local PR.
+python -m pip install \
+  --editable ./efficient-transformers \
+  --no-deps
+```
+
+Verify that the local PRs are imported:
+
+```bash
+python - <<'PY'
+import QEfficient
+import transformers
+import vllm
+
+print("QEfficient:", QEfficient.__file__)
+print("Transformers:", transformers.__version__)
+print("vLLM:", vllm.__file__)
+PY
+```
+
+`QEfficient.__file__` must point to the local `efficient-transformers`
+checkout. The vLLM import must point to the local `vllm-qaic` checkout.
+
+Set the runtime environment:
+
+```bash
+export QAIC_VISIBLE_DEVICES=<available-ai100-device-id>
+export VLLM_QAIC_EFFICIENT_TRANSFORMERS=$PWD/efficient-transformers
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+```
+
+Compile a 30-second, zero-overlap QPC using the Qwen3-ASR compile helper
+provided with the project:
+
+```bash
+python tools/compile_qwen3_asr.py \
+  --model Qwen/Qwen3-ASR-0.6B-hf \
+  --chunk-seconds 30 \
+  --context-length 512 \
+  --batch-size 1 \
+  --num-cores 8 \
+  --device-id "$QAIC_VISIBLE_DEVICES" \
+  --output-dir "$PWD/qpc"
+```
+
+The resulting QPC directory must contain `programqpc.bin`. Set its path:
+
+```bash
+export VLLM_QAIC_QPC_PATH="$(dirname "$(find "$PWD/qpc" -name programqpc.bin -print -quit)")"
+test -f "$VLLM_QAIC_QPC_PATH/programqpc.bin"
+```
+
+Run a direct test:
+
+```bash
+python vllm-qaic/examples/qaic_qwen3_asr.py \
+  <audio-file> \
+  --device-ids "$QAIC_VISIBLE_DEVICES" \
+  --qpc-path "$VLLM_QAIC_QPC_PATH" \
+  --efficient-transformers "$VLLM_QAIC_EFFICIENT_TRANSFORMERS" \
+  --prefill-seq-len 512 \
+  --encoder-ctx-len 3000 \
+  --max-model-len 512 \
+  --max-tokens 128
+```
+
+Start the OpenAI-compatible server:
+
+```bash
+vllm serve Qwen/Qwen3-ASR-0.6B-hf \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --task transcription \
+  --max-num-seqs 1 \
+  --max-model-len 512 \
+  --max-num-batched-tokens 512 \
+  --limit-mm-per-prompt '{"audio": 1}' \
+  --additional-config \
+  "{\"device_group\":[${QAIC_VISIBLE_DEVICES}],\"override_qaic_config\":{\"prefill_seq_len\":512,\"encoder_ctx_len\":3000}}"
+```
+
+Send an audio request:
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/audio/transcriptions \
+  -F "file=@<audio-file>" \
+  -F "model=Qwen/Qwen3-ASR-0.6B-hf"
+```
+
+Keep the server alive while measuring latency. The first startup includes
+model and QPC loading. For long audio, split the input in the application
+into 30-second chunks and merge the returned text. A 0- or 5-second overlap
+is an application setting and does not require a new QPC.
 
 ## Qwen3-ASR Server
 
