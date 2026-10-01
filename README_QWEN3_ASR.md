@@ -21,18 +21,28 @@ python -m pip install -e .
 python -m pip install --force-reinstall --no-deps transformers==5.14.1
 ```
 
-Run the Qwen3-ASR compile script included in this PR:
+Run the Qwen3-ASR compiler included in this PR:
 
 ```bash
-python <QEFF_COMPILE_SCRIPT> \
-  --model Qwen/Qwen3-ASR-0.6B-hf \
-  --output-dir <QPC_OUTPUT_DIR>
+cd efficient-transformers
+
+python qwen_asr_onefile.py compile \
+  --model-id Qwen/Qwen3-ASR-0.6B-hf \
+  --chunk-seconds 30 \
+  --ctx-len 512 \
+  --batch-size 1 \
+  --num-cores 8 \
+  --device-ids <AI100_DEVICE_ID> \
+  --qeff-root "$PWD" \
+  --output-root <QPC_OUTPUT_ROOT>
+
+cd ..
 ```
 
 The compile output must contain:
 
 ```text
-<QPC_OUTPUT_DIR>/programqpc.bin
+<QPC_OUTPUT_ROOT>/<timestamp>/qeff_home/**/programqpc.bin
 ```
 
 ## 2. Serve with vLLM-QAIC PR 146
@@ -86,4 +96,3 @@ print("Transformers:", transformers.__version__)
 assert transformers.__version__ == "5.14.1"
 PY
 ```
-
