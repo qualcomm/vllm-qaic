@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     VLLM_QAIC_MOS: int | None = None
     VLLM_QAIC_NUM_CORES: int | None = None
     VLLM_QAIC_QPC_PATH: str | None = None
+    VLLM_QAIC_EFFICIENT_TRANSFORMERS: str | None = None
     VLLM_TORCH_QAIC_PROFILER_DIR: str | None = None
 
 # --8<-- [start:env-vars-definition]
@@ -35,6 +36,7 @@ qaic_environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_QAIC_NUM_CORES", None)
     ),
     "VLLM_QAIC_QPC_PATH": lambda: os.getenv("VLLM_QAIC_QPC_PATH", None),
+    "VLLM_QAIC_EFFICIENT_TRANSFORMERS": lambda: os.getenv("VLLM_QAIC_EFFICIENT_TRANSFORMERS", None),
     "VLLM_TORCH_QAIC_PROFILER_DIR": lambda: os.getenv(
         "VLLM_TORCH_QAIC_PROFILER_DIR", None
     ),

@@ -7,6 +7,7 @@
 
 import json
 import os
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -50,6 +51,13 @@ from vllm_qaic.utils.qaic_utils import _clean_config, compute_max_decode_tokens
 logger = init_logger(__name__)
 
 lock = threading.Lock()
+
+
+def _use_local_efficient_transformers() -> None:
+    """Allow a checkout under test to provide the QEfficient package."""
+    path = os.environ.get("VLLM_QAIC_EFFICIENT_TRANSFORMERS")
+    if path and os.path.isdir(path) and path not in sys.path:
+        sys.path.insert(0, path)
 
 
 class QaicCompilationComplete(Exception):
@@ -166,6 +174,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
 
         self.num_logits_to_keep: int | None = None
         self.decode_logits: dict[str, np.ndarray] | None = None
+        self.non_retained_output_buffers: dict[str, np.ndarray] = {}
         self.is_spec_decode_target_model = False
 
         # Variable-K decode specializations: compile with [0, K] for ngram/suffix
@@ -198,6 +207,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             _d: dict = {
                 "input_ids": np.full((self.decode_bsz, _mdt), -1, dtype=np.int64),
                 "position_ids": np.full((self.decode_bsz, _mdt), -1, dtype=np.int64),
+                "attention_mask": np.ones((self.decode_bsz, _mdt), dtype=np.int64),
                 "batch_index": np.full((self.decode_bsz, 1), -1, dtype=np.int64),
             }
             if self.lora_mode:
@@ -407,6 +417,19 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self.logits_dtype = (
             np.dtype(_logits_info[1]) if _logits_info is not None else np.float32
         )
+
+        # Speech QPCs can expose auxiliary outputs in addition to logits.
+        # Allocate these from the descriptor so every runtime submission binds
+        # the complete QPC ABI, including outputs such as audio_embeds.3.
+        for output_name in self.session.output_names:
+            if output_name == "logits" or self.session._is_kv_cache_name(output_name):
+                continue
+            output_info = self.get_io_shape_and_dtype(output_name, is_input=False)
+            if output_info is not None:
+                output_shape, output_dtype, _ = output_info
+                self.non_retained_output_buffers[output_name] = np.empty(
+                    output_shape, dtype=output_dtype
+                )
 
         e = time.perf_counter() - s
         logger.info("Successfully loaded QPC in %s secs", e)
@@ -649,6 +672,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 chunk_inputs["lora_ids"] = lora_ids
             if mm_kwargs_list and (mm_kwargs := mm_kwargs_list[index]):
                 chunk_inputs.update(mm_kwargs)
+            if self.non_retained_output_buffers:
+                chunk_inputs.update(self.non_retained_output_buffers)
 
             # chunk the request
             n_chunks: int = iids.shape[-1] // self.prefill_seq_len
@@ -792,6 +817,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 chunk_inputs["lora_ids"] = lora_index
             if mm_kwargs_list and (mm_kwargs := mm_kwargs_list[i]):
                 chunk_inputs.update(mm_kwargs)
+            if self.non_retained_output_buffers:
+                chunk_inputs.update(self.non_retained_output_buffers)
             # chunk the request
             n_chunks: int = iids.shape[-1] // self.prefill_seq_len
 
@@ -805,6 +832,10 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 chunk_inputs["input_ids"] = iids[lower_idx:upper_idx].reshape(
                     1, self.prefill_seq_len
                 )
+                if "attention_mask" in self.session.input_names:
+                    chunk_inputs["attention_mask"] = (
+                        chunk_inputs["input_ids"] != -1
+                    ).astype(np.int64)
                 # Reconstruct mm_token_type_ids from input_ids: positions where
                 # input_ids == image_token_id get value 1, all others get 0.
                 # This tells the decoder which tokens are image embeddings.
@@ -897,12 +928,15 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 num_decodes, mdt
             )
         batch_inputs["logits"] = logits
+        if self.non_retained_output_buffers:
+            batch_inputs.update(self.non_retained_output_buffers)
         # DFlash: capture TLM decode hidden states for the DLM.
         if dflash_decode_hidden_buf is not None:
             batch_inputs["hidden_states"] = dflash_decode_hidden_buf
         if num_decodes < self.decode_bsz:
             batch_inputs["input_ids"][num_decodes:] = -1
             batch_inputs["position_ids"][..., num_decodes:, :] = -1
+            batch_inputs["attention_mask"][num_decodes:] = 0
 
         if not self.ignore_batch_index:
             batch_inputs["batch_index"][:num_decodes, 0] = batch_indices
@@ -1543,6 +1577,7 @@ def load_qaic_model(
                 vllm_config.additional_config,
             )
 
+            _use_local_efficient_transformers()
             from QEfficient import (
                 QEFFAutoModel,
                 QEFFAutoModelForCTC,
@@ -1788,6 +1823,7 @@ def get_hf_model(
     additional_config: dict | None = None,
 ):
     logger.info("Downloading model from Hugging face server")
+    _use_local_efficient_transformers()
     from QEfficient import (
         QEFFAutoModel,
         QEFFAutoModelForCausalLM,
@@ -1857,7 +1893,7 @@ def get_hf_model(
 
     model_type = "lora" if lora_config else "default"
     if model_config.is_multimodal_model:
-        if model_config.hf_config.model_type == "whisper":
+        if model_config.hf_config.model_type in ("whisper", "qwen3_asr"):
             model_type = "speech"
             del args["kv_offload"]
         elif model_config.hf_config.model_type != "internvl_chat":
@@ -2139,11 +2175,16 @@ def _get_qaic_compile_config(
         else:
             # Audio models (e.g. Whisper):
             # QEff requires fixed prefill_seq_len=1, no batching.
-            if "encoder_ctx_len" not in cfg:
-                cfg["encoder_ctx_len"] = getattr(
-                    hf_config, "max_source_positions", None
-                )
-            cfg["prefill_seq_len"] = 1
+            if hf_config.model_type == "qwen3_asr":
+                cfg.setdefault("prefill_seq_len", 512)
+                if not cfg.get("encoder_ctx_len"):
+                    cfg["encoder_ctx_len"] = 3000
+            else:
+                if "encoder_ctx_len" not in cfg:
+                    cfg["encoder_ctx_len"] = getattr(
+                        hf_config, "max_source_positions", None
+                    )
+                cfg["prefill_seq_len"] = 1
 
         if kv_offload:
             # Dual QPC approach: select which QPC to load based on which path

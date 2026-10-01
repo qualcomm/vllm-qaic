@@ -132,6 +132,7 @@ nav:
           - Disaggregated Serving: user_guide/features/disaggregated_serving.md
           - LoRA: user_guide/features/lora.md
           - Encoder-Decoder: user_guide/features/encoder_decoder.md
+          - Qwen3-ASR: user_guide/features/qwen3_asr.md
           - Embedding: user_guide/features/embedding.md
           - CCL: user_guide/features/ccl.md
       - Configuration:

@@ -1061,7 +1061,9 @@ class QaicModelRunnerAoT(GPUModelRunner):
         scheduler_output: SchedulerOutput,
     ) -> list[dict]:
         mm_kwargs_list = []
-        is_encoder_decoder = self.model_config.is_encoder_decoder
+        is_encoder_decoder = self.model_config.is_encoder_decoder or (
+            self.model_config.hf_config.model_type == "qwen3_asr"
+        )
         if is_encoder_decoder:
             for req in scheduler_output.scheduled_new_reqs:
                 if len(req.mm_features) != 1 or req.mm_features[0].data is None:
@@ -1897,7 +1899,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
 
     def get_supported_generation_tasks(self) -> list[GenerationTask]:
         supported_tasks = list[GenerationTask]()
-        if self.model.config.model_type == "whisper":
+        if self.model.config.model_type in ("whisper", "qwen3_asr", "cohere2"):
             supported_tasks.append("transcription")
         else:
             supported_tasks.append("generate")

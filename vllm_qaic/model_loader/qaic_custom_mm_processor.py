@@ -28,6 +28,9 @@ from transformers.utils.import_utils import (
 )
 
 from vllm_qaic.logger import init_logger
+from vllm_qaic.model_loader.qaic_qwen3_asr_processor import (
+    QAIC_QWEN3_ASR_PROCESSOR,
+)
 from vllm.model_executor.models.gemma3_mm import (
     Gemma3DummyInputsBuilder,
     Gemma3ForConditionalGeneration,
@@ -690,6 +693,7 @@ class QaicQwen3_5MoeProcessingInfo(QaicQwen3VLProcessingInfo, Qwen3_5MoeProcessi
 
 def register_qaic_custom_mm_processor(model_type: str):
     MODEL_PROCESSOR_MAP = {
+        "qwen3_asr": QAIC_QWEN3_ASR_PROCESSOR,
         "qwen2_5_vl": (
             QaicQwen2_5_VLMultiModalProcessor,
             QaicQwen2_5_VLProcessingInfo,

@@ -316,13 +316,15 @@ class QaicPlatform(Platform):
                 cache_config.block_size = model_config.max_model_len  # ctx_len
 
         if cls.is_aot:
-            if model_config.hf_config.model_type == "whisper":
+            if model_config.hf_config.model_type in ("whisper", "qwen3_asr"):
                 # Whisper is an encoder-decoder model: vLLM disables chunked prefill
                 # and sets long_prefill_token_threshold to 0, so the formula above
                 # would give 0. Use max_source_positions (the encoder input length)
                 # as the budget instead, matching the pattern in qaic_whisper.py.
-                scheduler_config.max_num_batched_tokens = getattr(
-                    model_config.hf_config, "max_source_positions", 1500
+                scheduler_config.max_num_batched_tokens = (
+                    3000
+                    if model_config.hf_config.model_type == "qwen3_asr"
+                    else getattr(model_config.hf_config, "max_source_positions", 1500)
                 )
             else:
                 __prefill_seq_len = override_qaic_config.get("prefill_seq_len", 0)
@@ -467,7 +469,7 @@ class QaicPlatform(Platform):
 
         if cls.is_aot:
             model_type = model_config.hf_config.model_type
-            if model_config.is_multimodal_model and model_type != "whisper":
+            if model_config.is_multimodal_model and model_type not in ("whisper", "qwen3_asr"):
                 cls._configure_multimodal_model(
                     vllm_config, model_config, scheduler_config, model_type
                 )
