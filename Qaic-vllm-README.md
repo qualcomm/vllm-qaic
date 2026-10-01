@@ -51,7 +51,7 @@ The Qwen3-ASR QAIC validation used these exact versions:
 |---|---|
 | QAIC Platform SDK | `AIC.1.22.0.99` |
 | QAIC Apps SDK | `AIC.1.22.0.99` |
-| Transformers | `5.5.4` (QEfficient PR 1276 dependency) |
+| Transformers | `5.14.1` (required by Qwen3-ASR) |
 | QEfficient | `1.23.0.dev0` |
 | PyTorch | `2.7.0+cpu` |
 | vLLM | `0.23.0` |
