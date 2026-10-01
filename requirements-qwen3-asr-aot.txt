@@ -16,5 +16,7 @@ torch==2.7.0+cpu
 torchvision==0.22.0+cpu
 numpy==1.26.4
 transformers==5.5.4
+scipy==1.14.1
+scikit-learn==1.5.2
 librosa>=0.10.2,<1.0
 soundfile>=0.12.1,<1.0
