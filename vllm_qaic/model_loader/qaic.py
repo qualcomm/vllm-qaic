@@ -135,12 +135,14 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
 
         self.config = config
         self.vocab_size = config.get_text_config().vocab_size
-        # `long_prefill_token_threshold` will define prefill chunk length
+        # `long_prefill_token_threshold` will define prefill chunk length.
+        # Compiler profiles may supply a scalar or specialized shape list.
+        self.prefill_seq_len: Any
         if self.config.model_type == "whisper":
             # Encoder-decoder models have chunked prefill disabled by vllm,
             # but QAIC still requires a prefill sequence length.
             # For whisper, the prefill sequence length is fixed to 1.
-            self.prefill_seq_len: int = 1
+            self.prefill_seq_len = 1
         else:
             assert "prefill_seq_len" in override_qaic_config, (
                 "Prefill seq_len missing in override_qaic_config"
@@ -1018,6 +1020,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         output = self.encode_num_logits_buffer
         assert output is not None, "encode buffer not initialized"
         output_array = output[output_key][: len(prefill_cum_sum)]
+        # Decode the raw BF16 carrier before vLLM consumes BF16 outputs.
+        output_array = self.session.to_host_array(output_key, output_array)
         output_tensor = torch.tensor(output_array)
 
         if not self.is_qaic_pooler and output_key != "logits":
@@ -1066,8 +1070,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
     def run_encode(
         self,
         qpc_inputs: dict,
-        output_key: str | None = None,
-        encode_num_logits_buffer: dict | None = None,
+        output_key: str,
+        encode_num_logits_buffer: dict,
     ) -> dict:
         """Run encode (embedding) inference on the QPC.
 
@@ -1850,6 +1854,11 @@ def get_hf_model(
         "config": hf_config,
         "kv_offload": kv_offload,
     }
+    # Match QEfficient's native-BF16 inference path explicitly. Forwarding
+    # vLLM's resolved dtype makes the from_pretrained contract unambiguous and
+    # prevents an implicit dtype choice from changing the export/QPC cache.
+    if model_config.dtype == torch.bfloat16:
+        args["torch_dtype"] = torch.bfloat16
 
     if override_qaic_config and override_qaic_config.get("pretrained_extra_args", None):
         args.update(override_qaic_config["pretrained_extra_args"])

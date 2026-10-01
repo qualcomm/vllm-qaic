@@ -10,6 +10,7 @@ from queue import Queue
 from typing import Any
 
 import numpy as np
+import torch
 
 from vllm_qaic.logger import init_logger
 
@@ -31,6 +32,56 @@ import QAicApi_pb2 as aicapi
 
 logger = init_logger(__name__)
 
+# NumPy has no BF16 dtype. Follow QEfficient's raw two-byte storage convention:
+# https://github.com/quic/efficient-transformers/blob/90f37b914fb808c3e438a186ff4dfac501fd838a/QEfficient/generation/cloud_infer.py#L105
+# LRT receives IEEE BF16 bits in an np.float16 storage view; values in that view
+# must never be numerically interpreted as FP16.
+BFLOAT16_STORAGE_DTYPE = np.dtype(np.float16)
+BFLOAT16_TYPE = getattr(aicapi, "BFLOAT16_TYPE", None)
+
+
+def float_to_bfloat16_storage(values: Any) -> np.ndarray:
+    """Return raw BF16 storage compatible with QEfficient and LRT bindings.
+
+    A NumPy float16 value passed to a BF16 binding is already assumed to be a
+    raw BF16 storage view, so it is preserved without numeric conversion.
+    """
+    from_torch = isinstance(values, torch.Tensor)
+    if from_torch:
+        tensor = values.detach()
+        if tensor.device.type != "cpu":
+            tensor = tensor.cpu()
+        tensor = tensor.contiguous()
+        if tensor.dtype == torch.bfloat16:
+            # Tensor.numpy() does not support BF16; expose the unchanged bits.
+            return tensor.view(torch.int16).numpy().view(BFLOAT16_STORAGE_DTYPE)
+        array = tensor.numpy()
+    else:
+        array = np.asarray(values)
+
+    array = np.ascontiguousarray(array)
+    if not from_torch and array.dtype == BFLOAT16_STORAGE_DTYPE:
+        return array
+    if not array.flags.writeable:
+        array = array.copy()
+    # Match QEfficient's numerical-to-BF16 conversion before relabeling raw bytes.
+    return (
+        torch.from_numpy(array)
+        .to(torch.bfloat16)
+        .view(torch.int16)
+        .numpy()
+        .view(BFLOAT16_STORAGE_DTYPE)
+    )
+
+
+def bfloat16_storage_to_float32(values: np.ndarray) -> np.ndarray:
+    """Decode raw BF16 storage for a host-side numerical consumer."""
+    storage = np.ascontiguousarray(values)
+    if storage.dtype != BFLOAT16_STORAGE_DTYPE:
+        raise TypeError("Expected an np.float16 raw BF16 storage view")
+    return (storage.view(np.uint16).astype(np.uint32) << np.uint32(16)).view(np.float32)
+
+
 aic_to_np_dtype_mapping = {
     aicapi.FLOAT_TYPE: np.dtype(np.float32),
     aicapi.FLOAT_16_TYPE: np.dtype(np.float16),
@@ -42,6 +93,8 @@ aic_to_np_dtype_mapping = {
     aicapi.INT64_I_TYPE: np.dtype(np.int64),
     aicapi.INT8_TYPE: np.dtype(np.int8),
 }
+if BFLOAT16_TYPE is not None:
+    aic_to_np_dtype_mapping[BFLOAT16_TYPE] = BFLOAT16_STORAGE_DTYPE
 VLLM_QAIC_PREFILL_QUEUE_LEN_ENV = "VLLM_QAIC_PREFILL_QUEUE_LEN"
 VLLM_QAIC_ASYNC_SCHEDULING_EXEC_TIMEOUT_ENV = "VLLM_QAIC_ASYNC_SCHEDULING_EXEC_TIMEOUT"
 VLLM_KV_CACHE_PREFIX = "vllmKvCache"
@@ -425,8 +478,33 @@ class QAICInferenceSession:
             self.program.deactivate()
             self.activate_done = False
 
+    def is_bfloat16_binding(self, binding_name: str) -> bool:
+        """Return whether a named QPC binding has BF16 element storage."""
+        if binding_name not in self.binding_index_map:
+            return False
+        return (
+            BFLOAT16_TYPE is not None
+            and self.bindings[self.binding_index_map[binding_name]].type
+            == BFLOAT16_TYPE
+        )
+
+    def _to_lrt_buffer(self, binding_index: int, buffer: Any) -> np.ndarray:
+        """Create the contiguous buffer required by a BF16 LRT binding."""
+        if (
+            BFLOAT16_TYPE is not None
+            and self.bindings[binding_index].type == BFLOAT16_TYPE
+        ):
+            return float_to_bfloat16_storage(buffer)
+        return np.ascontiguousarray(buffer)
+
+    def to_host_array(self, binding_name: str, buffer: np.ndarray) -> np.ndarray:
+        """Decode a BF16 binding to float32; leave all other bindings unchanged."""
+        if self.is_bfloat16_binding(binding_name):
+            return bfloat16_storage_to_float32(buffer)
+        return buffer
+
     def get_tuple_list_from_dict(self, dict_in):
-        # Convert the buffer_dict to a list of tuples
+        # Convert the buffer_dict to a list of tuples.
         buffer_idx_to_buffer = []
         for buffer_name, buffer in dict_in.items():
             if buffer_name not in self.binding_index_map:
@@ -540,8 +618,16 @@ class QAICInferenceSession:
         return buffers
 
     def _make_inputs_contiguous(self, inputs: dict) -> None:
-        for k, v in inputs.items():
-            inputs[k] = np.ascontiguousarray(v)
+        for name, buffer in inputs.items():
+            binding_index = self.binding_index_map.get(name)
+            if (
+                binding_index is not None
+                and BFLOAT16_TYPE is not None
+                and self.bindings[binding_index].type == BFLOAT16_TYPE
+            ):
+                inputs[name] = float_to_bfloat16_storage(buffer)
+            else:
+                inputs[name] = np.ascontiguousarray(buffer)
 
     def np_run(
         self,
