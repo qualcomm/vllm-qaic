@@ -195,10 +195,10 @@ git fetch origin pull/1276/head:qeff-pr-1276
 git checkout qeff-pr-1276
 cd ..
 
-git clone \
-  --branch feature/add-qwen-asr \
-  https://github.com/Khaled-Qualcomm/vllm-qaic.git \
-  vllm-qaic
+git clone https://github.com/qualcomm/vllm-qaic.git vllm-qaic
+cd vllm-qaic
+git fetch origin pull/146/head:vllm-qaic-pr-146
+git checkout vllm-qaic-pr-146
 cd ..
 
 python3.12 -m venv .venv
