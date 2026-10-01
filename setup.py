@@ -3,12 +3,13 @@
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 # ------------------------------------------------------------------
 
-import sys
 import glob
 import importlib.util
 import logging
 import os
 import os.path as osp
+import re
+import sys
 from pathlib import Path
 
 from setuptools import Extension, find_packages, setup
@@ -40,15 +41,53 @@ _torch_qaic_installed = (
 )
 
 
+def _version_key(path: str) -> tuple[int, ...]:
+    name = osp.basename(path.rstrip(osp.sep))
+    version = name.removeprefix("hexagon_tools-")
+    return tuple(int(part) for part in re.findall(r"\d+", version))
+
+
+def _get_hexagon_tools_dir() -> str:
+    """Return a Hexagon tools directory compatible with versioned SDK layouts."""
+    env_path = os.environ.get("HEXAGON_TOOLS_DIR")
+    if env_path:
+        return env_path
+
+    default_path = "/opt/qti-aic/dev/hexagon_tools"
+    if osp.exists(osp.join(default_path, "bin", "hexagon-clang++")):
+        return default_path
+
+    candidates = [
+        path
+        for path in glob.glob("/opt/qti-aic/dev/hexagon_tools-*")
+        if osp.exists(osp.join(path, "bin", "hexagon-clang++"))
+    ]
+    if candidates:
+        resolved = max(candidates, key=_version_key)
+        os.environ["HEXAGON_TOOLS_DIR"] = resolved
+        return resolved
+
+    return default_path
+
+
+def _patch_hexagon_extension_tools(HexagonKernelExtension) -> None:
+    hexagon_tools = _get_hexagon_tools_dir()
+    HexagonKernelExtension.HEXAGON_COMPILER = osp.join(
+        hexagon_tools, "bin", "hexagon-clang++"
+    )
+    HexagonKernelExtension.HEXAGON_OBJDUMP_BIN = osp.join(
+        hexagon_tools, "bin", "hexagon-llvm-objdump"
+    )
+    HexagonKernelExtension._get_hexagon_tools_dir = staticmethod(lambda: hexagon_tools)
+
+
 def _make_hexagon_ext(sources, device_arch, extra_compile_args, extra_link_args):
     """Build the Hexagon kernel Extension without importing torch_qaic._C.
 
     Replicates HexagonKernelExtension.__init__ using only stdlib + setuptools.
     Used when QAIC_DEVICE_ARCH is set (Docker build envs without live devices).
     """
-    hexagon_tools = os.environ.get(
-        "HEXAGON_TOOLS_DIR", "/opt/qti-aic/dev/hexagon_tools"
-    )
+    hexagon_tools = _get_hexagon_tools_dir()
     jit_inc = os.environ.get(
         "QAIC_PLATFORM_JIT_INCLUDE_DIR", "/opt/qti-aic/dev/inc/jit"
     )
@@ -150,6 +189,7 @@ def get_qaic_extensions() -> list[Extension]:
         HexagonKernelExtension,
     )
 
+    _patch_hexagon_extension_tools(HexagonKernelExtension)
     device_arch = _get_device_arch()
     print(f"Device arch: {device_arch}")
     print(f"QAIC extension sources: {qaic_sources}")
@@ -209,6 +249,8 @@ def get_qaic_build_ext():
 
     from torch_qaic.custom_ops.build_utils import QAicBuildExt, HexagonKernelExtension
     import os.path as osp
+
+    _patch_hexagon_extension_tools(HexagonKernelExtension)
 
     class QAicBuildExtWithMkdir(QAicBuildExt):
         def get_ext_filename(self, ext_name):
