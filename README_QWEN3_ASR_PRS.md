@@ -1,5 +1,8 @@
 # Qwen3-ASR PR Setup
 
+For the concise compile-then-serve instructions, use
+[`README_QWEN3_ASR.md`](README_QWEN3_ASR.md).
+
 This file covers only the Qwen3-ASR pull requests:
 
 - QEfficient PR 1276: https://github.com/quic/efficient-transformers/pull/1276
@@ -110,4 +113,3 @@ python vllm-qaic/examples/qaic_qwen3_asr.py \
   --max-model-len 512 \
   --max-tokens 128
 ```
-
