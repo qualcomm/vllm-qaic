@@ -195,21 +195,42 @@ git fetch origin pull/1276/head:qeff-pr-1276
 git checkout qeff-pr-1276
 cd ..
 
-git clone https://github.com/qualcomm/vllm-qaic.git vllm-qaic
-cd vllm-qaic
-git fetch origin pull/146/head:vllm-qaic-pr-146
-git checkout vllm-qaic-pr-146
+git clone \
+  --branch feature/add-qwen-asr \
+  https://github.com/Khaled-Qualcomm/vllm-qaic.git \
+  vllm-qaic
 cd ..
 
 python3.12 -m venv .venv
 source .venv/bin/activate
 
+# Install the base Qwen runtime dependencies.
 python -m pip install \
   -r vllm-qaic/requirements-qwen3-asr-aot.txt
 
+# Install the local QEfficient PR with its complete dependency set. This may
+# temporarily select the dependency versions declared by the QEfficient PR.
 python -m pip install \
-  --editable ./efficient-transformers \
-  --no-deps
+  --editable ./efficient-transformers
+
+# Qwen3-ASR requires Transformers 5.14.1. Verify the required transition.
+python -m pip install \
+  --force-reinstall \
+  --no-deps \
+  transformers==5.14.1
+
+python -m pip install \
+  --force-reinstall \
+  --no-deps \
+  numpy==1.26.4 \
+  scipy==1.14.1 \
+  scikit-learn==1.5.2
+
+python - <<'PY'
+import transformers
+assert transformers.__version__ == "5.14.1", transformers.__version__
+print("Transformers before vLLM-QAIC install:", transformers.__version__)
+PY
 
 cd vllm-qaic
 ./scripts/install.sh aot
@@ -218,10 +239,19 @@ python -m pip install \
   --no-build-isolation
 cd ..
 
-# The installer may install upstream QEfficient; restore the local PR.
+# The installer may install upstream QEfficient and downgrade Transformers.
+# Restore the local QEfficient PR and force the Qwen runtime version again.
 python -m pip install \
   --editable ./efficient-transformers \
   --no-deps
+
+python -m pip install \
+  --force-reinstall \
+  --no-deps \
+  transformers==5.14.1 \
+  numpy==1.26.4 \
+  scipy==1.14.1 \
+  scikit-learn==1.5.2
 ```
 
 Verify that the local PRs are imported:
@@ -235,6 +265,10 @@ import vllm
 print("QEfficient:", QEfficient.__file__)
 print("Transformers:", transformers.__version__)
 print("vLLM:", vllm.__file__)
+
+assert transformers.__version__ == "5.14.1"
+assert "efficient-transformers" in QEfficient.__file__
+assert "vllm-qaic" in vllm.__file__
 PY
 ```
 
