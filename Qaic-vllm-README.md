@@ -347,51 +347,46 @@ model and QPC loading. For long audio, split the input in the application
 into 30-second chunks and merge the returned text. A 0- or 5-second overlap
 is an application setting and does not require a new QPC.
 
-## Qwen3-ASR Server
+## Qwen3-ASR Results
 
-The following configuration matches the Qwen3-ASR QPC used for QAIC validation:
+These results were measured with `Qwen/Qwen3-ASR-0.6B-hf` on one Qualcomm Cloud AI 100 using SDK `AIC.1.22.0.99`, QPC FP16, batch size 1, 30-second chunks, zero overlap, generation limit 128, EOS stopping enabled, and one QPC session reused across all requests. One warmup request was excluded from timing.
 
-- Model: `Qwen/Qwen3-ASR-0.6B-hf`
-- AOT mode with a precompiled QPC
-- One QAIC device, selected by its QID
-- `prefill_seq_len=512`
-- `encoder_ctx_len=3000`
-- `max_model_len=512`
-- Greedy transcription with up to 128 generated tokens
+### Performance
 
-Set the QPC and visible device before starting the server:
+The host-SDK benchmark covered 81 audio files and 174 chunks. The measured wall time was 1451.740 seconds, with 0.641 seconds of excluded warmup.
 
-```bash
-export QAIC_VISIBLE_DEVICES=0
-export VLLM_QAIC_QPC_PATH=/path/to/qpc
+| Workload | Files | Mean whole-clip E2E | P50 | P90 | RTFx |
+|---|---:|---:|---:|---:|---:|
+| English, 40 seconds | 16 | 13.465 s | 13.251 s | 15.406 s | 2.9893x |
+| English, 50 seconds | 16 | 15.475 s | 14.994 s | 17.218 s | 3.2605x |
+| English, 60 seconds | 16 | 19.516 s | 19.879 s | 21.481 s | 3.0902x |
+| Arabic, 40 seconds | 10 | 16.585 s | 16.624 s | 17.536 s | 2.4423x |
+| Arabic, 50 seconds | 16 | 21.578 s | 21.259 s | 23.989 s | 2.3352x |
+| Arabic, 60 seconds | 7 | 23.622 s | 23.692 s | 23.695 s | 2.5216x |
 
-# Optional when testing an unreleased local QEfficient checkout:
-# export VLLM_QAIC_EFFICIENT_TRANSFORMERS=/path/to/efficient-transformers
-```
+Overall mean chunk E2E was 8.334 seconds, with P50 9.061 seconds and P90 11.844 seconds. Overall mean whole-clip E2E was 17.923 seconds, with P50 17.125 seconds and P90 23.579 seconds.
 
-Start the OpenAI-compatible vLLM server:
+### Accuracy
 
-```bash
-vllm serve Qwen/Qwen3-ASR-0.6B-hf \
-  --host 0.0.0.0 \
-  --port 8000 \
-  --task transcription \
-  --max-num-seqs 1 \
-  --max-model-len 512 \
-  --max-num-batched-tokens 512 \
-  --limit-mm-per-prompt '{"audio": 1}' \
-  --additional-config '{"device_group":[0],"override_qaic_config":{"prefill_seq_len":512,"encoder_ctx_len":3000}}'
-```
+| Dataset | Clips | Reference words | Edits | WER |
+|---|---:|---:|---:|---:|
+| LibriSpeech test-clean | 2,620 | 52,576 | 1,290 | **2.4536%** |
+| UBC-NLP/Casablanca | 128 | 1,354 | 989 | **73.0428%** |
 
-Submit an audio file after the server is ready:
+The Casablanca sample used 16 clips for each dialect:
 
-```bash
-curl -X POST http://localhost:8000/v1/audio/transcriptions \
-  -F file=@/path/to/audio.wav \
-  -F model=Qwen/Qwen3-ASR-0.6B-hf
-```
+| Dialect | Clips | WER |
+|---|---:|---:|
+| Algeria | 16 | 96.4706% |
+| Egypt | 16 | 76.3158% |
+| Jordan | 16 | 59.7633% |
+| Mauritania | 16 | 91.9355% |
+| Morocco | 16 | 92.0398% |
+| Palestine | 16 | 64.7059% |
+| UAE | 16 | 67.5393% |
+| Yemen | 16 | 59.7744% |
 
-The first server start includes model and QPC loading. Keep the server alive when measuring request latency so initialization is not included in every request. See the [Qwen3-ASR guide](docs/docs/user_guide/features/qwen3_asr.md) for the direct one-file test and persistent benchmark.
+The LibriSpeech result is a measured English WER result. The Casablanca result shows substantial dialect variation and should not be treated as a customer-quality claim without further language prompting, normalization, and reference-alignment validation.
 
 ## Models Supported
 
