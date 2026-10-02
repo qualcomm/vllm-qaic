@@ -73,6 +73,7 @@ KV_LOOKUP_RETRIES_INTERVAL = 0.05
 FORCE_CLEAN_UP_MULTIPLIER = 2
 MAX_UID = 1000000
 VLLM_QAIC_USE_FULL_KV_TRANSFER_ENV = "VLLM_QAIC_USE_FULL_KV_TRANSFER"
+VLLM_QAIC_DISABLE_HANDOFF_ID_ENV = "VLLM_QAIC_DISABLE_HANDOFF_ID"
 
 
 @dataclass
@@ -95,10 +96,15 @@ class ReqMeta:
     # Keeping List[str] for backward compatibility with QAIC handoff server;
     # even though will store only KV shm name.
     kv_handoff_metadata: list[str] | None = None
+    handoff_id: str | None = None
 
     @staticmethod
     def make_meta(
-        token_ids: list[int], is_store: bool, is_prefill_partial: bool, block_id: int
+        token_ids: list[int],
+        is_store: bool,
+        is_prefill_partial: bool,
+        block_id: int,
+        handoff_id: str | None = None,
     ) -> "ReqMeta":
         token_ids_tensor = torch.tensor(token_ids)
         return ReqMeta(
@@ -107,6 +113,7 @@ class ReqMeta:
             is_store=is_store,
             is_prefill_partial=is_prefill_partial,
             block_id=block_id,
+            handoff_id=handoff_id,
         )
 
 
@@ -123,9 +130,12 @@ class QaicConnectorMetadata(KVConnectorMetadata):
         is_store: bool,
         is_partial_prefill: bool,
         block_id: int,
+        handoff_id: str | None = None,
     ) -> None:
         self.requests.append(
-            ReqMeta.make_meta(token_ids, is_store, is_partial_prefill, block_id)
+            ReqMeta.make_meta(
+                token_ids, is_store, is_partial_prefill, block_id, handoff_id
+            )
         )
 
 
@@ -371,6 +381,9 @@ class QaicConnector(KVConnectorBase_V1):
 
         # Request tracker for scheduler for each step
         self._request_tracker: dict[str, ReqTrackerObj] = {}
+        self.disable_handoff_id = (
+            os.getenv(VLLM_QAIC_DISABLE_HANDOFF_ID_ENV, "0") == "1"
+        )
 
         # Invoke Threads
         signal.signal(signal.SIGINT, self.signal_handler)
@@ -416,7 +429,9 @@ class QaicConnector(KVConnectorBase_V1):
                 f"Unable to access KV store due to an exception: {e}"
             ) from e
 
-    def get_kvcache_from_store(self, prompt_hash) -> QaicKvHandOffGetResp | None:
+    def get_kvcache_from_store(
+        self, prompt_hash, handoff_id=None
+    ) -> QaicKvHandOffGetResp | None:
         """Get kv cache from kv_store."""
         result = None
         # Get kv cache from kv_store
@@ -425,6 +440,7 @@ class QaicConnector(KVConnectorBase_V1):
             timestamp=time.perf_counter(),
             key_hash=prompt_hash,
             rank=self.kv_rank,
+            handoff_id=handoff_id,
         )
         encode_req_pkt = self.encoder.encode(req_pkt)[0]
         max_retries = KV_LOOKUP_RETRIES
@@ -518,7 +534,9 @@ class QaicConnector(KVConnectorBase_V1):
                 kv_shm_buff_name = None
                 # Get kv cache from kv_store
                 if not self.is_producer:
-                    resp = self.get_kvcache_from_store(request.token_hash)
+                    resp = self.get_kvcache_from_store(
+                        request.token_hash, request.handoff_id
+                    )
                     assert resp is not None
                     assert resp.buff_type == 0, (
                         "Raw np.ndarray KV exchange not supported yet"
@@ -606,6 +624,7 @@ class QaicConnector(KVConnectorBase_V1):
                     rank=self.kv_rank,
                     payload=request.kv_handoff_metadata,
                     num_buff=1,
+                    handoff_id=request.handoff_id,
                 )
                 self.send_kv_cache_to_store(req_pk)
         return
@@ -693,6 +712,11 @@ class QaicConnector(KVConnectorBase_V1):
                     is_store=self.is_producer and not is_partial_prefill,
                     is_partial_prefill=is_partial_prefill,
                     block_id=block_id,
+                    handoff_id=(
+                        None
+                        if self.disable_handoff_id
+                        else new_req.req_id.rsplit("-", 1)[0]
+                    ),
                 )
                 self._request_tracker[new_req.req_id].block_id = block_id
                 total_need_load += 1
@@ -720,6 +744,9 @@ class QaicConnector(KVConnectorBase_V1):
                     is_store=self.is_producer and not is_partial_prefill,
                     is_partial_prefill=is_partial_prefill,
                     block_id=cached_block_id,
+                    handoff_id=(
+                        None if self.disable_handoff_id else req_id.rsplit("-", 1)[0]
+                    ),
                 )  # For QAIC one request is mapped to only one block_id
                 total_need_load += 1
 
