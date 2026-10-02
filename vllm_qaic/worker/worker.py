@@ -40,6 +40,7 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.network_utils import get_distributed_init_method, get_ip, get_open_port
 from vllm.utils.torch_utils import set_random_seed
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.sched.output import GrammarOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (
@@ -631,19 +632,32 @@ class QaicWorkerPyt(QaicWorker):
 
 
 class QaicWorkerAoT(QaicWorker):
+    def _compute_num_gpu_blocks(self) -> int:
+        if self.cache_config.enable_prefix_caching:
+            blocks_per_seq = self.cache_config.num_gpu_blocks_override or cdiv(
+                self.model_config.max_model_len, self.cache_config.block_size
+            )
+            return self.scheduler_config.max_num_seqs * blocks_per_seq + 1
+        return self.scheduler_config.max_num_seqs + 1
+
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_cpu_blocks = num_cpu_blocks
         # disable sliding window
         self.cache_config.sliding_window = None
 
         assert num_cpu_blocks == 0
+        if self.model_config.enforce_eager:
+            # adapted from gpu_worker.py
+            self.cache_config.num_gpu_blocks = num_gpu_blocks
+            return
+
         if not self.cache_config.enable_prefix_caching:
             self.cache_config.num_gpu_blocks = num_gpu_blocks
             # Sanity check: AOT requires exact block count; eager is flexible
             assert num_gpu_blocks == self.scheduler_config.max_num_seqs + 1
             return
         else:
-            raise NotImplementedError("prefix caching is not supported on QAIC in V1")
+            self.cache_config.num_gpu_blocks = self._compute_num_gpu_blocks()
 
     def init_device(self):
         """Initialize qaic device
@@ -703,22 +717,18 @@ class QaicWorkerAoT(QaicWorker):
         pass
 
     def determine_available_memory(self) -> int:
-        num_gpu_blocks = (
-            self.cache_config.num_gpu_blocks_override
-            if self.cache_config.num_gpu_blocks_override
-            else self.scheduler_config.max_num_seqs
-        ) + 1
-        # adapted from get_uniform_page_size
-        page_sizes = set(
+        num_gpu_blocks = self._compute_num_gpu_blocks()
+        # Sum each cache entry's own page size instead of assuming every
+        # entry is byte-identical — needed once a model carries more than
+        # one cache shape (e.g. GQA main attention + a separate indexer
+        # side cache) bypassed into a single KV-cache group. This mirrors
+        # the divisor vLLM's own get_kv_cache_config_from_groups() uses
+        # (available_memory // bytes_per_block) so the round trip
+        # reproduces num_gpu_blocks exactly.
+        total_page_size = sum(
             layer.page_size_bytes for layer in self.get_kv_cache_spec().values()
         )
-        assert len(page_sizes) == 1
-        page_size = page_sizes.pop()
-        return (
-            num_gpu_blocks
-            * page_size
-            * self.model_config.get_num_layers(self.parallel_config)
-        )
+        return num_gpu_blocks * total_page_size
 
     def _init_qaic_worker_distributed_environment(
         self,

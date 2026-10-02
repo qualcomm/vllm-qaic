@@ -83,6 +83,8 @@ All `qaic-compile` arguments can be passed as input arguments. The table below l
 | `normalize` | — | Set `True` to normalize pooled outputs (`qaic` pooling only) |
 | `softmax` | — | Set `True` to apply softmax to pooled outputs (`qaic` pooling only) |
 | `prefill_only` | `None` | Disaggregated serving mode: `True` = compile prefill QPC only, `False` = decode QPC only, `None` = single QPC for both |
+| `indexer_layer_ids` | auto-derived from `hf_config.sparse_attention_config["sparse_attention_freq"]`, else `[]` | Layer indices that carry an extra indexer side-cache alongside their main attention cache (e.g. MiniMax's sparse-attention indexer). Auto-detected for models that expose this HF config field (e.g. MiniMax M3); only needed as an explicit override for models that don't. Vllm-side only, not forwarded to `QEfficient.compile()`. KV-cache block size is shared by the main attention and indexer caches and is set the usual way — via `prefill_seq_len` (or `kv_block_size` for disaggregated serving) |
+| `indexer_head_size` | auto-derived from `hf_config.sparse_attention_config["sparse_index_dim"]`, else the main attention's `head_size` | `head_size` for the indexer side-cache entries, when it differs from the main attention's `head_size`. Vllm-side only, not forwarded to `QEfficient.compile()` |
 
 ### `draft_override_qaic_config` Fields
 
