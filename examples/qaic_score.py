@@ -40,7 +40,6 @@ def main():
     model = LLM(
         model="BAAI/bge-reranker-v2-m3",
         runner="pooling",
-        enforce_eager=True,
         max_num_seqs=4,
         max_model_len=512,
         pooler_config=PoolerConfig(task="classify"),
@@ -56,7 +55,6 @@ def main():
     model = LLM(
         model="BAAI/bge-reranker-v2-m3",
         runner="pooling",
-        enforce_eager=True,
         max_num_seqs=4,
         max_model_len=512,
         pooler_config=PoolerConfig(task="classify"),
