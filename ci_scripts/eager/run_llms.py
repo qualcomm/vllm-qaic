@@ -62,7 +62,6 @@ def test_llm_vllm(
             # enable_prefix_caching=False,
             # gpu_memory_utilization=1.0,
             enable_prefix_caching=False,
-            enforce_eager=True,
             async_scheduling=False,
             long_prefill_token_threshold=seq_len,
             dtype=dtype,
