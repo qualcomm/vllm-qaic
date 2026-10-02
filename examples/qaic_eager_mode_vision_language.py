@@ -109,8 +109,47 @@ def run_qwen2_5_vl(questions: list[str], modality: str) -> dict:
     }
 
 
+def run_qwen3_5(questions: list[str], modality: str) -> dict:
+    if modality == "image":
+        placeholder = "<|image_pad|>"
+    elif modality == "video":
+        placeholder = "<|video_pad|>"
+    else:
+        raise ValueError(f"Unsupported modality: {modality}")
+
+    prompts = [
+        (
+            "<|im_start|>system\n"
+            "You are a helpful assistant.<|im_end|>\n"
+            "<|im_start|>user\n"
+            f"<|vision_start|>{placeholder}<|vision_end|>\n"
+            f"{question}\n"
+            "<|im_end|>\n"
+            "<|im_start|>assistant\n"
+        )
+        for question in questions
+    ]
+
+    return {
+        "model": "/local/mnt2/workspace/sahild/huggingface/Qwen3.5-27B-FP8",
+        "prompts": prompts,
+        "engine_params": {
+            "mm_processor_kwargs": {
+                "min_pixels": 28 * 28,
+                "max_pixels": 1280 * 28 * 28,
+                "fps": 1,
+            },
+            "limit_mm_per_prompt": {
+                "image": {"count": 1, "width": 160, "height": 160},
+                "video": {"count": 0, "num_frames": 32, "width": 640, "height": 640},
+            },
+        },
+    }
+
+
 MODEL_MAP = {
     "qwen3_vl": run_qwen3_vl,
+    "qwen3_5": run_qwen3_5,
     "llava": run_llava,
     "qwen2_5_vl": run_qwen2_5_vl,
 }
