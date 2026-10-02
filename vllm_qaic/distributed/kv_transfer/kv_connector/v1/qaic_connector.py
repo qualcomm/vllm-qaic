@@ -73,6 +73,7 @@ KV_LOOKUP_RETRIES_INTERVAL = 0.05
 FORCE_CLEAN_UP_MULTIPLIER = 2
 MAX_UID = 1000000
 VLLM_QAIC_USE_FULL_KV_TRANSFER_ENV = "VLLM_QAIC_USE_FULL_KV_TRANSFER"
+VLLM_QAIC_DISABLE_HANDOFF_ID_ENV = "VLLM_QAIC_DISABLE_HANDOFF_ID"
 
 
 @dataclass
@@ -380,6 +381,9 @@ class QaicConnector(KVConnectorBase_V1):
 
         # Request tracker for scheduler for each step
         self._request_tracker: dict[str, ReqTrackerObj] = {}
+        self.disable_handoff_id = (
+            os.getenv(VLLM_QAIC_DISABLE_HANDOFF_ID_ENV, "0") == "1"
+        )
 
         # Invoke Threads
         signal.signal(signal.SIGINT, self.signal_handler)
@@ -708,7 +712,11 @@ class QaicConnector(KVConnectorBase_V1):
                     is_store=self.is_producer and not is_partial_prefill,
                     is_partial_prefill=is_partial_prefill,
                     block_id=block_id,
-                    handoff_id=new_req.req_id.rsplit("-", 1)[0],
+                    handoff_id=(
+                        None
+                        if self.disable_handoff_id
+                        else new_req.req_id.rsplit("-", 1)[0]
+                    ),
                 )
                 self._request_tracker[new_req.req_id].block_id = block_id
                 total_need_load += 1
@@ -736,7 +744,9 @@ class QaicConnector(KVConnectorBase_V1):
                     is_store=self.is_producer and not is_partial_prefill,
                     is_partial_prefill=is_partial_prefill,
                     block_id=cached_block_id,
-                    handoff_id=req_id.rsplit("-", 1)[0],
+                    handoff_id=(
+                        None if self.disable_handoff_id else req_id.rsplit("-", 1)[0]
+                    ),
                 )  # For QAIC one request is mapped to only one block_id
                 total_need_load += 1
 
