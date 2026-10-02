@@ -208,6 +208,7 @@ class QaicPlatform(Platform):
             vllm_config.model_config.enforce_eager = False
             device_config.device = torch.device("cpu")
         else:
+            vllm_config.model_config.enforce_eager = True
             device_config.device = torch.device("qaic")
             # set QAIC_VISIBLE_DEVICES from device_group
             # if not already set

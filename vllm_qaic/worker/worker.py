@@ -483,8 +483,8 @@ class QaicWorkerPyt(QaicWorker):
 
         cuda_graph_memory_bytes = 0
 
-        # if not current_platform.is_aot:
-        #     cuda_graph_memory_bytes = self.model_runner.capture_model()
+        if not current_platform.is_aot:
+            cuda_graph_memory_bytes = self.model_runner.capture_model()
 
         if self.cache_config.kv_cache_memory_bytes is None and hasattr(
             self, "peak_activation_memory"
