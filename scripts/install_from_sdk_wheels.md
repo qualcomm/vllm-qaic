@@ -1,23 +1,14 @@
 # vllm-qaic Setup Guide — Installing from SDK Wheels
 
-How to install `vllm-qaic` from the pre-built wheels shipped in the QAIC Apps SDK at
-`/opt/qti-aic/integrations/vllm_qaic/`.
-
-This is the **wheel install** path — no source checkout, no compilation of `vllm-qaic` itself.
-If you are developing `vllm-qaic` and want an install from a git clone instead, see
-[`docs/installation.md`](../docs/installation.md).
-
 ---
 
 ## Contents
 
 - [Before you start](#before-you-start)
 - [Pick your mode](#pick-your-mode)
-- [SDK layout](#sdk-layout)
 - [PYT mode install](#pyt-mode-install)
 - [AOT mode install](#aot-mode-install)
 - [AOT with triton-cpu (Speculative Decoding)](#aot-with-triton-cpu-speculative-decoding)
-
 - [Verifying the install](#verifying-the-install)
 - [Environment variable reference](#environment-variable-reference)
 - [Troubleshooting](#troubleshooting)
@@ -25,14 +16,6 @@ If you are developing `vllm-qaic` and want an install from a git clone instead, 
 ---
 
 ## Before you start
-
-| Requirement | Value |
-|---|---|
-| Hardware | Qualcomm Cloud AI 100 / Cloud AI 080 |
-| OS | Linux (Ubuntu 22.04+) |
-| QAIC Platform SDK | >= 1.23.0 |
-| QAIC Apps SDK | >= 1.23.0 — PYT mode additionally needs the installer's `--install-torch-qaic` flag |
-| Python | 3.10 / 3.11 / 3.12 (both modes) |
 
 > [!IMPORTANT]
 > **AOT and PYT cannot coexist in one environment.** AOT requires `torch_qaic` to be
@@ -51,33 +34,6 @@ If you are developing `vllm-qaic` and want an install from a git clone instead, 
 | `torch_qaic` required | No — must **not** be present | Yes |
 | Wheel tag | `*aot*` | `*pyt*` |
 | Python support | 3.10 / 3.11 / 3.12 | 3.10 / 3.11 / 3.12 |
-
----
-
-## SDK layout
-
-The installer expects this layout. The AOT wheel sits flat (it is `py3-none-any`, so one
-artifact serves every Python version); PYT wheels are ABI-specific and live in per-version
-subdirectories.
-
-```text
-/opt/qti-aic/integrations/vllm_qaic/
-├── scripts/
-│   ├── install.sh                  ← the installer you run
-│   ├── utility.sh                  ← version/path constants, sourced by install.sh
-│   └── install_triton_cpu.sh       ← optional, for AOT Speculative Decoding
-├── requirements/
-│   ├── build.txt
-│   ├── vllm_dependency_aot.txt
-│   └── vllm_dependency_pyt.txt
-├── vllm_qaic-<ver>+aot<sdk>-py3-none-any.whl       ← AOT, flat
-├── py310/vllm_qaic-<ver>+pyt<sdk>-cp310-...whl     ← PYT, per Python version
-├── py311/vllm_qaic-<ver>+pyt<sdk>-cp311-...whl
-└── py312/vllm_qaic-<ver>+pyt<sdk>-cp312-...whl
-```
-
-`install.sh` auto-detects wheel mode by the *absence* of a `setup.py` at the package root. It
-prints `source : wheel` in its startup banner — check for that line to confirm.
 
 ---
 
@@ -110,10 +66,6 @@ source ~/venvs/vllm-qaic-pyt/bin/activate
 /opt/qti-aic/integrations/vllm_qaic/scripts/install.sh pyt
 ```
 
-That is the whole install. The script resolves the PYT wheel matching your interpreter from
-`py3XX/`, installs `torch 2.13.0+cpu` *before* `torch_qaic` (which validates at import that
-torch is CPU-only), then vllm and `vllm-qaic`.
-
 ---
 
 ## AOT mode install
@@ -135,11 +87,7 @@ This installs QEfficient (which brings `torch 2.7.0+cpu`), re-pins torch to the 
 version, installs vllm, then the `py3-none-any` AOT wheel.
 
 > [!NOTE]
-> On completion, pip may report a dependency conflict like
-> `qefficient requires transformers==5.5.4, but you have transformers 5.18.0`.
-> **This is expected.** `requirements/vllm_dependency_aot.txt` deliberately requires a newer
-> `transformers`/`huggingface-hub` than QEfficient's `==` pins. Imports and plugin
-> registration work normally. If a specific model needs QEfficient's exact version, pin it:
+> If a specific model needs QEfficient's exact version, pin it:
 > `TRANSFORMERS_VERSION_AOT=5.5.4 ./install.sh aot`.
 
 ---
@@ -151,19 +99,7 @@ Triton kernels can run on CPU. It is **opt-in** via `TRITON_CPU=1`, because it i
 build (5–10 GB, tens of minutes).
 
 > [!IMPORTANT]
-> **Always set `TRITON_CPU_SRC` to a path with enough free space.**
->
-> `TRITON_CPU_SRC` defaults to `${SCRIPT_DIR}/../.build/triton-cpu`. When you run the
-> installer from the SDK, `SCRIPT_DIR` is `/opt/qti-aic/integrations/vllm_qaic/scripts`, so
-> the default resolves to:
->
-> ```text
-> /opt/qti-aic/integrations/vllm_qaic/.build/triton-cpu
-> ```
->
-> That is a **root-owned location under `/opt`**. An ordinary user cannot write there, and
-> even with privileges you do not want 5–10 GB of transient build artifacts and a git clone
-> inside the installed SDK tree. Override it:
+> **Set `TRITON_CPU_SRC` to a path with enough free space.**
 
 ```bash
 conda activate vllm-qaic-aot   # Python 3.10, 3.11 or 3.12
@@ -174,33 +110,7 @@ export TRITON_CPU_SRC=/path/with/enough/space/triton-cpu   # >= 10 GB free, writ
 /opt/qti-aic/integrations/vllm_qaic/scripts/install.sh aot
 ```
 
-Good choices for `TRITON_CPU_SRC`: a scratch or project filesystem, or `/tmp/triton-cpu`.
-Avoid `$HOME` if a per-user quota applies — `df` cannot see quotas, so the pre-flight check
-will pass and the build will then fail with `Disk quota exceeded`.
-
-The installer pre-checks for 10 GB of free space and aborts early with guidance if short. To
-bypass that check (for instance when free space is reported inaccurately):
-
-```bash
-export TRITON_CPU_SKIP_DISK_CHECK=1
-```
-
-To speed up the build on a machine with spare cores (default is 4):
-
-```bash
-export TRITON_CPU_COMPILE_MAX_JOBS=16
-```
-
-Installing triton-cpu later, against an environment that already has AOT, works too:
-
-```bash
-conda activate vllm-qaic-aot
-export TRITON_CPU_SRC=/path/with/enough/space/triton-cpu
-/opt/qti-aic/integrations/vllm_qaic/scripts/install_triton_cpu.sh
-```
-
-Note this **replaces** any PyPI `triton` in the environment — the PyPI build has no CPU
-backend. When running SpD tests afterwards, set `TRITON_CPU_BACKEND=1`.
+When running SpD tests afterwards, set `TRITON_CPU_BACKEND=1`.
 
 ---
 
