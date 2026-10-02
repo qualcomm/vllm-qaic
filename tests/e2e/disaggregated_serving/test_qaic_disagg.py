@@ -25,7 +25,7 @@ logging.basicConfig(
 
 
 @pytest.mark.qaic_disagg_installed
-@pytest.mark.qaic_aot_mode
+@pytest.mark.qaic_aot_mode("requires qaic_disagg's AoT QPC prefill/decode deployment")
 @pytest.mark.qaic_test_config(
     model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
     ctx_len=2048,

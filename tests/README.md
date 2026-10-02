@@ -6,12 +6,28 @@ up) just provides the generic `VllmRunner` wrapper with no QAIC specifics.
 
 ## Writing a new test
 
-Most tests need the `qaic_model` fixture plus a `qaic_test_config` marker:
+Most tests need the `qaic_model` fixture plus a `qaic_test_config` marker. For
+tests that run in both AOT and PyTorch eager mode, provide mode-specific
+configuration so eager mode does not inherit AOT quantization settings:
 
 ```python
 @pytest.mark.qaic_test_config(
-    model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-    seq_len=128, ctx_len=256, decode_bsz=4, dtype="mxfp6", kv_dtype="mxint8",
+    {
+        "aot": dict(
+            model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+            seq_len=128,
+            ctx_len=256,
+            decode_bsz=4,
+            dtype="mxfp6",
+            kv_dtype="mxint8",
+        ),
+        "eager": dict(
+            model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+            seq_len=128,
+            ctx_len=256,
+            decode_bsz=4,
+        ),
+    }
 )
 class TestSomething:
     def test_x(self, qaic_model, sample_prompts):
@@ -24,8 +40,10 @@ instead. For multi-device runs, add `num_device_groups`/`device_group_size` to t
 `device_groups`/`device_group`.
 
 `qaic_test_config(**kwargs)` is the per-test/class config-override marker — resolved as marker
-kwarg → matching CLI option → default. It's open-ended; common keys are `model_name`, `seq_len`,
-`ctx_len`, `decode_bsz`, `dtype`, `kv_dtype`, `num_device_groups`/`device_group_size`, LoRA options
+kwarg → matching CLI option → default. A single positional dictionary with `aot` and `eager`
+keys selects mode-specific values. It's open-ended; common keys are `model_name`, `seq_len`,
+`ctx_len`, `decode_bsz`, `dtype`, `quantization`, `kv_dtype`,
+`num_device_groups`/`device_group_size`, LoRA options
 (`enable_lora`, `max_loras`, `lora_modules`), and the disaggregated-serving worker/group-size keys
 (`num_prefill_workers`, `prefill_device_group_size`, `num_decode_workers`,
 `decode_device_group_size`, `prefill_max_num_seqs`).
@@ -49,7 +67,9 @@ Registered in `pyproject.toml` and enforced in `tests/e2e/conftest.py`'s
 `pytest_collection_modifyitems`, which adds a `skip` marker at collection time with a specific
 reason:
 
-- **`qaic_aot_mode`** — skipped unless `current_platform.is_aot_inference()` is true.
+- **`qaic_aot_mode(reason=None)`** — skipped unless
+  `current_platform.is_aot_inference()` is true. An optional reason customizes
+  the skip message, for example `@pytest.mark.qaic_aot_mode("requires dual-QPC execution")`.
 - **`qaic_disagg_installed`** — skipped unless the `qaic_disagg` package is importable.
 - Device-pool sizing (not a marker, same hook) — skipped if `num_device_groups * device_group_size`
   exceeds the run's device pool (`--device-pool-size` or `len(--device-id)`).
