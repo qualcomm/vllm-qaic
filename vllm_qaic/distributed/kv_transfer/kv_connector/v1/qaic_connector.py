@@ -708,7 +708,7 @@ class QaicConnector(KVConnectorBase_V1):
                     is_store=self.is_producer and not is_partial_prefill,
                     is_partial_prefill=is_partial_prefill,
                     block_id=block_id,
-                    handoff_id=new_req.req_id,
+                    handoff_id=new_req.req_id.rsplit("-", 1)[0],
                 )
                 self._request_tracker[new_req.req_id].block_id = block_id
                 total_need_load += 1
@@ -736,7 +736,7 @@ class QaicConnector(KVConnectorBase_V1):
                     is_store=self.is_producer and not is_partial_prefill,
                     is_partial_prefill=is_partial_prefill,
                     block_id=cached_block_id,
-                    handoff_id=req_id,
+                    handoff_id=req_id.rsplit("-", 1)[0],
                 )  # For QAIC one request is mapped to only one block_id
                 total_need_load += 1
 
