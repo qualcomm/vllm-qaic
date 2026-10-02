@@ -101,7 +101,6 @@ llm = LLM(
     enable_prefix_caching=False,
     gpu_memory_utilization=0.9,
     tensor_parallel_size=1,
-    enforce_eager=True,
     async_scheduling=False,
 )
 

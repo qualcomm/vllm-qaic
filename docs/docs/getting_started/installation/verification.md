@@ -65,7 +65,6 @@ print('QAIC environment loaded successfully')
         model="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
         max_num_seqs=4,
         max_model_len=256,
-        enforce_eager=True,
         async_scheduling=False,
     )
     outputs = llm.generate(["Hello, world!"], SamplingParams(max_tokens=32))
