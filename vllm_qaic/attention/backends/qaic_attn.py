@@ -111,6 +111,8 @@ class QAicAttentionMetadata:
     sdpa_start_loc: torch.Tensor | None = None
     # req_ids ordered by batch dim (decode seqs first); set by update_req_ids()
     req_ids: list[str] | None = None
+    # requests the scheduler reports as finished; their KV caches are freed
+    finished_req_ids: set[str] | None = None
 
 
 class QAicAttentionMetadataBuilder(AttentionMetadataBuilder[QAicAttentionMetadata]):
@@ -131,6 +133,7 @@ class QAicAttentionMetadataBuilder(AttentionMetadataBuilder[QAicAttentionMetadat
         self.kv_cache_spec = kv_cache_spec
         self.vllm_config = vllm_config
         self.current_req_ids: list[str] = []
+        self.finished_req_ids: set[str] = set()
 
         parallel_config = vllm_config.parallel_config
         self.num_kv_heads = vllm_config.model_config.get_num_kv_heads(parallel_config)
@@ -144,10 +147,13 @@ class QAicAttentionMetadataBuilder(AttentionMetadataBuilder[QAicAttentionMetadat
             self.window_size = -1
         self.block_size = vllm_config.cache_config.block_size
 
-    def update_req_ids(self, req_ids: list[str]) -> None:
+    def update_req_ids(
+        self, req_ids: list[str], finished_req_ids: set[str] | None = None
+    ) -> None:
         """Called by the model runner before build() to supply the current
-        batch's request IDs."""
+        batch's request IDs and the requests finished since the last step."""
         self.current_req_ids = req_ids
+        self.finished_req_ids = finished_req_ids or set()
 
     def build(
         self,
@@ -199,6 +205,7 @@ class QAicAttentionMetadataBuilder(AttentionMetadataBuilder[QAicAttentionMetadat
             max_model_len=self.vllm_config.model_config.max_model_len,
             max_num_seqs=self.vllm_config.scheduler_config.max_num_seqs,
             req_ids=req_ids,
+            finished_req_ids=self.finished_req_ids,
         )
 
         return attn_metadata
@@ -262,7 +269,6 @@ class QAicAttentionBackendImpl(AttentionImpl):
         # Per-sequence KV cache: req_id -> (k_buf, v_buf, cached_tokens)
         # Each buffer is pre-allocated to max_model_len on first access.
         self._kv_cache: dict[str, tuple[torch.Tensor, torch.Tensor, int]] = {}
-        self._prev_req_ids: set[str] = set()
         self._max_model_len: int | None = None  # lazily set from metadata
 
     def forward(
@@ -360,11 +366,11 @@ class QAicAttentionBackendImpl(AttentionImpl):
         if self._max_model_len is None:
             self._max_model_len = attn_metadata.max_model_len
 
-        # Evict KV cache entries for requests that left the batch.
-        current_ids = set(req_ids)
-        for rid in self._prev_req_ids - current_ids:
+        # Evict KV cache entries only for finished requests. A running request
+        # can be absent from a batch (PP micro-batches, token budget, chunked
+        # prefill) and must keep its cache.
+        for rid in attn_metadata.finished_req_ids or ():
             self._kv_cache.pop(rid, None)
-        self._prev_req_ids = current_ids
 
         query_start_loc = attn_metadata.query_start_loc  # [num_seqs + 1]
         if query_start_loc.device.type != "cpu":
@@ -400,6 +406,11 @@ class QAicAttentionBackendImpl(AttentionImpl):
                     )
                     kv_v = torch.zeros_like(kv_k)
                     cached = 0
+                    if num_new != seq_len:
+                        raise RuntimeError(
+                            f"QAIC_ATTN: no KV cache for request {req_id} "
+                            f"with {seq_len - num_new} cached tokens"
+                        )
                 else:
                     kv_k, kv_v, cached = self._kv_cache[req_id]
 

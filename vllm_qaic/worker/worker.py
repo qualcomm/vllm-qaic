@@ -13,6 +13,7 @@ import os
 from contextlib import AbstractContextManager, nullcontext
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -29,12 +30,13 @@ from vllm.distributed.kv_transfer import (
     get_kv_transfer_group,
     has_kv_transfer_group,
 )
-from vllm.distributed.parallel_state import get_pp_group, get_tp_group
+from vllm.distributed.parallel_state import Handle, get_pp_group, get_tp_group
 from vllm_qaic.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.platforms import current_platform
 from vllm.profiler.wrapper import TorchProfilerWrapper
+from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
@@ -48,7 +50,11 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
 )
 from vllm.v1.utils import compute_iteration_details
-from vllm.v1.worker.gpu_worker import init_worker_distributed_environment
+from vllm.v1.worker.gpu_worker import (
+    AsyncIntermediateTensors,
+    init_worker_distributed_environment,
+)
+from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import WorkerBase
 from vllm.v1.worker.worker_base import CompilationTimes
 
@@ -205,6 +211,11 @@ class QaicWorkerPyt(QaicWorker):
         self.use_v2_model_runner = False
         self.parallel_config.disable_custom_all_reduce = True
         self.profiler_config = vllm_config.profiler_config
+
+        # Pending non-blocking pipeline-parallel sends from the previous
+        # scheduler iteration. The buffers must stay alive until QCCL has
+        # completed the transfer.
+        self._pp_send_work: list[Handle] = []
 
         # configure float32 matmul precision according to vLLM env.
         precision = envs.VLLM_FLOAT32_MATMUL_PRECISION
@@ -575,11 +586,92 @@ class QaicWorkerPyt(QaicWorker):
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> ModelRunnerOutput | None:
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         # adapted from v1/worker/gpu_worker.py
+        # Ensure buffers from the previous non-blocking PP send are no longer
+        # in use before the model runner can reuse them.
+        if self._pp_send_work:
+            for handle in self._pp_send_work:
+                handle.wait()
+            self._pp_send_work = []
+
+        intermediate_tensors = None
+        forward_pass = scheduler_output.total_num_scheduled_tokens > 0
+        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        all_gather_tensors: dict[str, bool] = {}
+        compilation_config = self.vllm_config.compilation_config
+        parallel_config = self.vllm_config.parallel_config
+
+        if (
+            parallel_config.pipeline_parallel_size > 1
+            and compilation_config.pass_config.enable_sp
+            and forward_pass
+        ):
+            # Keep the PP transport compatible with upstream's sequence-
+            # parallel tensor layout. QAIC currently runs the V1 model runner.
+            assert not self.use_v2_model_runner
+            num_scheduled_tokens_np = np.array(
+                list(scheduler_output.num_scheduled_tokens.values()),
+                dtype=np.int32,
+            )
+            _, batch_desc, _, _, _ = (
+                self.model_runner._determine_batch_execution_and_padding(
+                    num_tokens=num_scheduled_tokens,
+                    num_reqs=len(num_scheduled_tokens_np),
+                    num_scheduled_tokens_np=num_scheduled_tokens_np,
+                    max_num_scheduled_tokens=num_scheduled_tokens_np.max(),
+                    use_cascade_attn=False,
+                )
+            )
+            all_gather_tensors = {
+                "residual": not is_residual_scattered_for_sp(
+                    self.vllm_config, batch_desc.num_tokens
+                )
+            }
+
+        if forward_pass and not get_pp_group().is_first_rank:
+            tensor_dict, comm_handles, comm_postprocess = (
+                get_pp_group().irecv_tensor_dict(
+                    all_gather_group=get_tp_group(),
+                    all_gather_tensors=all_gather_tensors,
+                )
+            )
+            assert tensor_dict is not None
+            intermediate_tensors = AsyncIntermediateTensors(
+                tensor_dict,
+                comm_handles=comm_handles,
+                comm_postprocess=comm_postprocess,
+            )
+
         with self.annotate_profile(scheduler_output):
-            output = self.model_runner.execute_model(scheduler_output)
-        return output
+            output = self.model_runner.execute_model(
+                scheduler_output, intermediate_tensors
+            )
+            if (
+                self.use_v2_model_runner
+                and self.model_runner.is_pooling_model
+                and output is None
+            ):
+                output = self.model_runner.pool()
+            if output is None or isinstance(
+                output, (ModelRunnerOutput, AsyncModelRunnerOutput)
+            ):
+                return output
+
+        assert isinstance(output, IntermediateTensors)
+        assert (
+            parallel_config.distributed_executor_backend != "external_launcher"
+            and not get_pp_group().is_last_rank
+        )
+
+        # Launch the stage-to-stage activation transfer without blocking the
+        # worker. The handles are joined at the start of the next iteration.
+        self._pp_send_work = get_pp_group().isend_tensor_dict(
+            output.tensors,
+            all_gather_group=get_tp_group(),
+            all_gather_tensors=all_gather_tensors,
+        )
+        return None
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):
         if self.profiler_config is None or self.profiler_config.profiler is None:
