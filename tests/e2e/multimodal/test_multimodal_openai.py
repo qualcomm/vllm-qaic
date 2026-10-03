@@ -65,3 +65,57 @@ def test_audio(
         )
         print(transcription)
         print("transcription result:", transcription.text)
+
+
+@pytest.mark.qaic_test_config(
+    model_name="CohereLabs/cohere-transcribe-03-2026",
+    dtype="auto",
+    kv_dtype="auto",
+    ctx_len=512,
+    decode_bsz=1,
+    num_device_groups=1,
+    device_group_size=1,
+)
+def test_cohere_asr_audio(
+    client,
+    server_runner,
+    model_name,
+    host,
+    port,
+    seq_len,
+    ctx_len,
+    decode_bsz,
+    dtype,
+    kv_dtype,
+    device_group,
+):
+    additional_config = {
+        "device_group": device_group,
+        "override_qaic_config": {"num_cores": 8, "task": "transcription"},
+    }
+    audio_path = AudioAsset("mary_had_lamb").get_local_path()
+
+    with (
+        server_runner(
+            server_runner.Backend.OPENAI_API_SERVER_MODULE,
+            model_name,
+            host,
+            port,
+            seq_len,
+            ctx_len,
+            decode_bsz,
+            dtype,
+            kv_dtype,
+            additional_config,
+            max_num_batched_tokens=3504,
+        ),
+        open(audio_path, "rb") as f,
+    ):
+        transcription = client.audio.transcriptions.create(
+            file=f,
+            model=model_name,
+            language="en",
+            response_format="json",
+            temperature=0.0,
+        )
+        assert transcription.text

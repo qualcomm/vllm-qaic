@@ -1722,6 +1722,9 @@ class QaicModelRunnerAoT(GPUModelRunner):
             return
         if self.model.is_vision_encoder:
             return
+        if self.model.config.model_type == "cohere_asr":
+            self._qaic_dummy_run_cohere_asr()
+            return
 
         # Decode (SpD-aware: allocate max_decode_tokens per request)
         decode_bsz = self.model.decode_bsz
@@ -1791,6 +1794,71 @@ class QaicModelRunnerAoT(GPUModelRunner):
 
         if self.use_async_scheduling:
             self.complete_all_inf(pending_prefill_exec_queue, decode_bsz)
+
+    def _qaic_dummy_run_cohere_asr(self) -> None:
+        """Warm up Cohere's encoder specialization before cached decode."""
+        prefill_bsz = self.model.prefill_bsz
+        prefill_seq_len = self.model.prefill_seq_len
+        prefill_block_ids = np.arange(prefill_bsz, dtype=np.int64)
+        prefill_logits = self.create_logits_np(prefill_bsz, self.model.vocab_size)
+
+        input_features_shape, input_features_dtype = self.model.mm_input_info[
+            "input_features"
+        ]
+        feature_lengths_shape, feature_lengths_dtype = self.model.mm_input_info[
+            "feature_lengths"
+        ]
+        prefill_mm_kwargs = {
+            "input_features": np.zeros(
+                input_features_shape, dtype=input_features_dtype
+            ),
+            "feature_lengths": np.ones(
+                feature_lengths_shape, dtype=feature_lengths_dtype
+            ),
+        }
+        decoder_start_token_id = (
+            self.model.config.decoder_start_token_id
+            if self.model.config.decoder_start_token_id is not None
+            else self.model.config.bos_token_id
+        )
+        prefill_input_ids = np.full(
+            prefill_bsz * prefill_seq_len,
+            decoder_start_token_id,
+            dtype=np.int64,
+        )
+        prefill_positions = np.arange(prefill_seq_len, dtype=np.int64).repeat(
+            prefill_bsz
+        )
+        prefill_cum_sum = np.full(prefill_bsz, prefill_seq_len, dtype=np.int64).cumsum()
+        pending_prefill_exec_queue = self.model(
+            input_ids=prefill_input_ids,
+            positions=prefill_positions,
+            batch_indices=prefill_block_ids,
+            is_prompt=True,
+            prefill_cum_sum=prefill_cum_sum,
+            mm_kwargs_list=[prefill_mm_kwargs] * prefill_bsz,
+            logits=prefill_logits,
+        )
+        if self.use_async_scheduling:
+            self.complete_all_inf(pending_prefill_exec_queue, prefill_bsz)
+
+        decode_bsz = self.model.decode_bsz
+        decode_num_tokens = decode_bsz * self.max_decode_tokens
+        decode_input_ids = np.full(
+            decode_num_tokens, decoder_start_token_id, dtype=np.int64
+        )
+        decode_positions = np.full(decode_num_tokens, prefill_seq_len, dtype=np.int64)
+        decode_block_ids = np.arange(decode_bsz, dtype=np.int64)
+        decode_logits = self.create_logits_np(
+            decode_bsz, self.model.vocab_size, self.max_decode_tokens
+        )
+        self.model(
+            input_ids=decode_input_ids,
+            positions=decode_positions,
+            batch_indices=decode_block_ids,
+            is_prompt=False,
+            logits=decode_logits,
+        )
 
     def _gather_mm_embeddings(
         self,
@@ -1900,7 +1968,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
 
     def get_supported_generation_tasks(self) -> list[GenerationTask]:
         supported_tasks = list[GenerationTask]()
-        if self.model.config.model_type == "whisper":
+        if self.model.config.model_type in ("whisper", "cohere_asr"):
             supported_tasks.append("transcription")
         else:
             supported_tasks.append("generate")

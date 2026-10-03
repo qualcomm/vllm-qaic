@@ -136,7 +136,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self.config = config
         self.vocab_size = config.get_text_config().vocab_size
         # `long_prefill_token_threshold` will define prefill chunk length
-        if self.config.model_type == "whisper":
+        if self.config.model_type in ("whisper", "cohere_asr"):
             # Encoder-decoder models have chunked prefill disabled by vllm,
             # but QAIC still requires a prefill sequence length.
             # For whisper, the prefill sequence length is fixed to 1.
@@ -781,6 +781,16 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     (1, self.prefill_seq_len), self.config.decoder_start_token_id
                 )
                 pids = pids[..., : self.prefill_seq_len]
+            elif self.config.model_type == "cohere_asr":
+                bos_token_id = getattr(self.config, "bos_token_id", None)
+                if (
+                    bos_token_id is not None
+                    and iids.size > 1
+                    and iids[0] == bos_token_id
+                ):
+                    iids = iids[1:]
+                    pids = pids[..., 1:]
+                    pids = pids - pids[..., :1]
 
             # create chunk inputs
             chunk_inputs = dict()
@@ -792,6 +802,16 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 chunk_inputs["lora_ids"] = lora_index
             if mm_kwargs_list and (mm_kwargs := mm_kwargs_list[i]):
                 chunk_inputs.update(mm_kwargs)
+            if self.config.model_type == "cohere_asr":
+                # QEff keeps the encoder feature length while decode uses a
+                # one-frame dummy feature tensor. The cross-attention mask is
+                # derived from this original request length.
+                feature_lengths = chunk_inputs["feature_lengths"]
+                batch_index = int(batch_indices[i])
+                for decode_inputs in self.decode_batch_inputs_by_k.values():
+                    decode_inputs["feature_lengths"][batch_index : batch_index + 1] = (
+                        feature_lengths
+                    )
             # chunk the request
             n_chunks: int = iids.shape[-1] // self.prefill_seq_len
 
@@ -800,6 +820,14 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
 
             prefill_ccl_id = 0
             for chunk in range(n_chunks):
+                if self.config.model_type == "cohere_asr" and chunk > 0:
+                    # Cohere's transcription prefix contains multiple decoder
+                    # tokens. The QPC encoder runs only with the first token;
+                    # its decode specialization reuses retained cross-attention
+                    # state for the remaining prefix tokens.
+                    chunk_inputs["input_features"] = self.default_mm_kwargs[
+                        "input_features"
+                    ]
                 lower_idx = int(chunk * self.prefill_seq_len)
                 upper_idx = int((chunk + 1) * self.prefill_seq_len)
                 chunk_inputs["input_ids"] = iids[lower_idx:upper_idx].reshape(
@@ -1857,7 +1885,7 @@ def get_hf_model(
 
     model_type = "lora" if lora_config else "default"
     if model_config.is_multimodal_model:
-        if model_config.hf_config.model_type == "whisper":
+        if model_config.hf_config.model_type in ("whisper", "cohere_asr"):
             model_type = "speech"
             del args["kv_offload"]
         elif model_config.hf_config.model_type != "internvl_chat":

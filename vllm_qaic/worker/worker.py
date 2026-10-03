@@ -685,6 +685,15 @@ class QaicWorkerAoT(QaicWorker):
 
         self._configure_thread_parallelism()
 
+        if self.model_config.hf_config.model_type == "cohere_asr":
+            # EngineCore has a process-local multimodal registry, so register
+            # the QAIC Cohere processor before constructing its model runner.
+            from vllm_qaic.model_loader.qaic_custom_mm_processor import (
+                register_qaic_custom_mm_processor,
+            )
+
+            register_qaic_custom_mm_processor("cohere_asr")
+
         # Construct the model runner
         self.model_runner: QaicModelRunnerAoT = QaicModelRunnerAoT(
             self.vllm_config, self.device

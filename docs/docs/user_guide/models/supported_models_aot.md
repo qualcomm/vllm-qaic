@@ -99,6 +99,7 @@ Support varies by QPC mode (Single vs Dual). Dual QPC uses the `kv_offload` arch
 | Architecture | Model Family | Representative Models |
 |---|---|---|
 | **Whisper** | Whisper | [openai/whisper-tiny](https://huggingface.co/openai/whisper-tiny), [openai/whisper-base](https://huggingface.co/openai/whisper-base), [openai/whisper-small](https://huggingface.co/openai/whisper-small), [openai/whisper-medium](https://huggingface.co/openai/whisper-medium), [openai/whisper-large](https://huggingface.co/openai/whisper-large), [openai/whisper-large-v3-turbo](https://huggingface.co/openai/whisper-large-v3-turbo) |
+| **CohereAsrForConditionalGeneration** | Cohere Transcribe | [CohereLabs/cohere-transcribe-03-2026](https://huggingface.co/CohereLabs/cohere-transcribe-03-2026), [CohereLabs/cohere-transcribe-arabic-07-2026](https://huggingface.co/CohereLabs/cohere-transcribe-arabic-07-2026) |
 
 ---
 

@@ -13,7 +13,10 @@ from typing import Any, Protocol, cast
 import torch
 from packaging.version import Version as _Version
 from qwen_vl_utils import smart_resize
-from transformers import BatchFeature, TensorType
+from transformers import (
+    BatchFeature,
+    TensorType,
+)
 from transformers import __version__ as _transformers_version
 from transformers.image_processing_utils import select_best_resolution
 from transformers.image_transforms import group_images_by_shape, reorder_images
@@ -28,6 +31,9 @@ from transformers.utils.import_utils import (
 )
 
 from vllm_qaic.logger import init_logger
+from vllm_qaic.model_loader.qaic_cohere_asr_processor import (
+    QAIC_COHERE_ASR_PROCESSOR,
+)
 from vllm.model_executor.models.gemma3_mm import (
     Gemma3DummyInputsBuilder,
     Gemma3ForConditionalGeneration,
@@ -696,6 +702,7 @@ class QaicQwen3_5MoeProcessingInfo(QaicQwen3VLProcessingInfo, Qwen3_5MoeProcessi
 
 def register_qaic_custom_mm_processor(model_type: str):
     MODEL_PROCESSOR_MAP = {
+        "cohere_asr": QAIC_COHERE_ASR_PROCESSOR,
         "qwen2_5_vl": (
             QaicQwen2_5_VLMultiModalProcessor,
             QaicQwen2_5_VLProcessingInfo,

@@ -703,8 +703,6 @@ class ServerRunner:
             str(ctx_len),
             "--max-num-seqs",
             str(decode_bsz),
-            "--quantization",
-            dtype,
             "--kv-cache-dtype",
             kv_dtype,
             "--no-enable-prefix-caching",
@@ -712,6 +710,8 @@ class ServerRunner:
             "--additional-config",
             json.dumps(additional_config),
         ]
+        if dtype not in (None, "auto"):
+            cmd += ["--quantization", dtype]
         if max_num_batched_tokens is not None:
             cmd += ["--max-num-batched-tokens", str(max_num_batched_tokens)]
         else:
