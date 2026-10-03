@@ -89,7 +89,13 @@ function create_python_venv() {
 function install_vllm_plugin() {
         mode="$1"
         cd "${VLLM_DIR}"
-        ./scripts/install.sh "$mode"
+        if [ "$mode" = "aot" ]; then
+            # TODO(Loay): Temporary pin to https://github.com/quic/efficient-transformers/pull/1287.
+            # Remove this CI override after it merges to restore the installer default (main).
+            QEFF_BRANCH="${QEFF_BRANCH:-refs/pull/1287/head}" ./scripts/install.sh "$mode"
+        else
+            ./scripts/install.sh "$mode"
+        fi
         # install test dependencies (single source of truth: requirements/test.txt)
         pip3 install -r requirements/test.txt
 }
