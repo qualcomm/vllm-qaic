@@ -415,6 +415,8 @@ class QaicModelRunnerAoT(GPUModelRunner):
         | QaicDFlashProposer
         | None
     )
+    # Parent initializes this dynamically; declare its normalized bool type here.
+    use_async_scheduling: bool
 
     def __init__(
         self,
@@ -526,10 +528,19 @@ class QaicModelRunnerAoT(GPUModelRunner):
         self.max_decode_tokens = compute_max_decode_tokens(self.speculative_config)
         # Variable-K decode specializations: for ngram/suffix we compile two
         # kernels (K=0 and K=max_k) and select the cheapest one each step.
+        # Variable-K decode specializations select the cheapest kernel each step.
         _method = self.speculative_config.method if self.speculative_config else None
+        _kv_transfer_config = vllm_config.kv_transfer_config
+        _is_disagg_consumer = (
+            _kv_transfer_config is not None
+            and _kv_transfer_config.kv_role == "kv_consumer"
+        )
+        _uses_variable_k = _method in ("ngram", "suffix") or (
+            _method == "draft_model" and _is_disagg_consumer
+        )
         self.decode_ks: list[int] = (
             [0, self.num_spec_tokens]
-            if _method in ("ngram", "suffix") and self.max_decode_tokens > 1
+            if _uses_variable_k and self.max_decode_tokens > 1
             else [self.num_spec_tokens]
         )
         # DFlash public num_speculative_tokens already excludes the slot-0 bonus
@@ -716,8 +727,13 @@ class QaicModelRunnerAoT(GPUModelRunner):
         decode request has proposals for this step; select max_k otherwise.
         With single-spec: always returns the sole K (no-op).
         """
-        if len(self.decode_ks) <= 1 or self.num_decodes == 0:
+        if len(self.decode_ks) <= 1:
             return self.decode_ks[-1]
+        if self.num_decodes == 0:
+            # kv_consumer first disagg step: the sequence is classified as
+            # prefill by the batch reorder (num_computed < num_prompt), but the
+            # decode QPC must run with k=0 because no draft proposals exist yet.
+            return 0
         spec_tokens = scheduler_output.scheduled_spec_decode_tokens
         if spec_tokens and any(len(v) > 0 for v in spec_tokens.values()):
             return self.decode_ks[-1]  # proposals exist → full SpD kernel
@@ -818,7 +834,11 @@ class QaicModelRunnerAoT(GPUModelRunner):
             ]
             # Pad decode requests to active_k+1 tokens (1 for K=0 fallback,
             # max_decode_tokens for the full SpD kernel).
-            num_scheduled_tokens[: self.num_decodes] = self.active_k + 1
+            # KV consumers classify the first transferred token as prefill but
+            # execute it through decode; pad it like a zero-proposal request so
+            # every row has the uniform shape expected by the decode QPC.
+            num_pad_reqs = num_reqs if self.is_kv_consumer else self.num_decodes
+            num_scheduled_tokens[:num_pad_reqs] = self.active_k + 1
             total_num_scheduled_tokens = np.sum(num_scheduled_tokens)
 
         # Get request indices.
@@ -1377,6 +1397,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
                     kv_connector_output,
                 )
             else:
+                assert pending_prefill_exec_queue is not None
                 async_output = QaicAsyncPoolingModelRunnerOutput(
                     model_runner=self,
                     pending_prefill_exec_queue=pending_prefill_exec_queue,
@@ -1659,13 +1680,32 @@ class QaicModelRunnerAoT(GPUModelRunner):
         time_before_load = time.perf_counter()
         from vllm_qaic.model_loader.qaic import load_qaic_model
 
+        _has_draft_model = (
+            self.speculative_config is not None
+            and self.speculative_config.uses_draft_model()
+            and self.drafter is not None
+        )
         with set_current_vllm_config(self.vllm_config):
             speculative_model_type = "default"
             if self.num_spec_tokens:
                 speculative_model_type = "target"
+            # When a draft model is present, defer the compile-only early
+            # exit until the drafter has also compiled (see
+            # QaicDraftModelProposer.load_model() below) -- otherwise the
+            # process exits after the target compiles and the draft's QPC
+            # never gets built.
             self.model: nn.Module = load_qaic_model(
-                self.vllm_config, speculative_model_type
+                self.vllm_config,
+                speculative_model_type,
+                raise_on_compile_complete=not _has_draft_model,
             )
+            # Sync decode_ks from the loaded model: _decode_ks_from_session()
+            # corrects it to the QPC's actual specializations (e.g. [0] for a
+            # seq_len=1-only QPC, or [0, K] for a multi-spec QPC).  Without this
+            # sync the runner may hold stale init-time values that differ from
+            # what the model's _run_decode buffers support.
+            self.decode_ks = list(self.model.decode_ks)  # type: ignore[arg-type]
+            self.active_k = self.decode_ks[-1]
             # FIXME load_lora_model parameters have changed in the mixin
             if self.lora_config:
                 self.model = self.load_lora_model(
@@ -1686,11 +1726,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 "QaicLMCacheConnectorV1 currently does not support"
                 " models with hybrid KV cache"
             )
-        if (
-            self.speculative_config is not None
-            and self.speculative_config.uses_draft_model()
-            and self.drafter is not None
-        ):
+        if _has_draft_model and self.drafter is not None:
             self.drafter.load_model()
         elif (
             self.speculative_config is not None
