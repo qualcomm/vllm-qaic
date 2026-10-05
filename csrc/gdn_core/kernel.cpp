@@ -28,7 +28,7 @@ static inline float softplusf(float x) {
 QAIC_KERNEL_API uint32_t gdn_gating(const AicJitEntryPointConfig* cfg,
                                     const AicJitPointerArray* ptrs) {
   if (ptrs->numPointers < 8) return JIT_DEV_ERROR_INVALID_PARAMETER;
-  const __fp16* a = (const __fp16*)ptrs->pointers[0];  // nosemgrep
+  const __fp16* a = (const __fp16*)*ptrs->pointers;
   const __fp16* b = (const __fp16*)ptrs->pointers[1];
   const float* A_log = (const float*)ptrs->pointers[2];
   const float* dt_bias = (const float*)ptrs->pointers[3];
@@ -56,7 +56,7 @@ QAIC_KERNEL_API uint32_t gdn_gating(const AicJitEntryPointConfig* cfg,
 QAIC_KERNEL_API uint32_t gdn_conv1d_update(const AicJitEntryPointConfig* cfg,
                                            const AicJitPointerArray* ptrs) {
   if (ptrs->numPointers < 11) return JIT_DEV_ERROR_INVALID_PARAMETER;
-  const __fp16* x = (const __fp16*)ptrs->pointers[0];  // nosemgrep
+  const __fp16* x = (const __fp16*)*ptrs->pointers;
   __fp16* cstate = (__fp16*)ptrs->pointers[1];
   const __fp16* weight = (const __fp16*)ptrs->pointers[2];
   const __fp16* bias = (const __fp16*)ptrs->pointers[3];
@@ -98,7 +98,7 @@ QAIC_KERNEL_API uint32_t gdn_conv1d_update(const AicJitEntryPointConfig* cfg,
 QAIC_KERNEL_API uint32_t gdn_conv1d_prefill(const AicJitEntryPointConfig* cfg,
                                             const AicJitPointerArray* ptrs) {
   if (ptrs->numPointers < 14) return JIT_DEV_ERROR_INVALID_PARAMETER;
-  const __fp16* x = (const __fp16*)ptrs->pointers[0];  // nosemgrep
+  const __fp16* x = (const __fp16*)*ptrs->pointers;
   const __fp16* weight = (const __fp16*)ptrs->pointers[1];
   const __fp16* bias = (const __fp16*)ptrs->pointers[2];
   __fp16* cstates = (__fp16*)ptrs->pointers[3];
@@ -161,7 +161,7 @@ static inline float hvx_hsum_sf(HVX_Vector v_lo, HVX_Vector v_hi) {
 QAIC_KERNEL_API uint32_t gdn_recurrent_decode(const AicJitEntryPointConfig* cfg,
                                               const AicJitPointerArray* ptrs) {
   if (ptrs->numPointers < 15) return JIT_DEV_ERROR_INVALID_PARAMETER;
-  const __fp16* q = (const __fp16*)ptrs->pointers[0];  // nosemgrep
+  const __fp16* q = (const __fp16*)*ptrs->pointers;
   const __fp16* k = (const __fp16*)ptrs->pointers[1];
   const __fp16* v = (const __fp16*)ptrs->pointers[2];
   const float* g = (const float*)ptrs->pointers[3];
@@ -277,7 +277,7 @@ QAIC_KERNEL_API uint32_t gdn_recurrent_decode(const AicJitEntryPointConfig* cfg,
 QAIC_KERNEL_API uint32_t gdn_recurrent_prefill(
     const AicJitEntryPointConfig* cfg, const AicJitPointerArray* ptrs) {
   if (ptrs->numPointers < 17) return JIT_DEV_ERROR_INVALID_PARAMETER;
-  const __fp16* q = (const __fp16*)ptrs->pointers[0];  // nosemgrep
+  const __fp16* q = (const __fp16*)*ptrs->pointers;
   const __fp16* k = (const __fp16*)ptrs->pointers[1];
   const __fp16* v = (const __fp16*)ptrs->pointers[2];
   const float* g = (const float*)ptrs->pointers[3];
