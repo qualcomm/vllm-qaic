@@ -161,6 +161,11 @@ import vllm_qaic.patch.patch_mooncake_connector  # noqa
 
 import vllm_qaic.envs as qaic_envs
 
+if qaic_envs.VLLM_QAIC_ENABLE_TRITON_ATTN:
+    import vllm_qaic.patch.patch_qaic_triton_import  # noqa
+    import vllm_qaic.patch.patch_reshape_and_cache  # noqa
+
+
 # The numpy slot-mapping patch bypasses vLLM's Triton slot-mapping kernel. When
 # the in-tree Triton attention backend is enabled (VLLM_QAIC_ENABLE_TRITON_ATTN),
 # the real Triton slot-mapping kernel must stay live to feed slot_mapping into
