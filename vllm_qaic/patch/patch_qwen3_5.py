@@ -57,8 +57,7 @@ def _build_qaic_gdn_class():
         def forward_qaic(
             self,
             hidden_states: torch.Tensor,
-            output: torch.Tensor,
-        ) -> None:
+        ) -> torch.Tensor:
             # --- Part 1: input projections (identical to forward_cpu) ---
             assert not hasattr(self, "in_proj_qkv"), (
                 "LoRA (split in_proj_qkv) is not supported on QAIC GDN."
@@ -122,7 +121,8 @@ def _build_qaic_gdn_class():
             core_attn_out = self.norm(core_attn_out, z)
             core_attn_out = core_attn_out.reshape(z_shape_og)
             core_attn_out = core_attn_out.flatten(-2)  # ... h d -> ... (h d)
-            output[:num_tokens], _ = self.out_proj(core_attn_out)
+            out, _ = self.out_proj(core_attn_out)
+            return out
 
         def _gdn_core_kernel(
             self,
