@@ -294,10 +294,10 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                         batch_indices,
                         logits,
                         lora_ids,
-                        callback=callback,
-                        dflash_decode_hidden_buf=dflash_decode_hidden_buf,
                         block_table,
                         slot_id,
+                        callback=callback,
+                        dflash_decode_hidden_buf=dflash_decode_hidden_buf,
                     )
         return None
 
@@ -2287,24 +2287,19 @@ def _get_qaic_compile_config(
     qaic_config: dict[str, Any] | None = (override_qaic_config or {}).pop(
         "qaic_config", None
     )
+    if qaic_config is None:
+        qaic_config = dict()
     if speculative_model_type in ("target", "turbo"):
-        if qaic_config is None:
-            qaic_config = {}
         qaic_config["speculative_model_type"] = speculative_model_type
     # DFlash cross-checkpoint injection for QEfficient DFlash transforms.
     if dflash_cfg is not None:
         if speculative_model_type == "draft":
-            if qaic_config is None:
-                qaic_config = {}
             qaic_config["dflash_dlm"] = True
             qaic_config["dflash_tlm_repo"] = dflash_cfg["tlm_repo"]
         elif speculative_model_type in ("target", "turbo"):
-            if qaic_config is None:
-                qaic_config = {}
             qaic_config["target_layer_ids"] = dflash_cfg["target_layer_ids"]
             qaic_config["dflash_dlm_repo"] = dflash_cfg["dlm_repo"]
-    if qaic_config is None:
-        qaic_config = dict()
+
     # On Device Sampling
     if cfg.get("aic_include_sampler") is not None:
         qaic_config["include_sampler"] = cfg["aic_include_sampler"]
