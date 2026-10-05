@@ -2378,10 +2378,8 @@ def _get_qaic_compile_config(
         logger.info("Num KV Blocks: %s", num_kv_blocks)
         qaic_config["num_kv_blocks"] = num_kv_blocks
         qaic_config["blocking_mode"] = "kv_paged"
-        qaic_config["enable_blocking"] = True
     else:
         qaic_config["blocking_mode"] = ""
-        qaic_config["enable_blocking"] = False
     qpc_path = cfg.pop("qpc_path")
     if qpc_path and kv_offload and len(qpc_path.split(":")) > 1:
         assert qpc_idx is not None
