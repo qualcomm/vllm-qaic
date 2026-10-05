@@ -682,6 +682,12 @@ class QaicConnector(KVConnectorBase_V1):
         # Always load KV cache. In case of producer KV cache will be empty buffers
         self._request_tracker[request.request_id] = ReqTrackerObj(request, None)
 
+    def _handoff_id(self, request) -> str | None:
+        if self.disable_handoff_id:
+            return None
+        params = request.kv_transfer_params or {}
+        return params.get("handoff_id")
+
     def build_connector_meta(
         self,
         scheduler_output: SchedulerOutput,
@@ -712,10 +718,8 @@ class QaicConnector(KVConnectorBase_V1):
                     is_store=self.is_producer and not is_partial_prefill,
                     is_partial_prefill=is_partial_prefill,
                     block_id=block_id,
-                    handoff_id=(
-                        None
-                        if self.disable_handoff_id
-                        else new_req.req_id.rsplit("-", 1)[0]
+                    handoff_id=self._handoff_id(
+                        self._request_tracker[new_req.req_id].request
                     ),
                 )
                 self._request_tracker[new_req.req_id].block_id = block_id
@@ -744,9 +748,7 @@ class QaicConnector(KVConnectorBase_V1):
                     is_store=self.is_producer and not is_partial_prefill,
                     is_partial_prefill=is_partial_prefill,
                     block_id=cached_block_id,
-                    handoff_id=(
-                        None if self.disable_handoff_id else req_id.rsplit("-", 1)[0]
-                    ),
+                    handoff_id=self._handoff_id(self._request_tracker[req_id].request),
                 )  # For QAIC one request is mapped to only one block_id
                 total_need_load += 1
 
