@@ -301,7 +301,7 @@ def apply_qwen3_5_gdn_patch() -> None:
     try:
         from vllm_qaic.platform_base import QaicPlatform
     except Exception:  # pragma: no cover - defensive
-        QaicPlatform = None
+        QaicPlatform = None  # type: ignore[assignment]
 
     if QaicPlatform is not None and getattr(QaicPlatform, "is_aot", False):
         # AoT mode compiles via QEfficient; the vLLM eager model is not used.

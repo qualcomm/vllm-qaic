@@ -485,7 +485,8 @@ class QaicWorkerPyt(QaicWorker):
         # so this Triton warmup is a no-op. Patch it out before calling
         # kernel_warmup, restoring it unconditionally afterward.
         import vllm.model_executor.warmup.kernel_warmup as _kw_mod
-        _orig_qwen_warmup = getattr(_kw_mod, 'qwen_triton_warmup', None)
+
+        _orig_qwen_warmup = getattr(_kw_mod, "qwen_triton_warmup", None)
         if _orig_qwen_warmup is not None:
             _kw_mod.qwen_triton_warmup = lambda *a, **kw: None
         try:
