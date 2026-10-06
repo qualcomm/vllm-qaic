@@ -108,7 +108,7 @@ class ReqMeta:
         token_ids_tensor = torch.tensor(token_ids)
         return ReqMeta(
             token_ids=token_ids_tensor,
-            token_hash=hash((hash(tuple(token_ids)), handoff_id))
+            token_hash=hash((hash(tuple(token_ids)), int(handoff_id, 16)))
             if handoff_id is not None
             else hash(tuple(token_ids)),
             is_store=is_store,
@@ -680,7 +680,12 @@ class QaicConnector(KVConnectorBase_V1):
         if self.disable_handoff_id:
             return None
         params = request.kv_transfer_params or {}
-        return params.get("handoff_id")
+        handoff_id = params.get("handoff_id")
+        if handoff_id is not None:
+            assert all(c in "0123456789abcdefABCDEF" for c in handoff_id), (
+                f"handoff_id must be hex, got {handoff_id!r}"
+            )
+        return handoff_id
 
     def build_connector_meta(
         self,
