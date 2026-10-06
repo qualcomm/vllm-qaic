@@ -8,6 +8,7 @@
 
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
+from contextlib import contextmanager
 from typing import Any, Protocol, cast
 
 import torch
@@ -106,6 +107,52 @@ Gemma4ForConditionalGeneration.get_placeholder_str = classmethod(
         "image" if modality == "image_embeds" else modality, i
     )
 )
+
+
+@contextmanager
+def _gemma4_qaic_encoder_chunking():
+    original_get_memory_info = torch.accelerator.get_memory_info
+
+    def get_memory_info_qaic(device=None):
+        try:
+            return original_get_memory_info(device)
+        except RuntimeError as e:
+            if "Allocator for qaic is not a DeviceAllocator" not in str(e):
+                raise
+            return (0, 0)
+
+    torch.accelerator.get_memory_info = get_memory_info_qaic
+    try:
+        yield
+    finally:
+        torch.accelerator.get_memory_info = original_get_memory_info
+
+
+if not getattr(
+    Gemma4ForConditionalGeneration, "_qaic_memory_info_patch_installed", False
+):
+    _gemma4_process_image_input = Gemma4ForConditionalGeneration._process_image_input
+    _gemma4_process_video_input = Gemma4ForConditionalGeneration._process_video_input
+
+    def _qaic_gemma4_process_image_input(self, image_input):
+        # Upstream Gemma4 uses torch.accelerator.get_memory_info() only to choose
+        # the encoder chunk size. That API asserts on QAIC because QAIC does not
+        # use PyTorch's DeviceAllocator, so report a zero budget and let
+        # _encoder_chunk conservatively choose chunk size 1.
+        with _gemma4_qaic_encoder_chunking():
+            return _gemma4_process_image_input(self, image_input)
+
+    def _qaic_gemma4_process_video_input(self, video_input):
+        with _gemma4_qaic_encoder_chunking():
+            return _gemma4_process_video_input(self, video_input)
+
+    Gemma4ForConditionalGeneration._process_image_input = (
+        _qaic_gemma4_process_image_input
+    )
+    Gemma4ForConditionalGeneration._process_video_input = (
+        _qaic_gemma4_process_video_input
+    )
+    Gemma4ForConditionalGeneration._qaic_memory_info_patch_installed = True
 
 
 class QaicGemma3MultiModalProcessor(Gemma3MultiModalProcessor):

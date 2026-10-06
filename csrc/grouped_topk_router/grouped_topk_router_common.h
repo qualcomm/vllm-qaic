@@ -75,6 +75,18 @@ struct RouterTileParams {
   float16* vtcm_selection_scores;
 };
 
+struct Gemma4RouterParams {
+  const float* input;
+  const float* per_expert_scale;
+  float* topk_weights;
+  int32_t* topk_ids;
+  int32_t num_tokens;
+  int32_t num_experts;
+  int32_t topk;
+  int32_t token_begin;
+  int32_t token_end;
+};
+
 // Integer ceiling division used for work partitioning.
 inline int32_t ceil_div_i32(int32_t a, int32_t b) { return (a + b - 1) / b; }
 
@@ -782,6 +794,13 @@ inline HVX_VectorPred vcmp_gt_xacc_w(const HVX_VectorPred& predicate,
   return Q6_Q_vcmp_gtxacc_QVwVw(predicate, v1, v2);
 }
 
+inline HVX_VectorPred vcmp_gt_xacc_sf(const HVX_VectorPred& predicate,
+                                      const HVX_Vector& v1,
+                                      const HVX_Vector& v2) {
+  const HVX_VectorPred gt_pred = Q6_Q_vcmp_gt_VsfVsf(v1, v2);
+  return Q6_Q_xor_QQ(predicate, gt_pred);
+}
+
 inline HVX_VectorPred bitonic_sort_step_swap_mask_hf(
     unsigned step_idx, const HVX_Vector& step_masks,
     const HVX_Vector& shuffled_lo, const HVX_Vector& shuffled_hi) {
@@ -802,6 +821,17 @@ inline HVX_VectorPred bitonic_sort_step_swap_mask_w(
   const HVX_VectorPred comparison_reversal =
       Q6_Q_vand_VR(step_masks, mask_bit_select[step_idx]);
   return vcmp_gt_xacc_w(comparison_reversal, shuffled_lo, shuffled_hi);
+}
+
+inline HVX_VectorPred bitonic_sort_step_swap_mask_sf(
+    unsigned step_idx, const HVX_Vector& step_masks,
+    const HVX_Vector& shuffled_lo, const HVX_Vector& shuffled_hi) {
+  static constexpr uint32_t mask_bit_select[7] = {
+      0x01010101, 0x02020202, 0x04040404, 0x08080808,
+      0x10101010, 0x20202020, 0x40404040};
+  const HVX_VectorPred comparison_reversal =
+      Q6_Q_vand_VR(step_masks, mask_bit_select[step_idx]);
+  return vcmp_gt_xacc_sf(comparison_reversal, shuffled_lo, shuffled_hi);
 }
 
 // Apply one bitonic sort step to fp16 values and int32 ids.
@@ -864,6 +894,43 @@ inline void bitonic_sort_step_hf_i32(unsigned step_idx,
       Q6_V_vmux_QVV(right_idx_mask, idx_shuffle_even[1], idx_shuffle_odd[1]);
 }
 
+// Apply one bitonic sort step to fp32 values and int32 ids.
+inline void bitonic_sort_step_sf_i32(unsigned step_idx,
+                                     const HVX_Vector& step_masks_sf,
+                                     const HVX_Vector& step_masks_i32,
+                                     HVX_Vector& vals, HVX_Vector& idx) {
+  HVX_Vector idx_shuffle_even;
+  HVX_Vector idx_shuffle_odd;
+  bitonic_sort_step_shuffle_hvx(step_idx, sizeof(int32_t), idx,
+                                idx_shuffle_even, idx_shuffle_odd);
+
+  const HVX_VectorPred idx_swap_pred = bitonic_sort_step_swap_mask_w(
+      step_idx, step_masks_i32, idx_shuffle_even, idx_shuffle_odd);
+  const HVX_Vector idx_cmp_result =
+      Q6_V_vand_QR(idx_swap_pred, 0x01010101);
+
+  HVX_Vector even_dup;
+  HVX_Vector odd_dup;
+  bitonic_sort_step_shuffle_hvx(step_idx, sizeof(float), vals, even_dup,
+                                odd_dup);
+  const HVX_VectorPred val_swap_mask_pred = bitonic_sort_step_swap_mask_sf(
+      step_idx, step_masks_sf, even_dup, odd_dup);
+  HVX_Vector val_swap_mask = Q6_V_vand_QR(val_swap_mask_pred, 0x01010101);
+
+  const HVX_VectorPred swap_mask_rev_pred = bitonic_sort_step_swap_mask_sf(
+      step_idx, step_masks_sf, odd_dup, even_dup);
+  const HVX_Vector vals_are_different = Q6_V_vand_QR(
+      Q6_Q_xor_QQ(val_swap_mask_pred, swap_mask_rev_pred), 0x01010101);
+  val_swap_mask = Q6_V_vand_VV(val_swap_mask, vals_are_different);
+  const HVX_Vector swap_because_of_idx =
+      Q6_V_vand_VV(Q6_V_vnot_V(vals_are_different), idx_cmp_result);
+  const HVX_Vector swap_mask = Q6_V_vor_VV(val_swap_mask, swap_because_of_idx);
+
+  const HVX_VectorPred swap_mask_pred = Q6_Q_vand_VR(swap_mask, 0x01010101);
+  vals = Q6_V_vmux_QVV(swap_mask_pred, even_dup, odd_dup);
+  idx = Q6_V_vmux_QVV(swap_mask_pred, idx_shuffle_even, idx_shuffle_odd);
+}
+
 template <bool DataAscending, bool IdxAscending>
 // Sort one HVX candidate vector by fp16 value and int32 id.
 inline void bitonic_sort_hf_i32(const HVX_Vector& step_masks_hf,
@@ -904,6 +971,44 @@ inline void bitonic_sort_hf_i32(const HVX_Vector& step_masks_hf,
     pair = Q6_W_vshuff_VVR(sort_order_mask_i32[0], sort_order_mask_i32[0], -8);
     sort_order_mask_i32[0] = Q6_V_lo_W(pair);
     sort_order_mask_i32[1] = Q6_V_hi_W(pair);
+  }
+}
+
+template <bool DataAscending, bool IdxAscending>
+// Sort one HVX candidate vector by fp32 value and int32 id.
+inline void bitonic_sort_sf_i32(const HVX_Vector& step_masks,
+                                HVX_Vector& vals, HVX_Vector& idx) {
+  HVX_Vector empty = Q6_V_vzero();
+  HVX_Vector full = Q6_V_vsplat_R(0xffffffff);
+  HVX_VectorPair pair;
+  if (DataAscending) {
+    pair = Q6_W_vshuff_VVR(empty, full, 8);
+  } else {
+    pair = Q6_W_vshuff_VVR(full, empty, 8);
+  }
+  HVX_Vector sort_order_mask_sf = Q6_V_lo_W(pair);
+
+  if (IdxAscending) {
+    pair = Q6_W_vshuff_VVR(empty, full, 8);
+  } else {
+    pair = Q6_W_vshuff_VVR(full, empty, 8);
+  }
+  HVX_Vector sort_order_mask_i32 = Q6_V_lo_W(pair);
+
+  for (unsigned phase = 0; phase < 5; ++phase) {
+    const HVX_Vector vals_step_mask =
+        Q6_V_vxor_VV(sort_order_mask_sf, step_masks);
+    const HVX_Vector idx_step_mask =
+        Q6_V_vxor_VV(sort_order_mask_i32, step_masks);
+
+    for (unsigned step = phase; step < phase + 1; --step) {
+      bitonic_sort_step_sf_i32(step, vals_step_mask, idx_step_mask, vals, idx);
+    }
+
+    pair = Q6_W_vshuff_VVR(sort_order_mask_sf, sort_order_mask_sf, -8);
+    sort_order_mask_sf = Q6_V_lo_W(pair);
+    pair = Q6_W_vshuff_VVR(sort_order_mask_i32, sort_order_mask_i32, -8);
+    sort_order_mask_i32 = Q6_V_lo_W(pair);
   }
 }
 
@@ -961,6 +1066,49 @@ inline void bitonic_sort_merge_keep_first_hf_i32(
   }
 }
 
+template <bool DataAscending, bool IdxAscending>
+// Merge two sorted fp32 candidate vectors and keep the first vector.
+inline void bitonic_sort_merge_keep_first_sf_i32(
+    const HVX_Vector& step_masks, HVX_Vector& v1, HVX_Vector& v1_idx,
+    const HVX_Vector& v2, const HVX_Vector& v2_idx) {
+  HVX_VectorPred swap_mask_pred;
+  if (DataAscending) {
+    if (IdxAscending) {
+      swap_mask_pred = Q6_Q_not_Q(Q6_Q_vcmp_gt_VsfVsf(v1, v2));
+    } else {
+      swap_mask_pred = Q6_Q_vcmp_gt_VsfVsf(v2, v1);
+    }
+  } else {
+    if (IdxAscending) {
+      swap_mask_pred = Q6_Q_not_Q(Q6_Q_vcmp_gt_VsfVsf(v2, v1));
+    } else {
+      swap_mask_pred = Q6_Q_vcmp_gt_VsfVsf(v1, v2);
+    }
+  }
+
+  v1 = Q6_V_vmux_QVV(swap_mask_pred, v1, v2);
+  v1_idx = Q6_V_vmux_QVV(swap_mask_pred, v1_idx, v2_idx);
+
+  HVX_Vector vals_step_mask;
+  if (DataAscending) {
+    vals_step_mask = Q6_V_vnot_V(step_masks);
+  } else {
+    vals_step_mask = Q6_V_equals_V(step_masks);
+  }
+
+  HVX_Vector idx_step_mask;
+  if (IdxAscending) {
+    idx_step_mask = Q6_V_vnot_V(step_masks);
+  } else {
+    idx_step_mask = Q6_V_equals_V(step_masks);
+  }
+
+  for (unsigned step_idx = 4; step_idx < 5; --step_idx) {
+    bitonic_sort_step_sf_i32(step_idx, vals_step_mask, idx_step_mask, v1,
+                             v1_idx);
+  }
+}
+
 // Initialize reusable masks for fp16/int32 bitonic sorting.
 inline void bitonic_step_masks_hf_i32(HVX_Vector& step_masks_hf,
                                       HVX_Vector step_masks_i32[2]) {
@@ -982,6 +1130,14 @@ inline void bitonic_step_masks_hf_i32(HVX_Vector& step_masks_hf,
   pair = Q6_W_vshuff_VVR(step_masks_hf, step_masks_hf, -2);
   step_masks_i32[0] = Q6_V_lo_W(pair);
   step_masks_i32[1] = Q6_V_hi_W(pair);
+}
+
+// Initialize reusable masks for fp32/int32 bitonic sorting.
+inline void bitonic_step_masks_sf_i32(HVX_Vector& step_masks) {
+  HVX_Vector step_masks_hf;
+  HVX_Vector step_masks_i32[2];
+  bitonic_step_masks_hf_i32(step_masks_hf, step_masks_i32);
+  step_masks = step_masks_i32[0];
 }
 
 // Load one candidate chunk into HVX vectors, padding missing lanes.
@@ -1030,6 +1186,29 @@ inline void load_bitonic_candidate_chunk_hf_i32(const float16* candidate_scores,
   // loads/masking above operate on locals.
   idx[0] = lo_idx;
   idx[1] = hi_idx;
+}
+
+// Load one fp32 candidate chunk into HVX vectors, padding missing lanes.
+inline void load_bitonic_candidate_chunk_sf_i32(const float* candidate_scores,
+                                                int32_t offset, int32_t count,
+                                                HVX_Vector& vals,
+                                                HVX_Vector& idx) {
+  constexpr int32_t kValsInVec = HVX_VectorSize / sizeof(float);
+  alignas(HVX_VectorSize) static constexpr int32_t lane_ids[kValsInVec] = {
+      0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15,
+      16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31};
+  const HVX_Vector neg_inf_vec = HVX_VectorSF(kNegInf);
+  const HVX_Vector int_max_vec = Q6_V_vsplat_R(INT32_MAX);
+
+  const int32_t vals_to_load = count < kValsInVec ? count : kValsInVec;
+  vals = LoadUnaligned<HVX_Vector>((const int8_t*)&candidate_scores[offset],
+                                   vals_to_load * sizeof(float));
+  idx = Q6_Vw_vadd_VwVw(LoadHVX(&lane_ids[0]), Q6_V_vsplat_R(offset));
+  if (vals_to_load < kValsInVec) {
+    const HVX_VectorPred pred = Q6_Q_vsetq2_R(vals_to_load * sizeof(float));
+    vals = Q6_V_vmux_QVV(pred, vals, neg_inf_vec);
+    idx = Q6_V_vmux_QVV(pred, idx, int_max_vec);
+  }
 }
 
 // Select top-k from a candidate list using HVX bitonic merge steps.
@@ -1125,6 +1304,35 @@ inline void select_topk_regular_bitonic_hf(const float16* token_scores,
   select_topk_candidates_bitonic_hf(token_scores, selection_scores,
                                     candidate_ids, num_experts, selected_count,
                                     selected_weights, selected_ids);
+}
+
+// Select regular top-k experts from fp32 logits with HVX bitonic candidates.
+inline void select_topk_regular_bitonic_sf(const float* token_logits,
+                                           int32_t num_experts,
+                                           int32_t selected_count,
+                                           float* selected_logits,
+                                           int32_t* selected_ids) {
+  constexpr int32_t kValsInVec = HVX_VectorSize / sizeof(float);
+  HVX_Vector best_vals = HVX_VectorSF(kNegInf);
+  HVX_Vector best_idx = Q6_V_vsplat_R(INT32_MAX);
+  HVX_Vector step_masks;
+  bitonic_step_masks_sf_i32(step_masks);
+
+  for (int32_t offset = 0; offset < num_experts; offset += kValsInVec) {
+    HVX_Vector candidate_vals;
+    HVX_Vector candidate_idx;
+    load_bitonic_candidate_chunk_sf_i32(token_logits, offset,
+                                        num_experts - offset, candidate_vals,
+                                        candidate_idx);
+    bitonic_sort_sf_i32<true, false>(step_masks, candidate_vals, candidate_idx);
+    bitonic_sort_merge_keep_first_sf_i32<false, true>(
+        step_masks, best_vals, best_idx, candidate_vals, candidate_idx);
+  }
+
+  StoreUnalignedHVX((int8_t*)selected_logits, best_vals,
+                    selected_count * sizeof(float));
+  StoreUnalignedHVX((int8_t*)selected_ids, best_idx,
+                    selected_count * sizeof(int32_t));
 }
 
 // Scalar top-k selection from selected groups.
@@ -1357,6 +1565,70 @@ inline void route_regular_token_hf(
                       routed_scaling_factor);
 }
 
+// Route one token through Gemma4 flat top-k selection. Gemma4 selects by raw
+// fp32 router logits, normalizes only the selected logits, then folds in the
+// learned per-expert scale.
+inline void route_gemma4_token_sf(const float* token_logits,
+                                  const float* per_expert_scale,
+                                  float* out_weights, int32_t* out_ids,
+                                  int32_t num_experts, int32_t topk) {
+  constexpr int32_t kValsInVec = HVX_VectorSize / sizeof(float);
+  if (topk <= 0 || topk > kValsInVec || num_experts <= 0 ||
+      num_experts > kMaxExperts) {
+    zero_topk(out_weights, out_ids, topk);
+    return;
+  }
+
+  int32_t selected_count = topk;
+  if (selected_count > num_experts) {
+    selected_count = num_experts;
+  }
+
+  float selected_logits[kValsInVec] __attribute__((aligned(HVX_VectorSize)));
+  int32_t selected_ids[kValsInVec] __attribute__((aligned(HVX_VectorSize)));
+  StoreHVX(&selected_logits[0], HVX_VectorSF(kNegInf));
+  StoreHVX(&selected_ids[0], Q6_V_vzero());
+
+  select_topk_regular_bitonic_sf(token_logits, num_experts, selected_count,
+                                 selected_logits, selected_ids);
+
+  const HVX_Vector selected_logits_v =
+      LoadUnaligned<HVX_Vector>((const int8_t*)&selected_logits[0]);
+  MaxReducerFloat max_reducer;
+  max_reducer.reduce(selected_logits_v, selected_count);
+  const HVX_Vector max_v = max_reducer.finishSplat();
+
+  DiffExpFloat diff_exp;
+  const HVX_Vector exp_v = diff_exp(selected_logits_v, max_v);
+  SumReducerFloat sum_reducer;
+  sum_reducer.reduce(exp_v, selected_count);
+  const HVX_Vector sum_v = sum_reducer.finishSplat();
+
+  float sum_arr[kValsInVec] __attribute__((aligned(HVX_VectorSize)));
+  StoreHVX(&sum_arr[0], sum_v);
+  float denom = sum_arr[0];
+  if (denom == 0.0F) denom = 1.0F;
+
+  float inv_denom = 1.0F / denom;
+  NormalizerFloat normalizer(&inv_denom);
+  const HVX_Vector weights_v = normalizer.normalize(exp_v);
+
+  float selected_scales[kValsInVec] __attribute__((aligned(HVX_VectorSize)));
+  StoreHVX(&selected_scales[0], Q6_V_vzero());
+  for (int32_t i = 0; i < topk; ++i) {
+    selected_scales[i] = per_expert_scale[selected_ids[i]];
+  }
+  const HVX_Vector scale_v =
+      LoadUnaligned<HVX_Vector>((const int8_t*)&selected_scales[0]);
+  const HVX_Vector out_weights_v = Q6_Vsf_vmpy_VsfVsf(weights_v, scale_v);
+  StoreUnalignedHVX((int8_t*)out_weights, out_weights_v,
+                    topk * sizeof(float));
+
+  const HVX_Vector selected_ids_v =
+      LoadUnaligned<HVX_Vector>((const int8_t*)&selected_ids[0]);
+  StoreUnalignedHVX((int8_t*)out_ids, selected_ids_v, topk * sizeof(int32_t));
+}
+
 // Assign per-thread VTCM score scratch slices.
 inline void init_vtcm_scratch_buffers(RouterTileParams* params,
                                       int32_t thread_id, int32_t num_threads) {
@@ -1428,6 +1700,34 @@ inline uint32_t init_common_params(const AicJitEntryPointConfig* entryConfig,
   return JIT_DEV_STATUS_SUCCESS;
 }
 
+inline uint32_t init_gemma4_params(const AicJitEntryPointConfig* entryConfig,
+                                   const AicJitPointerArray* pointerArray,
+                                   Gemma4RouterParams* params) {
+  params->input = (const float*)pointerArray->pointers[0];
+  params->per_expert_scale = (const float*)pointerArray->pointers[1];
+  params->topk_weights = (float*)pointerArray->pointers[2];
+  params->topk_ids = (int32_t*)pointerArray->pointers[3];
+  params->num_tokens = *(const int32_t*)pointerArray->pointers[4];
+  params->num_experts = *(const int32_t*)pointerArray->pointers[5];
+  params->topk = *(const int32_t*)pointerArray->pointers[6];
+
+  const int32_t local_thread_id =
+      entryConfig->threadID % entryConfig->numThreads;
+  const int32_t compute_threads_per_core = entryConfig->numThreads;
+  const int32_t compute_thread_id = local_thread_id;
+  const int32_t workers = entryConfig->numCores * compute_threads_per_core;
+  const int32_t worker_id =
+      entryConfig->coreID * compute_threads_per_core + compute_thread_id;
+  const int32_t tokens_per_worker = ceil_div_i32(params->num_tokens, workers);
+  params->token_begin = worker_id * tokens_per_worker;
+  params->token_end = params->token_begin + tokens_per_worker;
+  if (params->token_end > params->num_tokens) {
+    params->token_end = params->num_tokens;
+  }
+
+  return JIT_DEV_STATUS_SUCCESS;
+}
+
 // Process assigned tokens through grouped routing.
 inline void process_grouped_direct(const RouterTileParams& params,
                                    ScoreMode score_mode) {
@@ -1453,6 +1753,15 @@ inline void process_regular_direct(const RouterTileParams& params,
         params.topk_ids + token * params.topk, params.num_experts, params.topk,
         params.renormalize, params.routed_scaling_factor, params.use_bias,
         score_mode);
+  }
+}
+
+inline void process_gemma4_direct(const Gemma4RouterParams& params) {
+  for (int32_t token = params.token_begin; token < params.token_end; ++token) {
+    route_gemma4_token_sf(
+        params.input + token * params.num_experts, params.per_expert_scale,
+        params.topk_weights + token * params.topk,
+        params.topk_ids + token * params.topk, params.num_experts, params.topk);
   }
 }
 
@@ -1487,6 +1796,22 @@ inline uint32_t regular_kernel_main(const AicJitEntryPointConfig* entryConfig,
   }
 
   process_regular_direct(params, params.score_mode);
+  return JIT_DEV_STATUS_SUCCESS;
+}
+
+// Entry point for the Gemma4 router kernel.
+inline uint32_t gemma4_kernel_main(const AicJitEntryPointConfig* entryConfig,
+                                   const AicJitPointerArray* pointerArray) {
+  Gemma4RouterParams params;
+  uint32_t status = init_gemma4_params(entryConfig, pointerArray, &params);
+  if (status != JIT_DEV_STATUS_SUCCESS) {
+    return status;
+  }
+  if (params.token_begin >= params.token_end) {
+    return JIT_DEV_STATUS_SUCCESS;
+  }
+
+  process_gemma4_direct(params);
   return JIT_DEV_STATUS_SUCCESS;
 }
 
