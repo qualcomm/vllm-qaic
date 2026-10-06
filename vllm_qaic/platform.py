@@ -704,6 +704,11 @@ class QaicPlatform(Platform):
         if attn_selector_config.use_sparse:
             raise NotImplementedError("QAic doesn't support sparse attention")
 
+        if cls.primary_attn_backend_cls.endswith("TritonAttentionBackend"):
+            logger.info_once(
+                "QAIC Triton forward: selecting TritonAttentionBackend "
+                "(kernel_unified_attention; reduce_segments when segmented)"
+            )
         return cls.primary_attn_backend_cls
 
     @classmethod
