@@ -50,6 +50,228 @@ def rms_norm_hexagon(
     return dst, out
 
 
+# ---------------------------------------------------------------------------
+# Qwen3.5 gated-delta-net (GDN) core — on-device Hexagon kernels.
+#
+# These back the kernel path in patch_qwen3_5._gdn_core_qaic, replacing the
+# pure-torch CPU fallback. Three stages, each a separate NSP entry point in
+# csrc/gdn_core/kernel.cpp, staged from Python exactly like the torch reference.
+# Scalars are passed as raw Python ints/floats (read as *(int32_t*)/*(float*)
+# in the kernel), matching the topk_router convention below.
+#
+# All device tensors are fp16 (v68 is fp16-only); g/beta are fp32 to match the
+# torch reference's fp32 gating/recurrence accumulation.
+# ---------------------------------------------------------------------------
+
+
+def _act_flags(activation: str | None) -> int:
+    """1 if the conv activation is silu/swish, else 0 (matches causal_conv1d.py)."""
+    return 1 if activation in ("silu", "swish") else 0
+
+
+def gdn_gating_hexagon(
+    a: torch.Tensor,  # fp16 [T, HV]
+    b: torch.Tensor,  # fp16 [T, HV]
+    A_log: torch.Tensor,  # fp32 [HV]
+    dt_bias: torch.Tensor,  # fp32 [HV]
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute GDN gating: g=-exp(A_log)*softplus(a+dt_bias), beta=sigmoid(b).
+
+    Returns (g, beta) as fp32 tensors.
+    """
+    a = a.to(torch.float16).contiguous()
+    b = b.to(torch.float16).contiguous()
+    A_log = A_log.to(torch.float32).contiguous()
+    dt_bias = dt_bias.to(torch.float32).contiguous()
+    T, HV = a.shape
+    g = torch.empty((T, HV), dtype=torch.float32, device=a.device)
+    beta = torch.empty((T, HV), dtype=torch.float32, device=a.device)
+    _kernel("gdn_gating")[_NSP_COUNT, _THREAD_COUNT](
+        a, b, A_log, dt_bias, g, beta, int(T), int(HV)
+    )
+    return g, beta
+
+
+def gdn_conv1d_update_hexagon(
+    x: torch.Tensor,  # fp16 [ND, conv_dim]
+    conv_state: torch.Tensor,  # fp16 [num_slots, conv_dim, state_len] (mutated)
+    weight: torch.Tensor,  # fp16 [conv_dim, K_CONV]
+    bias: torch.Tensor | None,  # fp16 [conv_dim] or None
+    slot_ids: torch.Tensor,  # int32 [ND]  KV slot per decode seq
+    activation: str | None,
+) -> torch.Tensor:
+    """Decode (1-token) depthwise causal conv + in-place state roll + silu.
+
+    Returns [ND, conv_dim]. Indexes ``conv_state`` by ``slot_ids`` inside the
+    kernel, so the full cache is passed and no per-token gather/scatter is
+    needed (mirrors ``gdn_recurrent_decode_hexagon``).
+    """
+    x = x.to(torch.float16).contiguous()
+    weight = weight.to(torch.float16).contiguous()
+    slot_ids = slot_ids.to(torch.int32).contiguous()
+    ND, conv_dim = x.shape
+    K_CONV = weight.shape[1]
+    bias_present = 1 if bias is not None else 0
+    if bias is None:
+        bias = torch.empty((conv_dim,), dtype=torch.float16, device=x.device)
+    else:
+        bias = bias.to(torch.float16).contiguous()
+    out = torch.empty((ND, conv_dim), dtype=torch.float16, device=x.device)
+    _kernel("gdn_conv1d_update")[_NSP_COUNT, _THREAD_COUNT](
+        x,
+        conv_state,
+        weight,
+        bias,
+        out,
+        slot_ids,
+        int(ND),
+        int(conv_dim),
+        int(K_CONV),
+        int(bias_present),
+        _act_flags(activation),
+    )
+    return out
+
+
+def gdn_conv1d_prefill_hexagon(
+    x: torch.Tensor,  # fp16 [conv_dim, Ttot]  (channel-major)
+    weight: torch.Tensor,  # fp16 [conv_dim, K_CONV]
+    bias: torch.Tensor | None,  # fp16 [conv_dim] or None
+    conv_states: torch.Tensor,  # fp16 [num_slots, conv_dim, state_len]  (read/write)
+    query_start_loc: torch.Tensor,  # int32 [num_seqs+1]
+    cache_indices: torch.Tensor,  # int32 [num_seqs]
+    has_initial_state: torch.Tensor,  # bool/int [num_seqs]
+    activation: str | None,
+) -> torch.Tensor:
+    """Varlen prefill depthwise causal conv + state write-back + silu.
+
+    Returns [conv_dim, Ttot].
+    """
+    x = x.to(torch.float16).contiguous()
+    weight = weight.to(torch.float16).contiguous()
+    conv_dim, Ttot = x.shape
+    K_CONV = weight.shape[1]
+    num_seqs = cache_indices.shape[0]
+    bias_present = 1 if bias is not None else 0
+    if bias is None:
+        bias = torch.empty((conv_dim,), dtype=torch.float16, device=x.device)
+    else:
+        bias = bias.to(torch.float16).contiguous()
+    qstart = query_start_loc.to(torch.int32).contiguous()
+    cidx = cache_indices.to(torch.int32).contiguous()
+    hinit = has_initial_state.to(torch.int32).contiguous()
+    out = torch.empty((conv_dim, Ttot), dtype=torch.float16, device=x.device)
+    _kernel("gdn_conv1d_prefill")[_NSP_COUNT, _THREAD_COUNT](
+        x,
+        weight,
+        bias,
+        conv_states,
+        qstart,
+        cidx,
+        hinit,
+        out,
+        int(conv_dim),
+        int(Ttot),
+        int(num_seqs),
+        int(K_CONV),
+        int(bias_present),
+        _act_flags(activation),
+    )
+    return out
+
+
+def gdn_recurrent_decode_hexagon(
+    q: torch.Tensor,  # fp16 [ND, H, K]
+    k: torch.Tensor,  # fp16 [ND, H, K]
+    v: torch.Tensor,  # fp16 [ND, HV, V]
+    g: torch.Tensor,  # fp32 [ND, HV]
+    beta: torch.Tensor,  # fp32 [ND, HV]
+    ssm_state: torch.Tensor,  # fp16 [num_slots, HV, V, K]  (read/write)
+    slot_ids: torch.Tensor,  # int32 [ND]
+    scale: float,
+    l2_eps: float = 1e-6,
+) -> torch.Tensor:
+    """Per-token decode gated delta-rule scan (one token per seq).
+
+    Returns o fp16 [ND, HV, V].
+    """
+    q = q.to(torch.float16).contiguous()
+    k = k.to(torch.float16).contiguous()
+    v = v.to(torch.float16).contiguous()
+    g = g.to(torch.float32).contiguous()
+    beta = beta.to(torch.float32).contiguous()
+    slot_ids = slot_ids.to(torch.int32).contiguous()
+    ND, H, Kd = q.shape
+    HV, Vd = v.shape[1], v.shape[2]
+    o = torch.empty((ND, HV, Vd), dtype=torch.float16, device=q.device)
+    _kernel("gdn_recurrent_decode")[_NSP_COUNT, _THREAD_COUNT](
+        q,
+        k,
+        v,
+        g,
+        beta,
+        o,
+        ssm_state,
+        slot_ids,
+        int(ND),
+        int(H),
+        int(HV),
+        int(Kd),
+        int(Vd),
+        float(scale),
+        float(l2_eps),
+    )
+    return o
+
+
+def gdn_recurrent_prefill_hexagon(
+    q: torch.Tensor,  # fp16 [Ttot, H, K]
+    k: torch.Tensor,  # fp16 [Ttot, H, K]
+    v: torch.Tensor,  # fp16 [Ttot, HV, V]
+    g: torch.Tensor,  # fp32 [Ttot, HV]
+    beta: torch.Tensor,  # fp32 [Ttot, HV]
+    ssm_state: torch.Tensor,  # fp16 [num_slots, HV, V, K]  (read/write)
+    query_start_loc: torch.Tensor,  # int32 [num_seqs+1]
+    state_indices: torch.Tensor,  # int32 [num_seqs]
+    has_initial_state: torch.Tensor,  # bool/int [num_seqs]
+    scale: float,
+    l2_eps: float = 1e-6,
+) -> torch.Tensor:
+    """Varlen prefill gated delta-rule sequential scan. Returns o fp16 [Ttot, HV, V]."""
+    q = q.to(torch.float16).contiguous()
+    k = k.to(torch.float16).contiguous()
+    v = v.to(torch.float16).contiguous()
+    g = g.to(torch.float32).contiguous()
+    beta = beta.to(torch.float32).contiguous()
+    qstart = query_start_loc.to(torch.int32).contiguous()
+    sidx = state_indices.to(torch.int32).contiguous()
+    hinit = has_initial_state.to(torch.int32).contiguous()
+    Ttot, H, Kd = q.shape
+    HV, Vd = v.shape[1], v.shape[2]
+    num_seqs = sidx.shape[0]
+    o = torch.empty((Ttot, HV, Vd), dtype=torch.float16, device=q.device)
+    _kernel("gdn_recurrent_prefill")[_NSP_COUNT, _THREAD_COUNT](
+        q,
+        k,
+        v,
+        g,
+        beta,
+        o,
+        ssm_state,
+        qstart,
+        sidx,
+        hinit,
+        int(num_seqs),
+        int(H),
+        int(HV),
+        int(Kd),
+        int(Vd),
+        float(scale),
+        float(l2_eps),
+    )
+    return o
+
+
 current_platform.import_kernels()
 # Set QAIC_ROUTER_FP32_SCORING=1 to use fp32 softmax/sigmoid math instead of
 # the default fp16 HVX math.  The kernel receives one score-mode id:

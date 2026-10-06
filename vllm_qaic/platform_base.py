@@ -70,6 +70,10 @@ class QaicPlatform(Platform):
     device_communicator_cls = "vllm_qaic.distributed.communicator.QAicCommunicator"
 
     @classmethod
+    def support_hybrid_kv_cache(cls) -> bool:
+        return True
+
+    @classmethod
     def import_kernels(cls) -> None:
         # QAIC has no CUDA kernels. Skip all kernel imports — importing vllm._C
         # on non-CUDA hardware triggers a C++ bad_alloc/terminate (SIGABRT), which

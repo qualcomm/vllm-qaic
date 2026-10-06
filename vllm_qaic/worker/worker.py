@@ -480,7 +480,20 @@ class QaicWorkerPyt(QaicWorker):
 
         # Warmup and tune the kernels used during model execution before
         # cuda graph capture.
-        kernel_warmup(self)
+        # qwen_triton_warmup (added in newer vllm) calls triton.next_power_of_2
+        # which was removed in Triton 3.x. On QAIC, GDN runs on Hexagon kernels
+        # so this Triton warmup is a no-op. Patch it out before calling
+        # kernel_warmup, restoring it unconditionally afterward.
+        import vllm.model_executor.warmup.kernel_warmup as _kw_mod
+
+        _orig_qwen_warmup = getattr(_kw_mod, "qwen_triton_warmup", None)
+        if _orig_qwen_warmup is not None:
+            _kw_mod.qwen_triton_warmup = lambda *a, **kw: None
+        try:
+            kernel_warmup(self)
+        finally:
+            if _orig_qwen_warmup is not None:
+                _kw_mod.qwen_triton_warmup = _orig_qwen_warmup
 
         cuda_graph_memory_bytes = 0
         # FIXME need better handling of AoT v/s torch compile mode when
