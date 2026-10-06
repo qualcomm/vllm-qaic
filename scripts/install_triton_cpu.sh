@@ -129,8 +129,22 @@ export TRITON_CUPTI_INCLUDE_PATH="${TRITON_CUPTI_INCLUDE_PATH:-/usr/include}"
 export TRITON_CUPTI_LIB_PATH="${TRITON_CUPTI_LIB_PATH:-/usr/lib/x86_64-linux-gnu}"
 
 # ── Build dependencies (needed because --no-build-isolation skips pyproject.toml) ──
-# Versions match triton-cpu's pyproject.toml [build-system].requires
-${PIP} install "pybind11>=2.13.1" "ninja>=1.11.1"
+# pip does not install triton-cpu's [build-system].requires under
+# --no-build-isolation, so install them here: requirements/build.txt
+# (setuptools, wheel, cmake, ...) plus triton-cpu's pybind11/ninja.
+# install.sh installs requirements/build.txt before calling this script, but
+# a standalone run (e.g. in a fresh venv) would otherwise lack them: Python
+# 3.12 venvs ship no setuptools. After install.sh this is a no-op.
+${PIP} install -r "${SCRIPT_DIR}/../requirements/build.txt" \
+    "pybind11>=2.13.1" "ninja>=1.11.1"
+
+# pip treats a half-removed cmake as installed, leaving a wrapper that exits 1;
+# fail here with a clear fix instead of a CalledProcessError inside setup.py.
+if ! cmake --version >/dev/null 2>&1; then
+    echo "ERROR: 'cmake --version' failed ($(command -v cmake || echo 'not on PATH'))." >&2
+    echo "  Fix: ${PIP} install --force-reinstall 'cmake>=3.26'" >&2
+    exit 1
+fi
 
 # ── Install (editable, no build isolation so it reuses existing torch) ──────
 echo "=== Building and installing triton-cpu (editable) ==="
