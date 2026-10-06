@@ -14,15 +14,17 @@ AOT (Ahead-of-Time) mode uses the QEfficient library to compile models into Qual
 
 !!! info "Configuration banner"
     Before installation starts, `install.sh` prints a full summary of every version and
-    setting it will use (vllm, vllm-qaic, torch, qeff branch, target device, triton-cpu
-    state). Review the banner output and override any variable before re-running.
+    setting it will use (vllm, vllm-qaic, torch, qeff branch, target device, optional
+    triton-cpu parity-test extra). Review the banner output and override any variable before re-running.
 
 ??? example "Optional environment overrides"
     ```bash
     # Pin transformers version
     TRANSFORMERS_VERSION_AOT=4.55.3 ./scripts/install.sh aot
 
-    # Enable triton-cpu backend (for Speculative Decoding)
+    # Dedicated parity environment: triton-cpu is required for mandatory
+    # Tier A Numba/Triton rejection-sampler parity tests. It is not needed for
+    # normal AOT serving or Speculative Decoding, which uses Numba.
     # triton-cpu is a large C++ build — requires ~10 GB of free disk space at TRITON_CPU_SRC
     TRITON_CPU=1 ./scripts/install.sh aot
 

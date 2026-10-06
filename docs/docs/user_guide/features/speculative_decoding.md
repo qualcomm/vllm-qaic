@@ -5,14 +5,11 @@ Speculative decoding (SpD) accelerates token generation by using a fast proposer
 !!! tip "Quick recommendation"
     Start with **ngram** SpD — it requires no separate model binary or dedicated core allocation and works well for summarization and conversational workloads. Switch to **draft_model** if you need higher acceptance rates on diverse generation tasks.
 
-!!! note "Triton-CPU backend required for AOT SpD"
-    For AOT mode, the rejection sampler uses Triton kernels running on CPU.
-    Install the triton-cpu backend during setup:
-    ```bash
-    TRITON_CPU=1 ./scripts/install.sh aot
-    # Or standalone after installation:
-    ./scripts/install_triton_cpu.sh
-    ```
+!!! note "AOT rejection sampler runs on Numba"
+    In AOT mode, the host-side rejection sampler runs on Numba (pinned in the AOT
+    requirements and installed by `./scripts/install.sh aot`). No triton-cpu backend
+    is needed for SpD or normal AOT serving. The dedicated parity environment must
+    be installed with `TRITON_CPU=1` to run mandatory Tier A Numba/Triton tests.
 
 ## Methods
 
@@ -234,7 +231,8 @@ No additional hardware is required — both models run on the same device.
     export LD_PRELOAD="$IOMP_PATH:$LD_PRELOAD"
     ```
 
-    Set `VLLM_DISABLE_LD_PRELOAD_OPT=1` to opt out of this tuning.
+    When `libiomp5.so` is on `LD_PRELOAD`, vllm-qaic sets `KMP_BLOCKTIME=1` and
+    `KMP_TPAUSE=0`. Set `VLLM_DISABLE_LD_PRELOAD_OPT=1` to opt out of this tuning.
 
 ## SpD with Disaggregated Serving
 

@@ -576,6 +576,7 @@ def qaic_runner_factory(vllm_runner, device_pool_ids):
         draft_override_qaic_config=None,
         num_device_groups=1,
         device_group_size=1,
+        disable_log_stats=True,
     ):
         ids = _device_pool.acquire(
             device_pool_ids, num_device_groups * device_group_size
@@ -598,6 +599,7 @@ def qaic_runner_factory(vllm_runner, device_pool_ids):
                 kv_cache_dtype=kv_dtype,
                 enable_prefix_caching=False,
                 async_scheduling=False,
+                disable_log_stats=disable_log_stats,
                 speculative_config=speculative_config,
                 additional_config=additional_config,
             )

@@ -1,0 +1,26 @@
+{
+ "constants": {
+  "GREEDY_TEMPERATURE": 0,
+  "MAX_SPEC_LEN": 128,
+  "PLACEHOLDER_TOKEN_ID": -1
+ },
+ "external_hashes": {
+  "vllm.v1.spec_decode.utils:unconditional_to_conditional_rates": "2f32289fdac87fb8314c5e8d978f5320d4f90b4a993ad1659e1174a9d4a1b8c7"
+ },
+ "hashes": {
+  "RejectionSampler.__init__": "9b776a7b9f0a99db785b90f540bba453f1d079ef4ad07f6deae7a9a4af46ace4",
+  "RejectionSampler.forward": "1598edd8c623898feb42ad70b19e64bd8f3060d082b310f1d7d033523e05a57d",
+  "apply_sampling_constraints": "5ccbdb5f0d22d88a9955455c22b818d0018f1e8c6a3c195ec4a2d36ffece3a0a",
+  "expand_batch_to_tokens": "4a72e2584485d3ec940526d745e126073fc094f435fc880a90e8a5bbb38728cb",
+  "expand_kernel": "a97200e5f1ba11474ef8acb75d5754a300b6a65d9da6c8e8133149a37167b62d",
+  "generate_uniform_probs": "f3e8fbcf4f6e8332bbe61141fad916087b61256f4dada65663d274b48e27524b",
+  "rejection_greedy_sample_kernel": "e90dc60a00fd5fec7ca054d56e3999af17eee052a641a940a70c5e0461956759",
+  "rejection_random_sample_kernel": "eca4d91b2b5b9edaa261daa4847f7a693856485370138c66e8bea0bf492de10e",
+  "rejection_sample": "35d7236c81a06800520691e8eb79014b33653e05ce5e982901fdb68ea003a1ea",
+  "sample_recovered_tokens": "8b6fff2684f22ad31a09eedc1d898540e888071e64413fdbba070e2868236cfb",
+  "sample_recovered_tokens_kernel": "abc87547ef846951be8a645649f748a8e32326aba95ac33767da613690617ebd"
+ },
+ "module": "vllm.v1.sample.rejection_sampler",
+ "normalization": "rstrip lines; textwrap.dedent; strip blank edges; segment = first decorator .. end of def (ast)",
+ "vllm_version": "0.23.0+empty"
+}

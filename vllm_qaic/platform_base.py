@@ -363,6 +363,10 @@ class QaicPlatform(Platform):
             # CPUs (KMP_TPAUSE is a documented no-op on non-Intel silicon; the other
             # KMP_* vars measurably speed up CPU-bound speculative-decoding proposers
             # on AMD EPYC as well).
+            # KMP_*_BARRIER_PATTERN=dist,dist is deliberately not set: under dist
+            # barriers, OpenMP teams forked from non-main threads (e.g. the host
+            # rejection sampler) busy-spin between regions and starve the
+            # engine threads (see docs/qaic for the measured SpD slowdown).
             # Set VLLM_DISABLE_LD_PRELOAD_OPT=1 to skip this optimization.
             ld_preload_str = os.getenv("LD_PRELOAD", "")
             disable_opt = os.getenv("VLLM_DISABLE_LD_PRELOAD_OPT", "0") == "1"
@@ -370,15 +374,9 @@ class QaicPlatform(Platform):
                 import platform
 
                 cpu_info = platform.processor() or "unknown"
-                print(
-                    f"Updating KMP_BLOCKTIME, KMP_TPAUSE, "
-                    f"KMP_FORKJOIN_BARRIER_PATTERN for {cpu_info}"
-                )
+                print(f"Updating KMP_BLOCKTIME, KMP_TPAUSE for {cpu_info}")
                 os.environ["KMP_BLOCKTIME"] = "1"
                 os.environ["KMP_TPAUSE"] = "0"
-                os.environ["KMP_FORKJOIN_BARRIER_PATTERN"] = "dist,dist"
-                os.environ["KMP_PLAIN_BARRIER_PATTERN"] = "dist,dist"
-                os.environ["KMP_REDUCTION_BARRIER_PATTERN"] = "dist,dist"
 
         from vllm.config import CompilationMode
 
