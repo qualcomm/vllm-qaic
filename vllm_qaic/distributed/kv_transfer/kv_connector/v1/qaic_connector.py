@@ -96,7 +96,6 @@ class ReqMeta:
     # Keeping List[str] for backward compatibility with QAIC handoff server;
     # even though will store only KV shm name.
     kv_handoff_metadata: list[str] | None = None
-    handoff_id: str | None = None
 
     @staticmethod
     def make_meta(
@@ -109,11 +108,12 @@ class ReqMeta:
         token_ids_tensor = torch.tensor(token_ids)
         return ReqMeta(
             token_ids=token_ids_tensor,
-            token_hash=hash(tuple(token_ids)),
+            token_hash=hash((hash(tuple(token_ids)), handoff_id))
+            if handoff_id is not None
+            else hash(tuple(token_ids)),
             is_store=is_store,
             is_prefill_partial=is_prefill_partial,
             block_id=block_id,
-            handoff_id=handoff_id,
         )
 
 
@@ -429,9 +429,7 @@ class QaicConnector(KVConnectorBase_V1):
                 f"Unable to access KV store due to an exception: {e}"
             ) from e
 
-    def get_kvcache_from_store(
-        self, prompt_hash, handoff_id=None
-    ) -> QaicKvHandOffGetResp | None:
+    def get_kvcache_from_store(self, prompt_hash) -> QaicKvHandOffGetResp | None:
         """Get kv cache from kv_store."""
         result = None
         # Get kv cache from kv_store
@@ -440,7 +438,6 @@ class QaicConnector(KVConnectorBase_V1):
             timestamp=time.perf_counter(),
             key_hash=prompt_hash,
             rank=self.kv_rank,
-            handoff_id=handoff_id,
         )
         encode_req_pkt = self.encoder.encode(req_pkt)[0]
         max_retries = KV_LOOKUP_RETRIES
@@ -534,9 +531,7 @@ class QaicConnector(KVConnectorBase_V1):
                 kv_shm_buff_name = None
                 # Get kv cache from kv_store
                 if not self.is_producer:
-                    resp = self.get_kvcache_from_store(
-                        request.token_hash, request.handoff_id
-                    )
+                    resp = self.get_kvcache_from_store(request.token_hash)
                     assert resp is not None
                     assert resp.buff_type == 0, (
                         "Raw np.ndarray KV exchange not supported yet"
@@ -624,7 +619,6 @@ class QaicConnector(KVConnectorBase_V1):
                     rank=self.kv_rank,
                     payload=request.kv_handoff_metadata,
                     num_buff=1,
-                    handoff_id=request.handoff_id,
                 )
                 self.send_kv_cache_to_store(req_pk)
         return
