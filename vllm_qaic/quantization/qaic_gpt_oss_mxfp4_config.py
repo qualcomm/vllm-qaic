@@ -44,16 +44,23 @@ from vllm.model_executor.layers.fused_moe import (
     RoutedExperts,
 )
 from vllm.model_executor.layers.fused_moe.config import biased_moe_quant_config
+from vllm.model_executor.layers.fused_moe.experts.gpt_oss_triton_kernels_moe import (
+    OAITritonExperts,
+)
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization import register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from vllm.model_executor.layers.quantization.mxfp4 import GptOssMxfp4MoEMethod
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 
+from vllm_qaic.logger import init_logger
+from vllm_qaic.ops._triton_flags import triton_op_enabled
 from vllm_qaic.ops.unquantized_fused_moe_method import QAicUnquantizedFusedMoEMethod
 from vllm_qaic.utils import QAIC_GPT_OSS_MXFP4_METHOD
 
@@ -85,6 +92,36 @@ def check_qaic_mxfp4_ops_available() -> None:
             "torch_qaic does not provide. Install a torch_qaic build that "
             "includes qaic::mxfp4_mm and qaic::swigluoai."
         )
+
+
+logger = init_logger(__name__)
+
+
+class QaicTritonGptOssMxfp4MoEMethod(GptOssMxfp4MoEMethod):
+    """QAIC adapter for the upstream modular Triton MXFP4 MoE path."""
+
+    def __init__(self, moe: FusedMoEConfig):
+        super().__init__(moe)
+
+        # Upstream auto-selection returns (NONE, None) for an OOT platform
+        # when none of its built-in platform branches match. QAIC has already
+        # validated this Triton backend separately, so explicitly select the
+        # modular OAI implementation here.
+        self.mxfp4_backend = Mxfp4MoeBackend.TRITON
+        self.experts_cls = OAITritonExperts
+        logger.info_once(
+            "QAIC GPT-OSS MXFP4: forcing backend=%s, experts=%s",
+            self.mxfp4_backend.value,
+            self.experts_cls.__name__,
+        )
+
+    @property
+    def is_monolithic(self) -> bool:
+        # QAIC uses OAITritonExperts, which is a modular experts
+        # implementation. During FusedMoE construction the backend oracle can
+        # leave experts_cls unset until weights are processed, so the base
+        # property cannot safely dereference it here.
+        return False
 
 
 @register_quantization_config(QAIC_GPT_OSS_MXFP4_METHOD)
@@ -141,6 +178,11 @@ class QaicGptOssMxfp4Config(QuantizationConfig):
         if isinstance(layer, LinearBase):
             return UnquantizedLinearMethod()
         if isinstance(layer, RoutedExperts):
+            if triton_op_enabled("GPT_OSS_MOE"):
+                logger.info_once(
+                    "QAIC GPT-OSS MXFP4: selecting modular upstream Triton MoE method"
+                )
+                return QaicTritonGptOssMxfp4MoEMethod(layer.moe_config)
             return QaicGptOssMxfp4MoEMethod(layer.moe_config)
         if isinstance(layer, Attention):
             return None

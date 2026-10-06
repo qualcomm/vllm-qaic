@@ -239,3 +239,6 @@ class QAicLlama3RotaryEmbedding(Llama3RotaryEmbedding):
             cos_sin_cache,
             self.is_neox_style,
         )
+
+
+ApplyRotaryEmb.forward_static = staticmethod(QAicApplyRotaryEmb.forward_static)
