@@ -340,6 +340,9 @@ class QaicModelRunnerPyt(GPUModelRunner):
         device: torch.device,
     ):
         self.profiling_iter = 0
+        # Finished requests not yet reported to the attention backends; steps
+        # without scheduled tokens skip _prepare_inputs, so carry them over.
+        self._pending_finished_req_ids: set[str] = set()
         with _torch_qaic_wrapper():
             super().__init__(vllm_config, device)
 
@@ -354,12 +357,17 @@ class QaicModelRunnerPyt(GPUModelRunner):
     ):
         # Propagate updated req_ids (post-reorder) to attention metadata
         # builders that support per-sequence KV caching.
+        # Finished req_ids tell the attention impls which per-request KV
+        # caches can be freed; a request missing from this batch (e.g. still
+        # in flight in another PP micro-batch) must keep its cache.
         req_ids = list(self.input_batch.req_ids)
+        finished_req_ids = self._pending_finished_req_ids
+        self._pending_finished_req_ids = set()
         for kv_cache_gid_groups in self.attn_groups:
             for attn_group in kv_cache_gid_groups:
                 builder = attn_group.get_metadata_builder()
                 if hasattr(builder, "update_req_ids"):
-                    builder.update_req_ids(req_ids)
+                    builder.update_req_ids(req_ids, finished_req_ids)
         return super()._prepare_inputs(scheduler_output, num_scheduled_tokens)
 
     def _sync_device(self) -> None:
@@ -372,6 +380,7 @@ class QaicModelRunnerPyt(GPUModelRunner):
         scheduler_output: SchedulerOutput,
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
+        self._pending_finished_req_ids |= scheduler_output.finished_req_ids
         with optional_qaic_profiling(
             profiling_dir=envs.VLLM_TORCH_QAIC_PROFILER_DIR,
             profiling_wrapper=qaic_profile.ProfileForwardWithSampling,
