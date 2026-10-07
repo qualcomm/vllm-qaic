@@ -103,7 +103,7 @@ Same fields as `override_qaic_config`, applied to the draft model in speculative
 | `--kv-cache-dtype` | Use `mxint8` for KV cache compression. |
 | `--gpu-memory-utilization` | Fraction of device memory for KV cache (default: 0.9). **PYT mode only** — AOT mode allocates based on QPC memory requirements. |
 | `--tensor-parallel-size` | Number of QIDs for tensor parallelism. |
-| `--enforce-eager` | Required for PYT mode (`True`). No effect in AOT. |
+| `--enforce-eager` | Set automatically by the QAIC platform — `True` in PYT mode, `False` in AOT. No need to pass it. |
 | `--async-scheduling` | Set to `False` for PYT mode. AOT supports `True`. |
 | `--speculative-config` | JSON for SpD method. See [Speculative Decoding](../features/speculative_decoding.md). |
 | `--enable-mm-embeds` | Enable multimodal embedding input (for kv_offload VLM mode). |
