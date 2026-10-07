@@ -123,6 +123,104 @@ class QaicTritonGptOssMxfp4MoEMethod(GptOssMxfp4MoEMethod):
         # property cannot safely dereference it here.
         return False
 
+    def create_weights(
+        self,
+        layer: RoutedExperts,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        """Create packed MXFP4 weights without allocating BF16 tensors.
+
+        Upstream hardcodes the GPT-OSS expert biases to BF16. QAIC does not
+        support BF16 tensors, so allocate them in the model's resolved dtype
+        (FP16 or FP32) instead. Keep the rest of the upstream layout and scale
+        metadata unchanged because ``OAITritonExperts`` relies on them.
+        """
+        self.num_experts = num_experts
+        weight_dtype = torch.uint8
+        scale_dtype = torch.uint8
+
+        layer.params_dtype = params_dtype
+        layer.num_experts = num_experts
+        self.intermediate_size = intermediate_size_per_partition
+        self.hidden_size = hidden_size
+
+        w13_weight = torch.nn.Parameter(
+            torch.zeros(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                hidden_size // 2,
+                dtype=weight_dtype,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_weight", w13_weight)
+        set_weight_attrs(w13_weight, extra_weight_attrs)
+
+        w13_weight_scale = torch.nn.Parameter(
+            torch.zeros(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                hidden_size // _MXFP4_BLOCK_SIZE,
+                dtype=scale_dtype,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_weight_scale", w13_weight_scale)
+        set_weight_attrs(w13_weight_scale, extra_weight_attrs)
+        w13_weight_scale.quant_method = "block"
+
+        w2_weight = torch.nn.Parameter(
+            torch.zeros(
+                num_experts,
+                hidden_size,
+                intermediate_size_per_partition // 2,
+                dtype=weight_dtype,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_weight", w2_weight)
+        set_weight_attrs(w2_weight, extra_weight_attrs)
+
+        w2_weight_scale = torch.nn.Parameter(
+            torch.zeros(
+                num_experts,
+                hidden_size,
+                intermediate_size_per_partition // _MXFP4_BLOCK_SIZE,
+                dtype=scale_dtype,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_weight_scale", w2_weight_scale)
+        set_weight_attrs(w2_weight_scale, extra_weight_attrs)
+        w2_weight_scale.quant_method = "block"
+
+        if self.moe.has_bias:
+            w13_bias = torch.nn.Parameter(
+                torch.zeros(
+                    num_experts,
+                    2 * intermediate_size_per_partition,
+                    dtype=params_dtype,
+                ),
+                requires_grad=False,
+            )
+            layer.register_parameter("w13_bias", w13_bias)
+            set_weight_attrs(w13_bias, extra_weight_attrs)
+
+            w2_bias = torch.nn.Parameter(
+                torch.zeros(
+                    num_experts,
+                    hidden_size,
+                    dtype=params_dtype,
+                ),
+                requires_grad=False,
+            )
+            layer.register_parameter("w2_bias", w2_bias)
+            set_weight_attrs(w2_bias, extra_weight_attrs)
+
 
 @register_quantization_config(QAIC_GPT_OSS_MXFP4_METHOD)
 class QaicGptOssMxfp4Config(QuantizationConfig):
