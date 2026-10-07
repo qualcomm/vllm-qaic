@@ -237,7 +237,7 @@ ARG VLLM_BRANCH=""
 # Layer 1 — infra: system packages + uv-managed python + build tools (merged)
 # build-essential + cmake: needed to compile vllm_qaic's Hexagon kernel C++
 # extensions from csrc/ during pip install. Python comes from uv (not apt)
-# so PYTHON_VERSION can be any of 3.10/3.11/3.12 regardless of what the base
+# so PYTHON_VERSION can be any of 3.11/3.12/3.13 regardless of what the base
 # image's apt repos carry — uv's standalone CPython builds ship their own
 # headers, so no python3.X-dev package is needed either.
 # NOTE: the uv-installed Python must NOT sit under a cache mount — uv venv
