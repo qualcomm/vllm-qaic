@@ -8,7 +8,8 @@
 # Stage overview
 # --------------
 #   aot-base   Shared foundation: system packages, uv venv, build tools,
-#              QEfficient + torch, triton-cpu (optional), rust frontend
+#              QEfficient + torch, triton-cpu (optional, parity tests
+#              only; default off), rust frontend
 #              (optional), vllm deps + vllm. Can be built and pushed as a
 #              standalone image.
 #
@@ -116,8 +117,9 @@ ARG TORCHVISION_VERSION_AOT="0.22.0+cpu"
 ARG VLLM_TARGET_DEVICE_AOT="empty"
 
 # ---------------------------------------------------------------------------
-# triton-cpu — shared by aot-base, installed BEFORE vllm so vllm sees it.
-# Set TRITON_CPU=0 to skip (faster builds when not needed).
+# triton-cpu — OPTIONAL, default OFF. Only needed for the Numba/Triton
+# rejection-sampler parity tests (AOT SpD itself runs on Numba). Enable with
+# --build-arg TRITON_CPU=1; installed BEFORE vllm so vllm sees it.
 # ---------------------------------------------------------------------------
 ARG TRITON_CPU="0"
 ARG TRITON_CPU_COMMIT="e60f448f8f197073b75d6d3e77347414a5db3ee7"
@@ -243,6 +245,7 @@ ARG QEFF_BRANCH="release/v1.23.0"
 ARG TORCH_VERSION_AOT="2.7.0+cpu"
 ARG TORCHVISION_VERSION_AOT="0.22.0+cpu"
 ARG VLLM_TARGET_DEVICE_AOT="empty"
+# triton-cpu: parity tests only; enable with --build-arg TRITON_CPU=1
 ARG TRITON_CPU="0"
 ARG TRITON_CPU_COMMIT="e60f448f8f197073b75d6d3e77347414a5db3ee7"
 ARG TRITON_CPU_COMPILE_MAX_JOBS="4"
@@ -288,7 +291,8 @@ RUN python -m pip install --quiet \
         "torchvision==${TORCHVISION_VERSION_AOT}"
 
 # ---------------------------------------------------------------------------
-# Layer 3 — step2: triton-cpu (optional, BEFORE vllm so vllm sees it)
+# Layer 3 — step2: triton-cpu (optional, parity tests only; default skipped;
+# BEFORE vllm so vllm sees it)
 # Cache key: TRITON_CPU and TRITON_CPU_COMMIT ENV vars (set above).
 # Cache mounts keep the git clone and LLVM toolchain across rebuilds so
 # only changed source files are recompiled on subsequent builds.

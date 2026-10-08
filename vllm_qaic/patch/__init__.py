@@ -44,16 +44,29 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. vllm.v1.sample.rejection_sampler.RejectionSampler.forward
 #    Why:
-#       Skip unnecessary tensor clone and softmax in the greedy-sampling
-#       path of the rejection sampler.  For greedy requests with no logprobs,
-#       (a) the clone before apply_logits_processors is not needed because
-#       raw_target_logits is never read again, and (b) softmax can be skipped
-#       because argmax(logits) == argmax(softmax(logits)).
+#       Skip an unnecessary tensor clone in the greedy-sampling path of the
+#       rejection sampler.  For greedy requests with no logprobs, the clone
+#       before apply_logits_processors is not needed because
+#       raw_target_logits is never read again.  Everything else (logits, not
+#       probs, passed to rejection_sample; synthetic/fp64-gumbel options)
+#       mirrors upstream.
 #    How:
 #       Replace RejectionSampler.forward with a QAIC-optimized version.
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #
-# ** 5. File: patch_graph_pickler.py **
+# ** 5. File: patch_topk_topp_sampler.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. vllm.v1.sample.ops.topk_topp_sampler.apply_top_k_top_p
+#    Why:
+#       AOT sampling uses host CPU tensors while the active platform is QAIC.
+#       The upstream selector can choose Triton for that combination, but AOT
+#       cannot provide the compute-unit query used to size that launch.
+#    How:
+#       At plugin import time, replace the selector with upstream's PyTorch
+#       implementation. The replacement is AOT-only; PYT keeps its behavior.
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#
+# ** 6. File: patch_graph_pickler.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. torch.fx._graph_pickler.Options
 #   2. torch.fx._graph_pickler.GraphPickler.dumps
@@ -76,6 +89,7 @@
 import vllm_qaic.patch.patch_config  # noqa
 import vllm_qaic.patch.patch_parallel_state  # noqa
 import vllm_qaic.patch.patch_utils  # noqa
+import vllm_qaic.patch.patch_topk_topp_sampler  # noqa
 import vllm_qaic.patch.patch_rejection_sampler  # noqa
 import vllm_qaic.patch.patch_graph_pickler  # noqa
 import vllm_qaic.patch.patch_mem_utils  # noqa

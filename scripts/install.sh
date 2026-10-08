@@ -109,12 +109,12 @@ if [ "${MODE}" = "aot" ]; then
     echo "  qeff branch    : ${QEFF_BRANCH}"
     echo "  target device  : ${VLLM_TARGET_DEVICE_AOT}"
     if [ "${TRITON_CPU}" = "1" ]; then
-        echo "  triton-cpu     : enabled"
+        echo "  triton-cpu     : enabled  (optional; only for Numba/Triton parity tests)"
         echo "    src          : ${TRITON_CPU_SRC}"
         echo "    commit       : ${TRITON_CPU_COMMIT}"
         echo "    max jobs     : ${TRITON_CPU_COMPILE_MAX_JOBS}"
     else
-        echo "  triton-cpu     : disabled  (set TRITON_CPU=1 to enable)"
+        echo "  triton-cpu     : disabled  (optional; only for Numba/Triton parity tests — set TRITON_CPU=1)"
     fi
 else
     echo "  vllm           : ${VLLM_VERSION}       vllm-qaic: ${VLLM_QAIC_VERSION}"
@@ -130,7 +130,7 @@ else
     echo "  rust frontend  : disabled  (set VLLM_BUILD_RUST=1 to enable)"
 fi
 echo "  --------------------------------------------------------"
-echo "  Override any variable before running, e.g.:"
+echo "  Override any variable before running, e.g. (triton-cpu parity-test extra):"
 echo "    TRITON_CPU=1 TRITON_CPU_SRC=/data/triton-cpu ./scripts/install.sh aot"
 echo "========================================================"
 echo ""
@@ -200,9 +200,11 @@ if [ "${MODE}" = "aot" ]; then
         ${PIP} install "${SDK_WHEEL_DIR}"/vllm_qaic-*aot*.whl
     fi
 
-    # Step 4 (optional): triton-cpu backend for AOT SpD
+    # Step 4 (optional): triton-cpu backend — test-only extra for the
+    # Numba/Triton rejection-sampler parity tests. Not needed for AOT SpD,
+    # whose host rejection sampler always runs on Numba.
     if [ "${TRITON_CPU}" = "1" ]; then
-        echo "=== Step 4: triton-cpu backend ==="
+        echo "=== Step 4: triton-cpu backend (parity tests only) ==="
         bash "${SCRIPT_DIR}/install_triton_cpu.sh"
     fi
 
