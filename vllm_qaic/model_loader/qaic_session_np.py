@@ -478,9 +478,9 @@ class QAICInferenceSession:
             self.program.deactivate()
             self.activate_done = False
 
-    def is_bfloat16_binding(self, binding_name: str) -> bool:
+    def is_bfloat16_binding(self, binding_name: str | None) -> bool:
         """Return whether a named QPC binding has BF16 element storage."""
-        if binding_name not in self.binding_index_map:
+        if binding_name is None or binding_name not in self.binding_index_map:
             return False
         return (
             BFLOAT16_TYPE is not None
