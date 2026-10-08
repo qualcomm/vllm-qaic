@@ -50,10 +50,12 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
 )
 from vllm.v1.utils import compute_iteration_details
+from vllm.v1.worker import workspace as workspace_module
 from vllm.v1.worker.gpu_worker import (
     AsyncIntermediateTensors,
     init_worker_distributed_environment,
 )
+from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import WorkerBase
 from vllm.v1.worker.worker_base import CompilationTimes
@@ -67,6 +69,46 @@ logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
+
+
+class _QaicWorkspaceManager(workspace_module.WorkspaceManager):
+    """Workspace manager using QAIC's allocator cache API.
+
+    Upstream ``WorkspaceManager._ensure_workspace_size`` calls
+    ``torch.accelerator.empty_cache()``, which requires a backend registered
+    with PyTorch's generic ``CachingDeviceAllocator``. QAIC exposes its cache
+    operation through ``torch.qaic`` instead.
+    """
+
+    def _ensure_workspace_size(self, required_bytes: int) -> torch.Tensor:
+        ubatch_id = dbo_current_ubatch_id()
+        current_workspace = self._current_workspaces[ubatch_id]
+        current_size = self._workspace_size_bytes(current_workspace)
+
+        if current_size < required_bytes:
+            if self._locked:
+                raise AssertionError(
+                    "Workspace is locked but a QAIC allocation requires "
+                    f"{required_bytes} bytes; current size is {current_size} bytes."
+                )
+
+            self._current_workspaces[ubatch_id] = None
+            del current_workspace
+            torch.qaic.empty_cache()
+            self._current_workspaces[ubatch_id] = torch.empty(
+                (required_bytes,), dtype=torch.uint8, device=self._device
+            )
+            current_workspace = self._current_workspaces[ubatch_id]
+
+        assert current_workspace is not None
+        return current_workspace
+
+
+def _init_qaic_workspace_manager(device: torch.device, num_ubatches: int) -> None:
+    # vLLM exposes initialization publicly, but not a backend-specific manager
+    # factory. Install the QAIC subclass into the same process-local slot used
+    # by current_workspace_manager().
+    workspace_module._manager = _QaicWorkspaceManager(device, num_ubatches)
 
 
 class QaicWorker(WorkerBase):
@@ -343,6 +385,13 @@ class QaicWorkerPyt(QaicWorker):
         set_random_seed(self.model_config.seed)
 
         self._configure_thread_parallelism()
+
+        # Modular fused-MoE kernels allocate their temporary activation
+        # buffers through vLLM's process-local WorkspaceManager. CUDA and XPU
+        # workers initialize it during init_device(); do the same for QAIC
+        # eager execution before constructing the model runner.
+        num_ubatches = 2 if self.vllm_config.parallel_config.enable_dbo else 1
+        _init_qaic_workspace_manager(self.device, num_ubatches)
 
         # Construct the model runner
         self.model_runner: QaicModelRunnerPyt = QaicModelRunnerPyt(
