@@ -64,6 +64,12 @@ from vllm_qaic.ops._triton_flags import triton_op_enabled
 from vllm_qaic.ops.unquantized_fused_moe_method import QAicUnquantizedFusedMoEMethod
 from vllm_qaic.utils import QAIC_GPT_OSS_MXFP4_METHOD
 
+# Import this compatibility adapter at the point where the modular OAI Triton
+# MXFP4 path is defined.  The earlier platform patch can run before Triton's
+# active target is finalized, while loading this module guarantees that the
+# QAIC GPT-OSS quantization path is actually being selected.
+import vllm_qaic.patch.patch_triton_kernels_layout  # noqa: F401
+
 _MXFP4_BLOCK_SIZE = 32
 # GPT-OSS's clamped SwiGLU constants (vllm's swigluoai activation).
 _SWIGLUOAI_ALPHA = 1.702
