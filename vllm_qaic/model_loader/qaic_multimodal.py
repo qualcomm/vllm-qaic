@@ -138,12 +138,6 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
                     )
             self.decode_batch_inputs.update(self.default_mm_kwargs)
 
-    def _is_bfloat16_binding(self, binding_name: str | None) -> bool:
-        """Return whether a QPC binding uses raw BF16 storage."""
-        return binding_name is not None and self.session.is_bfloat16_binding(
-            binding_name
-        )
-
     def _to_np(
         self,
         t,
@@ -164,14 +158,17 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
             return [self._to_np(item, dtype, binding_name) for item in t]
 
         if isinstance(t, torch.Tensor):
-            if self._is_bfloat16_binding(binding_name) and t.dtype == torch.bfloat16:
+            if (
+                self.session.is_bfloat16_binding(binding_name)
+                and t.dtype == torch.bfloat16
+            ):
                 # NumPy cannot materialize BF16; keep numerical values in FP32
                 # until QAICInferenceSession packs the LRT input.
                 return t.float().numpy()
             t = t.numpy()
 
         array = np.asarray(t)
-        if self._is_bfloat16_binding(binding_name):
+        if self.session.is_bfloat16_binding(binding_name):
             # A NumPy float16 array at this boundary is raw BF16 storage from a
             # QPC output. Preserve its bits for direct language-QPC handoff.
             if array.dtype == np.float16:
@@ -205,7 +202,7 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
         slices = tuple(
             slice(0, min(s, t)) for s, t in zip(tensor.shape, target_dims, strict=False)
         )
-        if self._is_bfloat16_binding(binding_name):
+        if self.session.is_bfloat16_binding(binding_name):
             source = tensor.float() if tensor.dtype == torch.bfloat16 else tensor
             source_array = source.detach().cpu().numpy()
             # Preserve raw BF16 storage when padding a vision-QPC output.
