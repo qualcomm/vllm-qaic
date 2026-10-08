@@ -135,20 +135,24 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
 
         self.config = config
         self.vocab_size = config.get_text_config().vocab_size
-        # `long_prefill_token_threshold` will define prefill chunk length
+        # `long_prefill_token_threshold` will define prefill chunk length.
+        # Compiler profiles may supply multiple shapes; use their largest length
+        # so chunking and padding operate on one scalar sequence length.
+        self.prefill_seq_len: int
         if self.config.model_type == "whisper":
             # Encoder-decoder models have chunked prefill disabled by vllm,
             # but QAIC still requires a prefill sequence length.
             # For whisper, the prefill sequence length is fixed to 1.
-            self.prefill_seq_len: int = 1
+            self.prefill_seq_len = 1
         else:
             assert "prefill_seq_len" in override_qaic_config, (
                 "Prefill seq_len missing in override_qaic_config"
             )
-            self.prefill_seq_len = (  # type: ignore[assignment]
-                override_qaic_config["prefill_seq_len"]  # type: ignore[assignment]
-                if isinstance(override_qaic_config["prefill_seq_len"], (list, tuple))
-                else int(override_qaic_config["prefill_seq_len"])
+            prefill_seq_len = override_qaic_config["prefill_seq_len"]
+            self.prefill_seq_len = (
+                max(prefill_seq_len)
+                if isinstance(prefill_seq_len, (list, tuple))
+                else int(prefill_seq_len)
             )
 
         self.ctx_len = model_config.max_model_len
@@ -363,6 +367,10 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         except Exception:
             pass
         return list(self.decode_ks)
+
+    def to_host_array(self, binding_name: str, buffer: np.ndarray) -> np.ndarray:
+        """Expose QPC output conversion without leaking the session to runners."""
+        return self.session.to_host_array(binding_name, buffer)
 
     def load_model(
         self,
@@ -1018,6 +1026,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         output = self.encode_num_logits_buffer
         assert output is not None, "encode buffer not initialized"
         output_array = output[output_key][: len(prefill_cum_sum)]
+        # Decode the raw BF16 carrier before vLLM consumes BF16 outputs.
+        output_array = self.session.to_host_array(output_key, output_array)
         output_tensor = torch.tensor(output_array)
 
         if not self.is_qaic_pooler and output_key != "logits":
@@ -1066,8 +1076,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
     def run_encode(
         self,
         qpc_inputs: dict,
-        output_key: str | None = None,
-        encode_num_logits_buffer: dict | None = None,
+        output_key: str,
+        encode_num_logits_buffer: dict,
     ) -> dict:
         """Run encode (embedding) inference on the QPC.
 
@@ -1850,10 +1860,24 @@ def get_hf_model(
         "config": hf_config,
         "kv_offload": kv_offload,
     }
-
     if override_qaic_config and override_qaic_config.get("pretrained_extra_args", None):
-        args.update(override_qaic_config["pretrained_extra_args"])
+        pretrained_extra_args = override_qaic_config["pretrained_extra_args"]
+        if (
+            model_config.dtype == torch.bfloat16
+            and "torch_dtype" in pretrained_extra_args
+            and pretrained_extra_args["torch_dtype"] != torch.bfloat16
+        ):
+            raise ValueError(
+                "pretrained_extra_args.torch_dtype must match model_config.dtype "
+                "for native BF16 inference."
+            )
+        args.update(pretrained_extra_args)
         override_qaic_config.pop("pretrained_extra_args")
+
+    # Match QEfficient's native-BF16 inference path explicitly. vLLM's resolved
+    # model dtype is authoritative over optional pretrained extra arguments.
+    if model_config.dtype == torch.bfloat16:
+        args["torch_dtype"] = torch.bfloat16
 
     model_type = "lora" if lora_config else "default"
     if model_config.is_multimodal_model:

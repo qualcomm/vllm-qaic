@@ -84,7 +84,8 @@ class QaicPlatform(Platform):
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
-        return [torch.float16, torch.float32]
+        # check_and_update_config restricts native BF16 to AI200 configurations.
+        return [torch.float16, torch.float32, torch.bfloat16]
 
     @classmethod
     def is_aot_inference(cls) -> bool:
@@ -138,8 +139,9 @@ class QaicPlatform(Platform):
 
     @classmethod
     def check_if_supports_dtype(cls, dtype: torch.dtype):
-        # for eager mode
-        return dtype in [torch.float16, torch.float32]
+        # Keep worker-side validation consistent with the plugin dtype contract.
+        if dtype not in [torch.bfloat16, torch.float16, torch.float32]:
+            raise ValueError(f"QAIC does not support model dtype {dtype}.")
 
     @classmethod
     def inference_mode(cls):
@@ -251,6 +253,17 @@ class QaicPlatform(Platform):
         model_config = vllm_config.model_config
         scheduler_config = vllm_config.scheduler_config
         cache_config = vllm_config.cache_config
+
+        # Native BF16 is an AI200-only contract; never silently downcast it.
+        if (
+            model_config.dtype == torch.bfloat16
+            and override_qaic_config.get("aic_hw_version") != "ai200"
+        ):
+            raise ValueError(
+                "QAIC native bfloat16 requires "
+                "additional_config.override_qaic_config.aic_hw_version='ai200'. "
+                "BF16 must not be converted to float16 on AI100."
+            )
 
         assert not (vllm_config.lora_config and vllm_config.speculative_config), (
             "LORA with SPD is not yet supported for QAIC backend"

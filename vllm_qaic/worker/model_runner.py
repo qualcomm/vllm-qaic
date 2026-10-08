@@ -15,7 +15,7 @@ from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import copy, deepcopy
 from dataclasses import dataclass
 from queue import Queue
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, NamedTuple, cast
 
 import numpy as np
 import torch
@@ -64,6 +64,7 @@ except ImportError:
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+    from vllm_qaic.model_loader.qaic import QaicCausalLM
     from vllm.v1.spec_decode.qaic_draft_model import QaicDraftModelProposer
 
     from vllm_qaic.spec_decode.dflash_draft_model import QaicDFlashProposer
@@ -1003,6 +1004,16 @@ class QaicModelRunnerAoT(GPUModelRunner):
         num_decodes,
         spec_decode_metadata=None,
     ):
+        # Decode a raw BF16 storage view only when the QPC logits binding is BF16.
+        qaic_model = cast("QaicCausalLM", self.model)
+        if hidden_states_decode is not None:
+            hidden_states_decode = qaic_model.to_host_array(
+                "logits", hidden_states_decode
+            )
+        if hidden_states_prefill is not None:
+            hidden_states_prefill = qaic_model.to_host_array(
+                "logits", hidden_states_prefill
+            )
         if (
             hidden_states_decode is not None
             and self.max_decode_tokens > 1
@@ -1379,6 +1390,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
                     kv_connector_output,
                 )
             else:
+                assert pending_prefill_exec_queue is not None
                 async_output = QaicAsyncPoolingModelRunnerOutput(
                     model_runner=self,
                     pending_prefill_exec_queue=pending_prefill_exec_queue,
