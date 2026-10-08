@@ -132,7 +132,6 @@ def _run_vlm(model_name: str, tp_size: int, gen_len: int, model_impl="vllm"):
             tensor_parallel_size=effective_tp,
             max_model_len=MAX_MODEL_LEN,
             # quantization="fp8",
-            enforce_eager=True,
             enable_flashinfer_autotune=False,
             # kv_cache_memory_bytes=KV_CACHE_SIZE,
             enable_prefix_caching=False,

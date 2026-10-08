@@ -34,16 +34,36 @@ This guide covers installing `vllm-qaic` in both **AOT** (Ahead-of-Time compiled
 |---|---|
 | Hardware | Qualcomm Cloud AI 100 / Cloud AI 080 |
 | OS | Linux (Ubuntu 22.04+) |
-| Python | 3.12 |
+| Python | PYT mode: 3.11 / 3.12 / 3.13 &nbsp;·&nbsp; AOT mode: 3.11 / 3.12 only — **not 3.13** |
 | QAIC Platform SDK | >= 1.23.0 |
 | QAIC Apps SDK | >= 1.23.0 (PYT mode requires `--install-torch-qaic` flag) |
+
+> [!WARNING]
+> **AOT mode does not work on Python 3.13.** AOT depends on `QEfficient`, whose own
+> `pyproject.toml` declares `requires-python = ">=3.10,<3.13"` and hard-pins
+> `sentencepiece==0.2.0`. `sentencepiece` publishes cp313 wheels only from 0.2.1
+> onward, so under Python 3.13 that pin forces a source build of 0.2.0, which fails:
+>
+> ```text
+> Building sentencepiece==0.2.0
+> /bin/sh: 1: pkg-config: not found
+> CMake Error at CMakeLists.txt:15 (cmake_minimum_required):
+>   Compatibility with CMake < 3.5 has been removed from CMake.
+> hint: `sentencepiece` (v0.2.0) was included because `qefficient` (v1.23.0.dev0)
+>       depends on `sentencepiece`
+> ```
+>
+> **Workaround:** use Python 3.11 or 3.12 for AOT environments. This will be
+> resolved upstream when QEfficient supports 3.13 and relaxes the
+> `sentencepiece==0.2.0` pin.
 
 Install the QAIC SDK before proceeding:
 
 - [SDK installation guide](https://quic.github.io/cloud-ai-sdk-pages/latest/Getting-Started/Installation/index.html)
 - For **PYT mode**: run the Apps SDK installer with `--install-torch-qaic` to build `torch_qaic` wheels into `/opt/qti-aic/integrations/torch_qaic/py312/`
 
-Activate a Python 3.12 environment before running any install step:
+Activate a Python 3.11, 3.12, or 3.13 environment before running any install step
+(3.11 or 3.12 for AOT):
 
 ```bash
 # conda
@@ -83,6 +103,11 @@ The script handles all dependency ordering, version pinning, and `uv`/`pip` dete
 > triton-cpu state, rust frontend state). Review it and override any variable before re-running.
 
 ### AOT mode — `install.sh`
+
+> [!WARNING]
+> Requires Python 3.11 or 3.12. **Python 3.13 is not supported for AOT** — Step 1
+> (QEfficient) fails on a `sentencepiece==0.2.0` source build. See
+> [Prerequisites](#prerequisites) for details and the full matrix.
 
 ```bash
 # From the vllm-qaic repo root, with your env activated:
@@ -203,7 +228,7 @@ python -m pip install \
     "torchaudio==2.11.0+cpu"
 
 # 1b. torch_qaic AFTER torch is confirmed CPU-only
-#     Replace py312 with your Python version (py310, py311, py312)
+#     Replace py312 with your Python version (py311, py312, py313)
 pip install /opt/qti-aic/integrations/torch_qaic/py312/torch_qaic-*.whl
 
 # [Optional] Pin transformers if torch_qaic's version conflicts with your model
@@ -241,7 +266,13 @@ pip install --no-build-isolation ./vllm-qaic
 
 `ci` and `dev` additionally install `requirements/test.txt` (pytest, ruff, mypy, etc.) so tests can run directly inside the image; `release`/`wheel` don't, since they're meant to be lean runtime/distribution artifacts.
 
-`PYTHON_VERSION` (default `3.12`; also `3.10`/`3.11`) is threaded through every target via `aot-base`/`pyt-base`, provisioned with `uv python install` rather than apt so non-default versions work regardless of the base image's own Python.
+`PYTHON_VERSION` (default `3.12`; also `3.11`/`3.13`) is threaded through every target via `aot-base`/`pyt-base`, provisioned with `uv python install` rather than apt so non-default versions work regardless of the base image's own Python.
+
+> [!WARNING]
+> `PYTHON_VERSION=3.13` works for `Dockerfile.pyt` but **fails for `Dockerfile.aot`**
+> at the QEfficient layer (`sentencepiece==0.2.0` has no cp313 wheel). Build AOT images
+> and wheels with 3.11 or 3.12 — the AOT wheel is `py3-none-any`, so one build covers
+> every supported Python version anyway. See [Prerequisites](#prerequisites).
 
 ### Build args
 
@@ -254,7 +285,7 @@ All `ARG`s are global (declared before the first `FROM`) and re-declared inside 
 | `BASE_IMAGE` | `ghcr.io/quic/cloud_ai_inference_ubuntu24:1.21.6.0` | Must have the QAIC Platform and Apps SDKs installed (`/opt/qti-aic/` present) |
 | `VENV` | `/opt/venv-aot` | Path to the venv created inside the image |
 | `UV_VERSION` | `0.11.29` | Pinned `uv` binary version, pulled via `COPY --from` |
-| `PYTHON_VERSION` | `3.12` | Python version (`3.10`/`3.11`/`3.12`), provisioned via `uv python install` |
+| `PYTHON_VERSION` | `3.12` | Python version (`3.11`/`3.12`), provisioned via `uv python install`. **`3.13` is not supported for AOT** — see [Prerequisites](#prerequisites) |
 | `RUST_VERSION` | `1.90` | Pinned Rust toolchain image tag (`rust:<ver>-slim`); only used when `VLLM_BUILD_RUST=1` |
 | `RUST_IMAGE` | `docker.io/library/rust:${RUST_VERSION}-slim` | Full image ref for the Rust toolchain. Override to pull from a mirror or internal registry; supplies its own tag, so it takes precedence over `RUST_VERSION` |
 | `VLLM_VERSION` | `0.30.0` | vLLM release tag to install |
@@ -281,7 +312,7 @@ All `ARG`s are global (declared before the first `FROM`) and re-declared inside 
 | `BASE_IMAGE` | `ghcr.io/quic/cloud_ai_inference_ubuntu24:1.21.6.0` | Must have the QAIC Platform and Apps SDKs installed (`/opt/qti-aic/` present with `torch_qaic` wheels) |
 | `VENV` | `/opt/venv-pyt` | Path to the venv created inside the image |
 | `UV_VERSION` | `0.11.29` | Pinned `uv` binary version, pulled via `COPY --from` |
-| `PYTHON_VERSION` | `3.12` | Python version (`3.10`/`3.11`/`3.12`), provisioned via `uv python install` |
+| `PYTHON_VERSION` | `3.12` | Python version (`3.11`/`3.12`/`3.13`), provisioned via `uv python install` |
 | `RUST_VERSION` | `1.90` | Pinned Rust toolchain image tag (`rust:<ver>-slim`); only used when `VLLM_BUILD_RUST=1` |
 | `RUST_IMAGE` | `docker.io/library/rust:${RUST_VERSION}-slim` | Full image ref for the Rust toolchain. Override to pull from a mirror or internal registry; supplies its own tag, so it takes precedence over `RUST_VERSION` |
 | `VLLM_VERSION` | `0.30.0` | vLLM release tag to install |

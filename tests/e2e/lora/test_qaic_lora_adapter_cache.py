@@ -9,19 +9,18 @@ import pytest
 from huggingface_hub import snapshot_download
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
 
-from vllm_qaic.model_loader.qaic import (
-    search_adapters_in_cache,
-    verify_adaptername_to_id_consistency,
-)
-
 BASE_MODEL_NAME = "PY007/TinyLlama-1.1B-Chat-v0.3"
 ADAPTER_ID_0 = "jashing/tinyllama-colorist-lora"
 ADAPTER_ID_1 = "jashing/tinyllama-energy-lora"
 
 
-@pytest.mark.qaic_aot_mode
+@pytest.mark.qaic_aot_mode(
+    "test isn't relevant for eager mode, no device execution involved anyways"
+)
 def test_qaic_search_adapters_in_cache(tmp_path):
     """Test adapter search functionality in cache."""
+    from vllm_qaic.model_loader.qaic import search_adapters_in_cache
+
     hf_home = os.environ.get("HF_HOME", None)
     os.environ["HF_HOME"] = str(tmp_path)
 
@@ -41,10 +40,12 @@ def test_qaic_search_adapters_in_cache(tmp_path):
     # test time: 7.55s (first case) v.s. 225.02s (2 cases)
 
 
-@pytest.mark.qaic_aot_mode
+@pytest.mark.qaic_aot_mode("requires the QEfficient AoT LoRA model wrapper")
 def test_qaic_get_qaic_model_dump_adaptername_to_id(tmp_path):
     """Test adapter name to ID mapping and persistence."""
     from QEfficient.peft.lora import QEffAutoLoraModelForCausalLM
+
+    from vllm_qaic.model_loader.qaic import verify_adaptername_to_id_consistency
 
     qeff_model = QEffAutoLoraModelForCausalLM.from_pretrained(
         pretrained_model_name_or_path=BASE_MODEL_NAME,

@@ -254,7 +254,7 @@ ARG VLLM_BRANCH=""
 # Layer 1 — infra: system packages + uv-managed python + build tools (merged)
 # Invalidated only when the package list, VENV/PYTHON_VERSION ARGs, or tool
 # pins change. uv-managed CPython (not apt) so PYTHON_VERSION can be any of
-# 3.10/3.11/3.12 regardless of what the base image's apt repos carry.
+# 3.11/3.12/3.13 regardless of what the base image's apt repos carry.
 # NOTE: the uv-installed Python must NOT sit under a cache mount — uv venv
 # symlinks into it, and a cache mount's contents vanish when the RUN ends,
 # leaving a dangling symlink in the venv for every later layer.

@@ -44,7 +44,8 @@ llm = LLM(
         "num_speculative_tokens": 5,
     },
 )
-```text
+```
+
 **Docker example:**
 
 ```bash
@@ -60,7 +61,8 @@ docker run --rm -it --network host \
   --quantization mxfp6 \
   --kv-cache-dtype mxint8 \
   --speculative-config '{"method":"ngram","num_speculative_tokens":5}'
-```text
+```
+
 ## Draft-Model Speculative Decoding
 
 Uses a lightweight model (e.g., Llama-3.2-1B) to propose tokens for a larger target model (e.g., Llama-3.1-8B):
@@ -91,7 +93,8 @@ llm = LLM(
         "num_speculative_tokens": 3,
     },
 )
-```text
+```
+
 **Docker example:**
 
 ```bash
@@ -109,7 +112,8 @@ docker run --rm -it --network host \
   --kv-cache-dtype mxint8 \
   --speculative-config '{"method":"draft_model","model":"meta-llama/Llama-3.2-1B-Instruct","num_speculative_tokens":3}' \
   --additional-config '{"override_qaic_config":{"device_group":[0,1,2,3],"num_cores":10},"draft_override_qaic_config":{"device_group":[0,1,2,3],"num_cores":6}}'
-```text
+```
+
 !!! info "QEfficient Reference"
     Draft model compilation requires separate QPC generation. See the
     [QEfficient SpD Guide](https://quic.github.io/efficient-transformers/speculative_decoding.html)
@@ -200,7 +204,8 @@ Per QID (16 NSP cores):
 +--------------------+----------------+
 
 Applied across QID 0-3 -- both models share the same device group.
-```text
+```
+
 No additional hardware is required — both models run on the same device.
 
 !!! note "Default allocation"

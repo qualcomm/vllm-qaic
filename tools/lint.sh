@@ -11,17 +11,17 @@
 #   ./tools/lint.sh [CI] [PYTHON_VERSION] [--fix]
 #
 #   CI             0 (default) or 1 — when 1, abort on first failure (set -e)
-#   PYTHON_VERSION Python version passed to mypy (default: 3.10)
+#   PYTHON_VERSION Python version passed to mypy (default: 3.11)
 #   --fix          Auto-fix isort, yapf and ruff violations in place.
 #                  mypy is always check-only.
 #
 # Examples:
 #   ./tools/lint.sh              # check mode, non-CI
 #   ./tools/lint.sh 1            # check mode, CI (abort on first failure)
-#   ./tools/lint.sh 0 3.11 --fix # fix mode, Python 3.11
+#   ./tools/lint.sh 0 3.12 --fix # fix mode, Python 3.12
 
 CI=${1:-0}
-PYTHON_VERSION=${2:-3.10}
+PYTHON_VERSION=${2:-3.11}
 FIX=0
 
 for arg in "$@"; do

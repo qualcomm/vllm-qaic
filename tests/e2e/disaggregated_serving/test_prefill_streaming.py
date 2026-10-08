@@ -125,7 +125,7 @@ def _print_metrics_table(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.qaic_aot_mode
+@pytest.mark.qaic_aot_mode("requires QAIC AoT KV transfer and async scheduling")
 @pytest.mark.qaic_disagg_installed
 @pytest.mark.qaic_test_config(
     model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
