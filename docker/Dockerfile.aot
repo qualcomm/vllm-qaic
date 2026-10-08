@@ -8,7 +8,8 @@
 # Stage overview
 # --------------
 #   aot-base   Shared foundation: system packages, uv venv, build tools,
-#              QEfficient + torch, triton-cpu (optional), rust frontend
+#              QEfficient + torch, triton-cpu (optional, parity tests
+#              only; default off), rust frontend
 #              (optional), vllm deps + vllm. Can be built and pushed as a
 #              standalone image.
 #
@@ -28,16 +29,16 @@
 # Build commands
 # --------------
 #   # Standalone base (push to registry for reuse):
-#   docker build --target aot-base -t vllm-qaic-aot-base:1.22 .
+#   docker build --target aot-base -t vllm-qaic-aot-base:1.23 .
 #
 #   # Release (default pins):
-#   docker build --target release -t vllm-qaic-aot:1.22 .
+#   docker build --target release -t vllm-qaic-aot:1.23 .
 #
 #   # Release (override version):
 #   docker build --target release \
-#     --build-arg VLLM_QAIC_GIT_REF=v1.22 \
-#     --build-arg QEFF_BRANCH=release/v1.22.0 \
-#     -t vllm-qaic-aot:1.22 .
+#     --build-arg VLLM_QAIC_GIT_REF=v1.23 \
+#     --build-arg QEFF_BRANCH=release/v1.23.0 \
+#     -t vllm-qaic-aot:1.23 .
 #
 #   # CI (current checkout):
 #   docker build --target ci -t vllm-qaic-aot:ci .
@@ -60,10 +61,20 @@
 #   docker buildx build --target wheel -t vllm-qaic-aot-wheel \
 #     --output type=local,dest=./dist/aot .
 #
+#   # Wheel with an overridden filename:
+#   docker buildx build --target wheel -t vllm-qaic-aot-wheel \
+#     --build-arg WHEEL_NAME=vllm_qaic-1.23.0+aot-py3-none-any.whl \
+#     --output type=local,dest=./dist/aot .
+#
 #   # Any target — also build vllm's experimental Rust OpenAI frontend
 #   # (vllm-rs). See docs/installation.md for known caveats.
 #   docker build --target release --build-arg VLLM_BUILD_RUST=1 \
-#     -t vllm-qaic-aot:1.22-rust .
+#     -t vllm-qaic-aot:1.23-rust .
+#
+#   # Rust toolchain from a mirror / internal registry instead of Docker Hub:
+#   docker build --target release --build-arg VLLM_BUILD_RUST=1 \
+#     --build-arg RUST_IMAGE=my.registry.internal:5000/mirror/rust:1.90-slim \
+#     -t vllm-qaic-aot:1.23-rust .
 #
 # The BASE_IMAGE must have the QAIC Platform and Apps SDKs installed
 # (i.e. /opt/qti-aic/ present) so that vllm-qaic can load at runtime.
@@ -88,23 +99,29 @@ ARG UV_VERSION="0.11.29"
 ARG PYTHON_VERSION="3.12"
 ARG RUST_VERSION="1.90"
 
+# Full image ref for the Rust toolchain. Defaults to the RUST_VERSION pin on
+# Docker Hub; override to pull from a mirror or internal registry, in which case
+# RUST_VERSION is ignored (the override supplies its own tag).
+ARG RUST_IMAGE="docker.io/library/rust:${RUST_VERSION}-slim"
+
 # ---------------------------------------------------------------------------
 # Shared stack version pins — defaults mirror scripts/utility.sh.
 # All vars use ${VAR:-default} in utility.sh so passing --build-arg takes
 # precedence without changing the script.
 # ---------------------------------------------------------------------------
 ARG VLLM_VERSION="0.23.0"
-ARG VLLM_QAIC_VERSION="1.22"
-ARG QEFF_BRANCH="release/v1.22.0"
+ARG VLLM_QAIC_VERSION="1.23"
+ARG QEFF_BRANCH="release/v1.23.0"
 ARG TORCH_VERSION_AOT="2.7.0+cpu"
 ARG TORCHVISION_VERSION_AOT="0.22.0+cpu"
 ARG VLLM_TARGET_DEVICE_AOT="empty"
 
 # ---------------------------------------------------------------------------
-# triton-cpu — shared by aot-base, installed BEFORE vllm so vllm sees it.
-# Set TRITON_CPU=0 to skip (faster builds when not needed).
+# triton-cpu — OPTIONAL, default OFF. Only needed for the Numba/Triton
+# rejection-sampler parity tests (AOT SpD itself runs on Numba). Enable with
+# --build-arg TRITON_CPU=1; installed BEFORE vllm so vllm sees it.
 # ---------------------------------------------------------------------------
-ARG TRITON_CPU="1"
+ARG TRITON_CPU="0"
 ARG TRITON_CPU_COMMIT="e60f448f8f197073b75d6d3e77347414a5db3ee7"
 ARG TRITON_CPU_COMPILE_MAX_JOBS="4"
 
@@ -137,6 +154,12 @@ ARG VLLM_QAIC_BRANCH=""
 ARG QEFF_PR=""    # if set, overrides QEFF_BRANCH for editable QEfficient install
 
 # ---------------------------------------------------------------------------
+# Wheel-specific — WHEEL_NAME renames the built wheel before it is exported
+# (empty = keep uv build's own name).
+# ---------------------------------------------------------------------------
+ARG WHEEL_NAME=""
+
+# ---------------------------------------------------------------------------
 # Pinned uv binary — FROM supports ARG substitution, COPY --from does not.
 # ---------------------------------------------------------------------------
 # hadolint ignore=DL3006
@@ -145,10 +168,11 @@ FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
 # ---------------------------------------------------------------------------
 # Pinned Rust toolchain, COPY'd into the infra layer below. Version doesn't
 # need to match exactly — rustup auto-fetches whatever toolchain vllm's own
-# rust-toolchain.toml pins when `cargo build` runs.
+# rust-toolchain.toml pins when `cargo build` runs. RUST_IMAGE selects the ref
+# (see the ARG above) so a mirror can be used instead of Docker Hub.
 # ---------------------------------------------------------------------------
 # hadolint ignore=DL3006
-FROM docker.io/library/rust:${RUST_VERSION}-slim AS rust-toolchain
+FROM ${RUST_IMAGE} AS rust-toolchain
 
 # ===========================================================================
 # aot-base — shared foundation for all three targets.
@@ -216,12 +240,13 @@ SHELL ["/bin/bash", "-c"]
 ARG VENV="/opt/venv-aot"
 ARG PYTHON_VERSION="3.12"
 ARG VLLM_VERSION="0.23.0"
-ARG VLLM_QAIC_VERSION="1.22"
-ARG QEFF_BRANCH="release/v1.22.0"
+ARG VLLM_QAIC_VERSION="1.23"
+ARG QEFF_BRANCH="release/v1.23.0"
 ARG TORCH_VERSION_AOT="2.7.0+cpu"
 ARG TORCHVISION_VERSION_AOT="0.22.0+cpu"
 ARG VLLM_TARGET_DEVICE_AOT="empty"
-ARG TRITON_CPU="1"
+# triton-cpu: parity tests only; enable with --build-arg TRITON_CPU=1
+ARG TRITON_CPU="0"
 ARG TRITON_CPU_COMMIT="e60f448f8f197073b75d6d3e77347414a5db3ee7"
 ARG TRITON_CPU_COMPILE_MAX_JOBS="4"
 ARG VLLM_BUILD_RUST="1"
@@ -266,7 +291,8 @@ RUN python -m pip install --quiet \
         "torchvision==${TORCHVISION_VERSION_AOT}"
 
 # ---------------------------------------------------------------------------
-# Layer 3 — step2: triton-cpu (optional, BEFORE vllm so vllm sees it)
+# Layer 3 — step2: triton-cpu (optional, parity tests only; default skipped;
+# BEFORE vllm so vllm sees it)
 # Cache key: TRITON_CPU and TRITON_CPU_COMMIT ENV vars (set above).
 # Cache mounts keep the git clone and LLVM toolchain across rebuilds so
 # only changed source files are recompiled on subsequent builds.
@@ -363,7 +389,7 @@ FROM aot-base AS release-builder
 
 ARG VENV="/opt/venv-aot"
 ARG VLLM_VERSION="0.23.0"
-ARG VLLM_QAIC_VERSION="1.22"
+ARG VLLM_QAIC_VERSION="1.23"
 ARG VLLM_QAIC_GIT_REF="main"
 
 # Clone the pinned git ref, overlay our fixed setup.py (which supports
@@ -396,7 +422,7 @@ FROM aot-base AS ci-builder
 
 ARG VENV="/opt/venv-aot"
 ARG VLLM_VERSION="0.23.0"
-ARG VLLM_QAIC_VERSION="1.22"
+ARG VLLM_QAIC_VERSION="1.23"
 ARG VLLM_QAIC_PR=""
 ARG VLLM_QAIC_BRANCH=""
 
@@ -446,8 +472,8 @@ FROM aot-base AS dev-builder
 
 ARG VENV="/opt/venv-aot"
 ARG VLLM_VERSION="0.23.0"
-ARG VLLM_QAIC_VERSION="1.22"
-ARG QEFF_BRANCH="release/v1.22.0"
+ARG VLLM_QAIC_VERSION="1.23"
+ARG QEFF_BRANCH="release/v1.23.0"
 ARG QEFF_PR=""
 ARG VLLM_TARGET_DEVICE_AOT="empty"
 ARG VLLM_PR=""
@@ -531,17 +557,41 @@ CMD ["bash"]
 #
 #   docker buildx build --target wheel -f docker/Dockerfile.aot \
 #     --output type=local,dest=./dist/aot .
+#
+#   # Custom wheel filename:
+#   docker buildx build --target wheel -f docker/Dockerfile.aot \
+#     --build-arg WHEEL_NAME=vllm_qaic-1.23.0+aot-py3-none-any.whl \
+#     --output type=local,dest=./dist/aot .
 # ===========================================================================
 FROM aot-base AS wheel-builder
 
 ARG VLLM_VERSION="0.23.0"
-ARG VLLM_QAIC_VERSION="1.22"
+ARG VLLM_QAIC_VERSION="1.23"
+ARG WHEEL_NAME=""
 
+# WHEEL_NAME rename: the wheel's own name comes from setup.py's package name
+# and version, so overriding the filename is a post-build mv. Only the filename
+# changes — the .dist-info inside still carries the real name/version. pip reads
+# the distribution and compatibility tags off the filename and requires the
+# distribution to match that metadata, so an arbitrary name exports fine but
+# may not be installable; scripts/build_wheels.sh warns about names pip would
+# reject. Failing when /out has no wheel keeps a silent no-op rename from
+# exporting an unrenamed artifact.
 COPY . /src/vllm-qaic
 RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
     TORCH_QAIC_INSTALLED=0 \
     VLLM_VERSION_OVERRIDE="${VLLM_VERSION}+aot${VLLM_QAIC_VERSION}" \
-    uv build --wheel --no-build-isolation --out-dir /out /src/vllm-qaic
+    uv build --wheel --no-build-isolation --out-dir /out /src/vllm-qaic && \
+    if [ -n "${WHEEL_NAME}" ]; then \
+        built="$(find /out -maxdepth 1 -name '*.whl' -print -quit)"; \
+        if [ -z "${built}" ]; then \
+            echo "ERROR: no wheel found in /out to rename" >&2; exit 1; \
+        fi; \
+        if [ "${built}" != "/out/${WHEEL_NAME}" ]; then \
+            mv "${built}" "/out/${WHEEL_NAME}" && \
+            echo "=== Wheel renamed: $(basename "${built}") -> ${WHEEL_NAME} ==="; \
+        fi; \
+    fi
 
 FROM scratch AS wheel
 COPY --from=wheel-builder /out /

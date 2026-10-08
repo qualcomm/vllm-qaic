@@ -102,7 +102,8 @@ The script handles all dependency ordering, version pinning, and `uv`/`pip` dete
 TRANSFORMERS_VERSION_AOT=4.55.3 ./scripts/install.sh aot
 TRANSFORMERS_VERSION_PYT=4.57.3 ./scripts/install.sh pyt
 
-# Enable triton-cpu backend for AOT Speculative Decoding
+# Optional: triton-cpu backend — only for the Numba/Triton rejection-sampler parity
+# tests (not needed for AOT Speculative Decoding, which uses Numba)
 # triton-cpu is a large C++ build — requires ~10 GB of free disk space at TRITON_CPU_SRC
 TRITON_CPU=1 ./scripts/install.sh aot
 
@@ -256,14 +257,15 @@ All `ARG`s are global (declared before the first `FROM`) and re-declared inside 
 | `UV_VERSION` | `0.11.29` | Pinned `uv` binary version, pulled via `COPY --from` |
 | `PYTHON_VERSION` | `3.12` | Python version (`3.10`/`3.11`/`3.12`), provisioned via `uv python install` |
 | `RUST_VERSION` | `1.90` | Pinned Rust toolchain image tag (`rust:<ver>-slim`); only used when `VLLM_BUILD_RUST=1` |
+| `RUST_IMAGE` | `docker.io/library/rust:${RUST_VERSION}-slim` | Full image ref for the Rust toolchain. Override to pull from a mirror or internal registry; supplies its own tag, so it takes precedence over `RUST_VERSION` |
 | `VLLM_VERSION` | `0.23.0` | vLLM release tag to install |
 | `VLLM_PR` | *(empty)* | Any target: vLLM PR number to fetch (takes priority over `VLLM_BRANCH` and `VLLM_VERSION`) |
 | `VLLM_BRANCH` | *(empty)* | Any target: vLLM branch to clone instead of the pinned `VLLM_VERSION` tag |
-| `VLLM_QAIC_VERSION` | `1.22` | vllm-qaic SDK/version tag (wheel tag/version suffix) |
-| `QEFF_BRANCH` | `release/v1.22.0` | QEfficient branch/tag to install |
+| `VLLM_QAIC_VERSION` | `1.23` | vllm-qaic SDK/version tag (wheel tag/version suffix) |
+| `QEFF_BRANCH` | `release/v1.23.0` | QEfficient branch/tag to install |
 | `TORCH_VERSION_AOT` | `2.7.0+cpu` | CPU torch version for AOT |
 | `TORCHVISION_VERSION_AOT` | `0.22.0+cpu` | torchvision version for AOT |
-| `TRITON_CPU` | `1` | Set to `1` to build the triton-cpu backend (AOT SpD); Docker defaults ON, unlike `install.sh`'s default OFF |
+| `TRITON_CPU` | `0` | Set to `1` to build the optional triton-cpu backend (Numba/Triton rejection-sampler parity tests only; not needed for AOT SpD) |
 | `TRITON_CPU_COMMIT` | `e60f448f8f197073b75d6d3e77347414a5db3ee7` | Pinned triton-cpu commit hash |
 | `TRITON_CPU_COMPILE_MAX_JOBS` | `4` | Parallel build jobs for triton-cpu compilation |
 | `VLLM_BUILD_RUST` | `1` | Set to `1` to build vLLM's experimental Rust OpenAI frontend (`vllm-rs`) |
@@ -271,6 +273,7 @@ All `ARG`s are global (declared before the first `FROM`) and re-declared inside 
 | `VLLM_QAIC_PR` | *(empty)* | `ci` target: PR number to fetch (takes priority over `VLLM_QAIC_BRANCH`) |
 | `VLLM_QAIC_BRANCH` | *(empty)* | `ci` target: branch to fetch |
 | `QEFF_PR` | *(empty)* | `dev` target: QEfficient PR to install editable (overrides `QEFF_BRANCH`) |
+| `WHEEL_NAME` | *(empty)* | `wheel` target: rename the built wheel to this filename before exporting it (empty = `uv build`'s own name). See [Overriding the wheel filename](#overriding-the-wheel-filename) |
 
 **`docker/Dockerfile.pyt`**
 
@@ -281,12 +284,13 @@ All `ARG`s are global (declared before the first `FROM`) and re-declared inside 
 | `UV_VERSION` | `0.11.29` | Pinned `uv` binary version, pulled via `COPY --from` |
 | `PYTHON_VERSION` | `3.12` | Python version (`3.10`/`3.11`/`3.12`), provisioned via `uv python install` |
 | `RUST_VERSION` | `1.90` | Pinned Rust toolchain image tag (`rust:<ver>-slim`); only used when `VLLM_BUILD_RUST=1` |
+| `RUST_IMAGE` | `docker.io/library/rust:${RUST_VERSION}-slim` | Full image ref for the Rust toolchain. Override to pull from a mirror or internal registry; supplies its own tag, so it takes precedence over `RUST_VERSION` |
 | `VLLM_VERSION` | `0.23.0` | vLLM release tag to install |
 | `VLLM_PR` | *(empty)* | Any target: vLLM PR number to fetch (takes priority over `VLLM_BRANCH` and `VLLM_VERSION`) |
 | `VLLM_BRANCH` | *(empty)* | Any target: vLLM branch to clone instead of the pinned `VLLM_VERSION` tag |
-| `VLLM_QAIC_VERSION` | `1.22` | vllm-qaic SDK/version tag (wheel tag/version suffix) |
-| `TORCH_VERSION_PYT` | `2.11.0+cpu` | CPU torch version for PYT |
-| `TORCHVISION_VERSION_PYT` | `0.26.0+cpu` | torchvision version for PYT |
+| `VLLM_QAIC_VERSION` | `1.23` | vllm-qaic SDK/version tag (wheel tag/version suffix) |
+| `TORCH_VERSION_PYT` | `2.13.0+cpu` | CPU torch version for PYT |
+| `TORCHVISION_VERSION_PYT` | `0.28.0+cpu` | torchvision version for PYT |
 | `TORCHAUDIO_VERSION_PYT` | `2.11.0+cpu` | torchaudio version for PYT |
 | `VLLM_TARGET_DEVICE_PYT` | `empty` | vLLM build target device (`empty` = no C++ compilation) |
 | `TORCH_QAIC_BASE_PATH` | `/opt/qti-aic/integrations/torch_qaic` | SDK path containing `torch_qaic` wheels inside `BASE_IMAGE` |
@@ -295,6 +299,7 @@ All `ARG`s are global (declared before the first `FROM`) and re-declared inside 
 | `VLLM_QAIC_GIT_REF` | `v0.23.0` | `release` target: vllm-qaic git tag/branch to clone |
 | `VLLM_QAIC_PR` | *(empty)* | `ci` target: PR number to fetch (takes priority over `VLLM_QAIC_BRANCH`) |
 | `VLLM_QAIC_BRANCH` | *(empty)* | `ci` target: branch to fetch |
+| `WHEEL_NAME` | *(empty)* | `wheel` target: rename the built wheel to this filename before exporting it (empty = `uv build`'s own name). See [Overriding the wheel filename](#overriding-the-wheel-filename) |
 
 ### Build commands
 
@@ -373,6 +378,38 @@ Output locations:
 | AOT | `dist/aot/vllm_qaic-*aot*-py3-none-any.whl` |
 | PYT | `dist/pyt/py312/vllm_qaic-*pyt*-cp312-cp312-linux_x86_64.whl` |
 
+#### Pulling the Rust toolchain from a mirror
+
+The base stage copies `cargo`/`rustup` out of a pinned `rust:<RUST_VERSION>-slim` image on Docker Hub. `--rust-image` replaces that ref, so the toolchain can come from a mirror or internal registry instead:
+
+```bash
+./scripts/build_wheels.sh both --outdir ./dist \
+    --rust-image my.registry.internal:5000/mirror/rust:1.90-slim
+```
+
+The script forwards it as the `RUST_IMAGE` build-arg (same passthrough shape as `--base-image` → `BASE_IMAGE`), and it applies to both Dockerfiles. Because the override carries its own tag, `RUST_VERSION` is ignored when it is set. The image only needs `/usr/local/cargo` and `/usr/local/rustup` at the paths the official `rust` images use — the exact toolchain version doesn't have to match `RUST_VERSION`, since `rustup` fetches whatever vllm's `rust-toolchain.toml` pins when `cargo build` runs.
+
+#### Overriding the wheel filename
+
+`--wheel-name` replaces the filename `uv build` would generate. The script forwards it to the Dockerfile's `wheel` stage as the `WHEEL_NAME` build-arg, and that stage renames the wheel before BuildKit exports it — so the file that lands in `--outdir` already carries the custom name:
+
+```bash
+# AOT wheel as dist/aot/vllm_qaic-1.22.0+aot-py3-none-any.whl
+./scripts/build_wheels.sh aot --outdir ./dist \
+    --wheel-name vllm_qaic-1.22.0+aot-py3-none-any.whl
+
+# PYT wheel as dist/pyt/py312/vllm_qaic-1.22.0+pyt-cp312-cp312-linux_x86_64.whl
+./scripts/build_wheels.sh pyt --outdir ./dist \
+    --wheel-name vllm_qaic-1.22.0+pyt-cp312-cp312-linux_x86_64.whl
+```
+
+Notes:
+
+- **Requires an explicit `aot` or `pyt` target.** One filename cannot name two wheels, so `--wheel-name` is rejected with `both` — including the implicit default when no target is given.
+- Must be a bare filename ending in `.whl` (letters, digits, `.`, `_`, `+`, `-`). The directory still comes from `--outdir`.
+- Only the filename changes; the `.dist-info` inside the wheel still carries the real `vllm_qaic` name and version. pip reads the distribution, version and compatibility tags off the filename and requires the distribution to match that metadata. The script warns (but still builds) when the name isn't a valid wheel filename — `<distribution>-<version>[-<build>]-<pytag>-<abitag>-<plattag>.whl`, no `-` inside a field and a build tag starting with a digit — or when its distribution part isn't `vllm_qaic`. Such a wheel is fine as an archived artifact but `pip install` will reject it.
+- A renamed wheel no longer matches the `vllm_qaic-*aot*.whl` / `vllm_qaic-*pyt*.whl` globs used by `install.sh` and by the manual `pip install` commands below. Install it by its explicit path, or keep an `*aot*`/`*pyt*` substring in the name.
+
 ### Step 2a — Install from wheel using `install.sh`
 
 Point `VLLM_QAIC_SDK_PATH` to the directory **above** the `py312/` subdirectory for PYT, or directly to the AOT wheel directory:
@@ -435,17 +472,17 @@ All version constants are defined in [`scripts/utility.sh`](../scripts/utility.s
 | Constant | Value | Description |
 |---|---|---|
 | `VLLM_VERSION` | `0.23.0` | vLLM release tag |
-| `VLLM_QAIC_VERSION` | `0.23.0` | vllm-qaic SDK/version tag (used in wheel tag and version suffix) |
+| `VLLM_QAIC_VERSION` | `1.23` | vllm-qaic SDK/version tag (used in wheel tag and version suffix) |
 | `TORCH_VERSION_AOT` | `2.7.0+cpu` | CPU torch for AOT (matches QEfficient exact pin) |
 | `TORCHVISION_VERSION_AOT` | `0.22.0+cpu` | torchvision for AOT (keep in sync with torch) |
-| `TORCH_VERSION_PYT` | `2.11.0+cpu` | CPU torch for PYT |
-| `TORCHVISION_VERSION_PYT` | `0.26.0+cpu` | torchvision for PYT (keep in sync with torch) |
+| `TORCH_VERSION_PYT` | `2.13.0+cpu` | CPU torch for PYT |
+| `TORCHVISION_VERSION_PYT` | `0.28.0+cpu` | torchvision for PYT (keep in sync with torch) |
 | `TORCHAUDIO_VERSION_PYT` | `2.11.0+cpu` | torchaudio for PYT (keep in sync with torch) |
-| `QEFF_BRANCH` | `main` | QEfficient branch/tag |
+| `QEFF_BRANCH` | `release/v1.23.0` | QEfficient branch/tag |
 | `TORCH_QAIC_VERSION` | `0.1.0` | torch_qaic wheel version |
 | `VLLM_TARGET_DEVICE_AOT` | `empty` | vLLM build target for AOT mode |
 | `VLLM_TARGET_DEVICE_PYT` | `empty` | vLLM build target for PYT mode |
-| `TRITON_CPU` | `0` | Set to `1` to enable triton-cpu backend (AOT SpD) |
+| `TRITON_CPU` | `0` | Set to `1` to build the optional triton-cpu backend (parity tests only; not needed for AOT SpD) |
 | `TRITON_CPU_COMMIT` | `e60f448f...` | Pinned triton-cpu commit hash |
 | `TRITON_CPU_SRC` | `<repo>/.build/triton-cpu` | Clone destination for triton-cpu source |
 | `TRITON_CPU_COMPILE_MAX_JOBS` | `4` | Parallel build jobs for triton-cpu compilation |

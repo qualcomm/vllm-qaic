@@ -38,14 +38,14 @@
 # Build commands
 # --------------
 #   # Standalone base:
-#   docker build --target pyt-base -t vllm-qaic-pyt-base:1.22 .
+#   docker build --target pyt-base -t vllm-qaic-pyt-base:1.23 .
 #
 #   # Release (default pins):
-#   docker build --target release -f docker/Dockerfile.pyt -t vllm-qaic-pyt:1.22 .
+#   docker build --target release -f docker/Dockerfile.pyt -t vllm-qaic-pyt:1.23 .
 #
 #   # Release (AI200 device):
 #   docker build --target release -f docker/Dockerfile.pyt \
-#     --build-arg QAIC_DEVICE_ARCH=v81 -t vllm-qaic-pyt:1.22-v81 .
+#     --build-arg QAIC_DEVICE_ARCH=v81 -t vllm-qaic-pyt:1.23-v81 .
 #
 #   # CI (current checkout):
 #   docker build --target ci -f docker/Dockerfile.pyt -t vllm-qaic-pyt:ci .
@@ -62,10 +62,22 @@
 #     --build-arg PYTHON_VERSION=3.11 --build-arg QAIC_DEVICE_ARCH=v81 \
 #     --output type=local,dest=./dist/pyt/py311 .
 #
+#   # Wheel with an overridden filename:
+#   docker buildx build --target wheel -f docker/Dockerfile.pyt \
+#     --build-arg PYTHON_VERSION=3.11 \
+#     --build-arg WHEEL_NAME=vllm_qaic-1.23.0+pyt-cp311-cp311-linux_x86_64.whl \
+#     --output type=local,dest=./dist/pyt/py311 .
+#
 #   # Any target — also build vllm's experimental Rust OpenAI frontend
 #   # (vllm-rs). See docs/installation.md for known caveats.
 #   docker build --target release -f docker/Dockerfile.pyt \
-#     --build-arg VLLM_BUILD_RUST=1 -t vllm-qaic-pyt:1.22-rust .
+#     --build-arg VLLM_BUILD_RUST=1 -t vllm-qaic-pyt:1.23-rust .
+#
+#   # Rust toolchain from a mirror / internal registry instead of Docker Hub:
+#   docker build --target release -f docker/Dockerfile.pyt \
+#     --build-arg VLLM_BUILD_RUST=1 \
+#     --build-arg RUST_IMAGE=my.registry.internal:5000/mirror/rust:1.90-slim \
+#     -t vllm-qaic-pyt:1.23-rust .
 #
 # The BASE_IMAGE must have the QAIC Platform and Apps SDKs installed
 # (i.e. /opt/qti-aic/ present with torch_qaic wheels).
@@ -90,13 +102,18 @@ ARG UV_VERSION="0.11.29"
 ARG PYTHON_VERSION="3.12"
 ARG RUST_VERSION="1.90"
 
+# Full image ref for the Rust toolchain. Defaults to the RUST_VERSION pin on
+# Docker Hub; override to pull from a mirror or internal registry, in which case
+# RUST_VERSION is ignored (the override supplies its own tag).
+ARG RUST_IMAGE="docker.io/library/rust:${RUST_VERSION}-slim"
+
 # ---------------------------------------------------------------------------
 # Shared stack version pins — defaults mirror scripts/utility.sh.
 # ---------------------------------------------------------------------------
 ARG VLLM_VERSION="0.23.0"
-ARG VLLM_QAIC_VERSION="1.22"
-ARG TORCH_VERSION_PYT="2.11.0+cpu"
-ARG TORCHVISION_VERSION_PYT="0.26.0+cpu"
+ARG VLLM_QAIC_VERSION="1.23"
+ARG TORCH_VERSION_PYT="2.13.0+cpu"
+ARG TORCHVISION_VERSION_PYT="0.28.0+cpu"
 ARG TORCHAUDIO_VERSION_PYT="2.11.0+cpu"
 ARG VLLM_TARGET_DEVICE_PYT="empty"
 ARG TORCH_QAIC_BASE_PATH="/opt/qti-aic/integrations/torch_qaic"
@@ -132,6 +149,12 @@ ARG VLLM_QAIC_PR=""
 ARG VLLM_QAIC_BRANCH=""
 
 # ---------------------------------------------------------------------------
+# Wheel-specific — WHEEL_NAME renames the built wheel before it is exported
+# (empty = keep uv build's own name).
+# ---------------------------------------------------------------------------
+ARG WHEEL_NAME=""
+
+# ---------------------------------------------------------------------------
 # Pinned uv binary — FROM supports ARG substitution, COPY --from does not.
 # ---------------------------------------------------------------------------
 # hadolint ignore=DL3006
@@ -140,10 +163,11 @@ FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
 # ---------------------------------------------------------------------------
 # Pinned Rust toolchain, COPY'd into the infra layer below. Version doesn't
 # need to match exactly — rustup auto-fetches whatever toolchain vllm's own
-# rust-toolchain.toml pins when `cargo build` runs.
+# rust-toolchain.toml pins when `cargo build` runs. RUST_IMAGE selects the ref
+# (see the ARG above) so a mirror can be used instead of Docker Hub.
 # ---------------------------------------------------------------------------
 # hadolint ignore=DL3006
-FROM docker.io/library/rust:${RUST_VERSION}-slim AS rust-toolchain
+FROM ${RUST_IMAGE} AS rust-toolchain
 
 # ===========================================================================
 # pyt-base — shared foundation for all three targets.
@@ -198,9 +222,9 @@ SHELL ["/bin/bash", "-c"]
 ARG VENV="/opt/venv-pyt"
 ARG PYTHON_VERSION="3.12"
 ARG VLLM_VERSION="0.23.0"
-ARG VLLM_QAIC_VERSION="1.22"
-ARG TORCH_VERSION_PYT="2.11.0+cpu"
-ARG TORCHVISION_VERSION_PYT="0.26.0+cpu"
+ARG VLLM_QAIC_VERSION="1.23"
+ARG TORCH_VERSION_PYT="2.13.0+cpu"
+ARG TORCHVISION_VERSION_PYT="0.28.0+cpu"
 ARG TORCHAUDIO_VERSION_PYT="2.11.0+cpu"
 ARG VLLM_TARGET_DEVICE_PYT="empty"
 ARG TORCH_QAIC_BASE_PATH="/opt/qti-aic/integrations/torch_qaic"
@@ -326,7 +350,7 @@ FROM pyt-base AS release-builder
 
 ARG VENV="/opt/venv-pyt"
 ARG VLLM_VERSION="0.23.0"
-ARG VLLM_QAIC_VERSION="1.22"
+ARG VLLM_QAIC_VERSION="1.23"
 ARG VLLM_QAIC_GIT_REF="v0.23.0"
 ARG QAIC_DEVICE_ARCH="v68"
 
@@ -360,7 +384,7 @@ FROM pyt-base AS ci-builder
 
 ARG VENV="/opt/venv-pyt"
 ARG VLLM_VERSION="0.23.0"
-ARG VLLM_QAIC_VERSION="1.22"
+ARG VLLM_QAIC_VERSION="1.23"
 ARG VLLM_QAIC_PR=""
 ARG VLLM_QAIC_BRANCH=""
 ARG QAIC_DEVICE_ARCH="v68"
@@ -411,7 +435,7 @@ FROM pyt-base AS dev-builder
 
 ARG VENV="/opt/venv-pyt"
 ARG VLLM_VERSION="0.23.0"
-ARG VLLM_QAIC_VERSION="1.22"
+ARG VLLM_QAIC_VERSION="1.23"
 ARG QAIC_DEVICE_ARCH="v68"
 ARG VLLM_TARGET_DEVICE_PYT="empty"
 ARG VLLM_PR=""
@@ -480,18 +504,42 @@ CMD ["bash"]
 #   docker buildx build --target wheel -f docker/Dockerfile.pyt \
 #     --build-arg PYTHON_VERSION=3.11 --build-arg QAIC_DEVICE_ARCH=v81 \
 #     --output type=local,dest=./dist/pyt/py311 .
+#
+#   # Custom wheel filename:
+#   docker buildx build --target wheel -f docker/Dockerfile.pyt \
+#     --build-arg WHEEL_NAME=vllm_qaic-1.23.0+pyt-cp311-cp311-linux_x86_64.whl \
+#     --output type=local,dest=./dist/pyt/py311 .
 # ===========================================================================
 FROM pyt-base AS wheel-builder
 
 ARG VLLM_VERSION="0.23.0"
-ARG VLLM_QAIC_VERSION="1.22"
+ARG VLLM_QAIC_VERSION="1.23"
 ARG QAIC_DEVICE_ARCH="v68"
+ARG WHEEL_NAME=""
 
+# WHEEL_NAME rename: the wheel's own name comes from setup.py's package name
+# and version, so overriding the filename is a post-build mv. Only the filename
+# changes — the .dist-info inside still carries the real name/version. pip reads
+# the distribution and compatibility tags off the filename and requires the
+# distribution to match that metadata, so an arbitrary name exports fine but
+# may not be installable; scripts/build_wheels.sh warns about names pip would
+# reject. Failing when /out has no wheel keeps a silent no-op rename from
+# exporting an unrenamed artifact.
 COPY . /src/vllm-qaic
 RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
     QAIC_DEVICE_ARCH="${QAIC_DEVICE_ARCH}" \
     VLLM_VERSION_OVERRIDE="${VLLM_VERSION}+pyt${VLLM_QAIC_VERSION}" \
-    uv build --wheel --no-build-isolation --out-dir /out /src/vllm-qaic
+    uv build --wheel --no-build-isolation --out-dir /out /src/vllm-qaic && \
+    if [ -n "${WHEEL_NAME}" ]; then \
+        built="$(find /out -maxdepth 1 -name '*.whl' -print -quit)"; \
+        if [ -z "${built}" ]; then \
+            echo "ERROR: no wheel found in /out to rename" >&2; exit 1; \
+        fi; \
+        if [ "${built}" != "/out/${WHEEL_NAME}" ]; then \
+            mv "${built}" "/out/${WHEEL_NAME}" && \
+            echo "=== Wheel renamed: $(basename "${built}") -> ${WHEEL_NAME} ==="; \
+        fi; \
+    fi
 
 FROM scratch AS wheel
 COPY --from=wheel-builder /out /

@@ -175,4 +175,5 @@ markers = [
     "qaic_test_config(**kwargs): per-test/module QAIC run configuration overrides",
     "qaic_aot_mode: test requires QAIC AOT (ahead-of-time compiled) mode to be installed",
     "qaic_disagg_installed: test requires the qaic_disagg package to be installed",
+    "triton_parity: differential Numba-vs-upstream-triton-cpu rejection-sampler test (skipped without triton-cpu)",
 ]

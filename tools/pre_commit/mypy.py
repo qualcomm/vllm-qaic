@@ -56,9 +56,7 @@ def group_files(changed_files: list[str]) -> dict[str, list[str]]:
         A dictionary mapping file group names to lists of changed files.
     """
     include_pattern = re.compile(f"^({'|'.join(INCLUDE_ROOTS)})/.*")
-    exclude_pattern = (
-        re.compile(f"^({'|'.join(EXCLUDE)}).*") if EXCLUDE else None
-    )
+    exclude_pattern = re.compile(f"^({'|'.join(EXCLUDE)}).*") if EXCLUDE else None
     file_groups: dict[str, list[str]] = {"": []}
     file_groups.update({k: [] for k in SEPARATE_GROUPS})
     for changed_file in changed_files:

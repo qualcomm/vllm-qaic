@@ -81,9 +81,7 @@ def main() -> None:
             # when the function is called), so they are always allowed.
             return
 
-        def visit_AsyncFunctionDef(
-            self, node: ast.AsyncFunctionDef
-        ) -> None:
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
             return
 
         def visit_ClassDef(self, node: ast.ClassDef) -> None:

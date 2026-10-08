@@ -56,7 +56,9 @@ class QaicQuantConfig(QuantizationConfig):
         return None
 
     @classmethod
-    def override_quantization_method(cls, hf_quant_cfg, user_quant, hf_config=None, **kwargs) -> str | None:
+    def override_quantization_method(
+        cls, hf_quant_cfg, user_quant, hf_config=None, **kwargs
+    ) -> str | None:
         quantize_method = hf_quant_cfg.get("quant_method", "").lower()
         if (
             quantize_method in QAIC_QUANTIZATION_LIST

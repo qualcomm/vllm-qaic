@@ -48,8 +48,7 @@ DYNAMIC_RESOLUTION_MODELS = [
 class QaicPlatform(Platform):
     _enum = PlatformEnum.OOT
     primary_attn_backend_cls = (
-        "vllm_qaic.attention.backends"
-        ".qaic_attn.QAicTorchAttentionBackend"
+        "vllm_qaic.attention.backends.qaic_attn.QAicTorchAttentionBackend"
     )
     device_name: str = "qaic"
     # Set device type to cpu if it's AOT.
@@ -124,16 +123,18 @@ class QaicPlatform(Platform):
     def get_num_cores(cls, device_id: int = 0) -> int:
         if not cls.is_aot:
             return torch_qaic.qaic.get_device_info(device_id).num_cores
-        else:
-            pass
+        raise NotImplementedError(
+            "get_num_cores is only supported in eager (non-AOT) mode"
+        )
 
     @classmethod
     @functools.cache
     def get_num_hvx_threads(cls, device_id: int = 0) -> int:
         if not cls.is_aot:
             return torch_qaic.qaic.get_device_info(device_id).per_core_hvx_thread_count
-        else:
-            pass
+        raise NotImplementedError(
+            "get_num_hvx_threads is only supported in eager (non-AOT) mode"
+        )
 
     @classmethod
     def check_if_supports_dtype(cls, dtype: torch.dtype):
@@ -213,18 +214,6 @@ class QaicPlatform(Platform):
                 )
                 vllm_config.model_config.enforce_eager = True
             device_config.device = torch.device("qaic")
-            # set QAIC_VISIBLE_DEVICES from device_group
-            # if not already set
-            if (
-                os.environ.get(cls.device_control_env_var) is None
-                and "device_group" in additional_config
-            ):
-                logger.warning_once(
-                    "setting inference mode to Eager mode since torch_qaic is installed"
-                )
-                os.environ[cls.device_control_env_var] = additional_config[
-                    "device_group"
-                ]
 
         # Shorthand used throughout this method
         override_qaic_config = additional_config.get("override_qaic_config", {})
@@ -285,8 +274,8 @@ class QaicPlatform(Platform):
             )
             if vllm_config.speculative_config:
                 raise ValueError(
-                    "Speculative decoding (SpD) is not supported in eager mode on QAIC. "
-                    "SpD requires AOT (non-eager) compilation."
+                    "Speculative decoding (SpD) is not supported in eager "
+                    "mode on QAIC. SpD requires AOT (non-eager) compilation."
                 )
             if scheduler_config.async_scheduling:
                 logger.warning_once(
@@ -299,6 +288,8 @@ class QaicPlatform(Platform):
         if cache_config:
             if model_config.enforce_eager:
                 cache_config.block_size = 16
+                # FIXME remove below hard-coding once PagedAttention is enabled
+                cache_config.enable_prefix_caching = False
             else:
                 if cache_config.enable_prefix_caching:
                     cache_config.enable_prefix_caching = False
@@ -351,7 +342,12 @@ class QaicPlatform(Platform):
                 # gives the scheduler the correct per-step budget AND sizes the buffers
                 # large enough to never overflow after decode expansion.
                 scheduler_config.max_num_batched_tokens = min(
-                    scheduler_config.max_num_seqs * (max(__prefill_seq_len) if isinstance(__prefill_seq_len, (list, tuple)) else __prefill_seq_len),
+                    scheduler_config.max_num_seqs
+                    * (
+                        max(__prefill_seq_len)
+                        if isinstance(__prefill_seq_len, (list, tuple))
+                        else __prefill_seq_len
+                    ),
                     scheduler_config.max_num_batched_tokens,
                 )
             # Reset max_num_scheduled_tokens so that
@@ -367,6 +363,10 @@ class QaicPlatform(Platform):
             # CPUs (KMP_TPAUSE is a documented no-op on non-Intel silicon; the other
             # KMP_* vars measurably speed up CPU-bound speculative-decoding proposers
             # on AMD EPYC as well).
+            # KMP_*_BARRIER_PATTERN=dist,dist is deliberately not set: under dist
+            # barriers, OpenMP teams forked from non-main threads (e.g. the host
+            # rejection sampler) busy-spin between regions and starve the
+            # engine threads (see docs/qaic for the measured SpD slowdown).
             # Set VLLM_DISABLE_LD_PRELOAD_OPT=1 to skip this optimization.
             ld_preload_str = os.getenv("LD_PRELOAD", "")
             disable_opt = os.getenv("VLLM_DISABLE_LD_PRELOAD_OPT", "0") == "1"
@@ -374,15 +374,9 @@ class QaicPlatform(Platform):
                 import platform
 
                 cpu_info = platform.processor() or "unknown"
-                print(
-                    f"Updating KMP_BLOCKTIME, KMP_TPAUSE, "
-                    f"KMP_FORKJOIN_BARRIER_PATTERN for {cpu_info}"
-                )
+                print(f"Updating KMP_BLOCKTIME, KMP_TPAUSE for {cpu_info}")
                 os.environ["KMP_BLOCKTIME"] = "1"
                 os.environ["KMP_TPAUSE"] = "0"
-                os.environ["KMP_FORKJOIN_BARRIER_PATTERN"] = "dist,dist"
-                os.environ["KMP_PLAIN_BARRIER_PATTERN"] = "dist,dist"
-                os.environ["KMP_REDUCTION_BARRIER_PATTERN"] = "dist,dist"
 
         from vllm.config import CompilationMode
 
@@ -447,7 +441,7 @@ class QaicPlatform(Platform):
 
                 uniproc_executor.UniProcExecutor = QaicUniProcExecutor
                 stages = int(override_qaic_config.get("stages"))
-                assert (
+                assert not scheduler_config.async_scheduling or (
                     stages is None
                     or int(stages) <= 1
                     or vllm_config.scheduler_config.max_num_seqs <= int(stages)
@@ -576,9 +570,10 @@ class QaicPlatform(Platform):
         """
         Configure multimodal processor settings for models with
         dynamic resolution support. Some vision-language models
-        (e.g. Qwen2.5VL, Qwen3VL) can handle dynamic image resolutions by mapping them to
-        a variable number of visual tokens. On QAIC hardware, the vision encoder requires
-        fixed-size inputs, so this method registers a set of supported ``(height, width)``
+        (e.g. Qwen2.5VL, Qwen3VL) can handle dynamic image resolutions by
+        mapping them to a variable number of visual tokens. On QAIC hardware,
+        the vision encoder requires fixed-size inputs, so this method registers
+        a set of supported ``(height, width)``
         resolutions that a custom processor will snap images to at runtime.
 
         Currently only Qwen2.5VL and Qwen3VL are supported.
@@ -596,9 +591,10 @@ class QaicPlatform(Platform):
         default_min_pixels = 4 * factor * factor
         default_max_pixels = 16384 * factor * factor
 
-        if model_config.mm_processor_kwargs is None:
-            model_config.mm_processor_kwargs = {}
-        mm_kwargs = model_config.mm_processor_kwargs
+        multimodal_config = model_config.get_multimodal_config()
+        if multimodal_config.mm_processor_kwargs is None:
+            multimodal_config.mm_processor_kwargs = {}
+        mm_kwargs = multimodal_config.mm_processor_kwargs
         override_mm_kwargs = override_qaic_config.get("mm_processor_kwargs") or {}
         mm_kwargs["max_pixels"] = override_mm_kwargs.get(
             "max_pixels", mm_kwargs.get("max_pixels", default_max_pixels)

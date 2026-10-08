@@ -18,7 +18,7 @@ allocator calls while still reporting device memory for KV cache sizing.
 import gc
 import time
 from contextlib import contextmanager
-from typing import Generator
+from collections.abc import Generator
 
 import psutil
 import vllm.utils.mem_utils

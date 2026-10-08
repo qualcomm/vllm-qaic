@@ -237,7 +237,7 @@ def _is_qaic() -> bool:
 
 def get_qaic_sdk_version():
     """Get the QAIC sdk version."""
-    return "1.22"
+    return "1.23"
 
 
 def get_requirements(filename=None) -> list[str]:

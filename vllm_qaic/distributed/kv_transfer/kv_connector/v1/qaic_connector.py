@@ -73,6 +73,7 @@ KV_LOOKUP_RETRIES_INTERVAL = 0.05
 FORCE_CLEAN_UP_MULTIPLIER = 2
 MAX_UID = 1000000
 VLLM_QAIC_USE_FULL_KV_TRANSFER_ENV = "VLLM_QAIC_USE_FULL_KV_TRANSFER"
+VLLM_QAIC_DISABLE_HANDOFF_ID_ENV = "VLLM_QAIC_DISABLE_HANDOFF_ID"
 
 
 @dataclass
@@ -92,18 +93,24 @@ class ReqMeta:
     is_prefill_partial: bool
     # Block Id of the request
     block_id: int | None = None
-    # Keeping List[str] for backward compatibilty with QAIC handoff server;
+    # Keeping List[str] for backward compatibility with QAIC handoff server;
     # even though will store only KV shm name.
     kv_handoff_metadata: list[str] | None = None
 
     @staticmethod
     def make_meta(
-        token_ids: list[int], is_store: bool, is_prefill_partial: bool, block_id: int
+        token_ids: list[int],
+        is_store: bool,
+        is_prefill_partial: bool,
+        block_id: int,
+        handoff_id: str | None = None,
     ) -> "ReqMeta":
         token_ids_tensor = torch.tensor(token_ids)
         return ReqMeta(
             token_ids=token_ids_tensor,
-            token_hash=hash(tuple(token_ids)),
+            token_hash=hash((hash(tuple(token_ids)), int(handoff_id, 16)))
+            if handoff_id is not None
+            else hash(tuple(token_ids)),
             is_store=is_store,
             is_prefill_partial=is_prefill_partial,
             block_id=block_id,
@@ -123,9 +130,12 @@ class QaicConnectorMetadata(KVConnectorMetadata):
         is_store: bool,
         is_partial_prefill: bool,
         block_id: int,
+        handoff_id: str | None = None,
     ) -> None:
         self.requests.append(
-            ReqMeta.make_meta(token_ids, is_store, is_partial_prefill, block_id)
+            ReqMeta.make_meta(
+                token_ids, is_store, is_partial_prefill, block_id, handoff_id
+            )
         )
 
 
@@ -188,7 +198,7 @@ class ShmBuffer:
                 self.name = self.shared_memory.name
             except Exception as e:
                 raise ValueError(
-                    "Exception occured during creation of shared memory!"
+                    "Exception occurred during creation of shared memory!"
                 ) from e
         else:
             # we are opening an existing buffer
@@ -253,6 +263,7 @@ class ShmBuffer:
     def get_data(self, current_idx: int = 0):
         start = self.buff_sizes_cum_sum[current_idx - 1] if current_idx > 0 else 0
         end = self.buff_sizes_cum_sum[current_idx]
+        assert self.shared_memory.buf is not None
         with memoryview(self.shared_memory.buf[start:end]) as buf:
             yield buf
 
@@ -385,6 +396,9 @@ class QaicConnector(KVConnectorBase_V1):
 
         # Request tracker for scheduler for each step
         self._request_tracker: dict[str, ReqTrackerObj] = {}
+        self.disable_handoff_id = (
+            os.getenv(VLLM_QAIC_DISABLE_HANDOFF_ID_ENV, "0") == "1"
+        )
 
         # Invoke Threads
         signal.signal(signal.SIGINT, self.signal_handler)
@@ -559,7 +573,7 @@ class QaicConnector(KVConnectorBase_V1):
         paged buffer.
 
         This interface will be useful for layer-by-layer pipelining.
-        NOTE: Currently KV cache tranfer is not managed layer by layer.
+        NOTE: Currently KV cache transfer is not managed layer by layer.
 
         Args:
             layer_name: the name of that layer
@@ -631,7 +645,7 @@ class QaicConnector(KVConnectorBase_V1):
         from save_kv_layer is complete before finishing the forward.
 
         This prevents overwrites of paged KV buffer before saving done.
-        NOTE: Currently aysc KV cache tranfer is not supported.
+        NOTE: Currently aysc KV cache transfer is not supported.
         """
         return
 
@@ -677,6 +691,17 @@ class QaicConnector(KVConnectorBase_V1):
         # Always load KV cache. In case of producer KV cache will be empty buffers
         self._request_tracker[request.request_id] = ReqTrackerObj(request, None)
 
+    def _handoff_id(self, request) -> str | None:
+        if self.disable_handoff_id:
+            return None
+        params = request.kv_transfer_params or {}
+        handoff_id = params.get("handoff_id")
+        if handoff_id is not None:
+            assert all(c in "0123456789abcdefABCDEF" for c in handoff_id), (
+                f"handoff_id must be hex, got {handoff_id!r}"
+            )
+        return handoff_id
+
     def build_connector_meta(
         self,
         scheduler_output: SchedulerOutput,
@@ -707,6 +732,9 @@ class QaicConnector(KVConnectorBase_V1):
                     is_store=self.is_producer and not is_partial_prefill,
                     is_partial_prefill=is_partial_prefill,
                     block_id=block_id,
+                    handoff_id=self._handoff_id(
+                        self._request_tracker[new_req.req_id].request
+                    ),
                 )
                 self._request_tracker[new_req.req_id].block_id = block_id
                 total_need_load += 1
@@ -734,6 +762,7 @@ class QaicConnector(KVConnectorBase_V1):
                     is_store=self.is_producer and not is_partial_prefill,
                     is_partial_prefill=is_partial_prefill,
                     block_id=cached_block_id,
+                    handoff_id=self._handoff_id(self._request_tracker[req_id].request),
                 )  # For QAIC one request is mapped to only one block_id
                 total_need_load += 1
 

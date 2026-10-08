@@ -45,7 +45,7 @@ Two execution paths are supported:
 
 <div class="grid cards" markdown>
 
--   :bar_chart:{ .lg .middle } **Support Matrix**
+- :bar_chart:{ .lg .middle } **Support Matrix**
 
     ---
 
@@ -53,7 +53,7 @@ Two execution paths are supported:
 
     [:octicons-arrow-right-24: Support Matrix](features/index.md)
 
--   :brain:{ .lg .middle } **Supported Models**
+- :brain:{ .lg .middle } **Supported Models**
 
     ---
 
@@ -61,7 +61,7 @@ Two execution paths are supported:
 
     [:octicons-arrow-right-24: AOT Models](models/supported_models_aot.md) · [:octicons-arrow-right-24: Eager Models](models/supported_models_eager.md)
 
--   :globe_with_meridians:{ .lg .middle } **Serving**
+- :globe_with_meridians:{ .lg .middle } **Serving**
 
     ---
 
@@ -69,7 +69,7 @@ Two execution paths are supported:
 
     [:octicons-arrow-right-24: Online Serving](serving/online_serving.md) · [:octicons-arrow-right-24: Offline](serving/offline_inference.md)
 
--   :zap:{ .lg .middle } **Features**
+- :zap:{ .lg .middle } **Features**
 
     ---
 
@@ -77,7 +77,7 @@ Two execution paths are supported:
 
     [:octicons-arrow-right-24: Speculative Decoding](features/speculative_decoding.md)
 
--   :gear:{ .lg .middle } **Configuration**
+- :gear:{ .lg .middle } **Configuration**
 
     ---
 

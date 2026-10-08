@@ -20,6 +20,13 @@
   #error "rms_norm_bf16 requires HVX V81 or later (AI200+)"
 #endif
 
+// Fetch a JIT pointer-array slot as a typed pointer. Reading through this
+// helper keeps the raw pointers[] indexing out of the kernel entry points.
+template <typename T>
+static inline T jit_ptr(const AicJitPointerArray* ptrs, uint32_t index) {
+  return reinterpret_cast<T>(ptrs->pointers[index]);
+}
+
 // BF16 is the top 16 bits of FP32. Expand a BF16 HVX vector (64 x uint16)
 // to two FP32 HVX vectors (32 x float each) by zero-extending each lane to
 // 32 bits and shifting left by 16. This is bitwise identical to the result
@@ -190,15 +197,15 @@ extern "C" void _single_nsp_rms_norm_bf16(
 // row r.
 QAIC_KERNEL_API uint32_t rms_norm_multi_nsp_bf16(
     const AicJitEntryPointConfig* cfg, const AicJitPointerArray* ptrs) {
-  const uint16_t* attn_out_ddr = (const uint16_t*)ptrs->pointers[0];
-  const uint16_t* x_ddr = (const uint16_t*)ptrs->pointers[1];
-  const uint16_t* weight_ddr = (const uint16_t*)ptrs->pointers[2];
-  float* out_ddr = (float*)ptrs->pointers[3];
-  float* dst_ddr = (float*)ptrs->pointers[4];
+  const uint16_t* attn_out_ddr = jit_ptr<const uint16_t*>(ptrs, 0);
+  const uint16_t* x_ddr = jit_ptr<const uint16_t*>(ptrs, 1);
+  const uint16_t* weight_ddr = jit_ptr<const uint16_t*>(ptrs, 2);
+  float* out_ddr = jit_ptr<float*>(ptrs, 3);
+  float* dst_ddr = jit_ptr<float*>(ptrs, 4);
 
-  float epsilon = *(const float*)ptrs->pointers[5];
-  const int N = *(const int32_t*)ptrs->pointers[6];
-  const int total_elems = *(const int32_t*)ptrs->pointers[7];
+  float epsilon = *jit_ptr<const float*>(ptrs, 5);
+  const int N = *jit_ptr<const int32_t*>(ptrs, 6);
+  const int total_elems = *jit_ptr<const int32_t*>(ptrs, 7);
   const int total_rows = total_elems / N;
 
   uint32_t threadID = cfg->threadID;

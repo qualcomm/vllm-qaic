@@ -48,8 +48,8 @@ Models validated for AOT mode on Cloud AI 100 with vLLM.
       --quantization mxfp6 \
       --kv-cache-dtype mxint8 \
       --speculative-config '{"method":"ngram","num_speculative_tokens":5}'
-    ```
----
+
+## ```
 
 ## Multimodal / Vision-Language Models
 
@@ -114,6 +114,7 @@ All text-only models listed above support:
 ---
 
 ## Notes
+
 - :material-information-outline: Set `trust_remote_code=True` for Falcon, Phi-3 family models
 - :material-information-outline: Pass `disable_sliding_window` for Gemma family models when using vLLM
 
