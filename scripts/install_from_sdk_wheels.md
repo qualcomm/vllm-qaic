@@ -62,7 +62,7 @@ source ~/venvs/vllm-qaic-pyt/bin/activate
 **2. Run the installer:**
 
 ```bash
-/opt/qti-aic/integrations/vllm_qaic/scripts/install.sh pyt
+/opt/qti-aic/integrations/vllm-qaic/scripts/install.sh pyt
 ```
 
 ---
@@ -79,7 +79,7 @@ conda activate vllm-qaic-aot
 **2. Run the installer:**
 
 ```bash
-/opt/qti-aic/integrations/vllm_qaic/scripts/install.sh aot
+/opt/qti-aic/integrations/vllm-qaic/scripts/install.sh aot
 ```
 
 This installs QEfficient (which brings `torch 2.7.0+cpu`), re-pins torch to the exact AOT
@@ -142,7 +142,7 @@ All of these are read by `install.sh` / `utility.sh`; set them before invoking t
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `VLLM_QAIC_SDK_PATH` | `/opt/qti-aic/integrations/vllm_qaic` | Where to find the wheels. Override to install from a staged or custom SDK copy. |
+| `VLLM_QAIC_SDK_PATH` | `/opt/qti-aic/integrations/vllm-qaic` | Where to find the wheels. Override to install from a staged or custom SDK copy. |
 | `VLLM_QAIC_INSTALL_SOURCE` | *(auto)* | Set to `wheel` to force wheel mode. Normally auto-detected from the absence of `setup.py`. |
 | `TORCH_QAIC_BASE_PATH` | `/opt/qti-aic/integrations/torch_qaic` | PYT only — where the `torch_qaic` wheels live. |
 | `TRANSFORMERS_VERSION_AOT` | *(unset)* | Pin `transformers` after the QEfficient step. |
@@ -168,7 +168,7 @@ missing from the SDK, or `install.sh` is not in a `scripts/` subdirectory. The i
 `${SCRIPT_DIR}/../requirements/`.
 
 **`zsh: no matches found: .../py312/vllm_qaic-*pyt*.whl`** — no PYT wheel for your Python
-version. Check `ls /opt/qti-aic/integrations/vllm_qaic/` for the available `py3XX/`
+version. Check `ls /opt/qti-aic/integrations/vllm-qaic/` for the available `py3XX/`
 directories and use a matching interpreter.
 
 **`import torch_qaic` prints `QAIC_WARNING: Pre-init checks for QID: 0 failed`** — a device
