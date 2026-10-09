@@ -533,6 +533,13 @@ class QaicPlatform(Platform):
                 scheduler_config.max_num_seqs
                 * scheduler_config.long_prefill_token_threshold
             )
+            # Pin encoder cache/compute budget so all vision frames encode in one step.
+            scheduler_config.max_num_encoder_input_tokens = (
+                scheduler_config.max_num_batched_tokens
+            )
+            scheduler_config.encoder_cache_size = (
+                scheduler_config.max_num_batched_tokens
+            )
             if "override_qaic_config" not in vllm_config.additional_config:
                 additional_config["override_qaic_config"] = {}
             additional_config["override_qaic_config"].update(
