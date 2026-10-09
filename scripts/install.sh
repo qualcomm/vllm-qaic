@@ -243,7 +243,7 @@ elif [ "${MODE}" = "pyt" ]; then
 
     echo "=== Step 3: vllm-qaic-pyt ==="
     if [ "${INSTALL_SOURCE}" = "source" ]; then
-        ${PIP} install --no-build-isolation "${REPO_ROOT}"
+        ${PIP} install --no-build-isolation -e "${REPO_ROOT}"
     else
         ${PIP} install --no-deps "${SDK_WHEEL_DIR}"/vllm_qaic-*pyt*.whl
     fi
