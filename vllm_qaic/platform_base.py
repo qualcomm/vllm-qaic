@@ -131,7 +131,7 @@ class QaicPlatform(Platform):
     @functools.cache
     def get_num_hvx_threads(cls, device_id: int = 0) -> int:
         if not cls.is_aot:
-            return torch_qaic.qaic.get_device_info(device_id).per_core_hvx_thread_count
+            return torch_qaic.qaic.get_device_info(device_id).num_threads
         raise NotImplementedError(
             "get_num_hvx_threads is only supported in eager (non-AOT) mode"
         )
