@@ -488,6 +488,6 @@ All version constants are defined in [`scripts/utility.sh`](../scripts/utility.s
 | `TRITON_CPU_COMPILE_MAX_JOBS` | `4` | Parallel build jobs for triton-cpu compilation |
 | `TRITON_CPU_SKIP_DISK_CHECK`¹ | `0` | Set to `1` to skip the 10 GB disk-space pre-flight check |
 | `TORCH_QAIC_BASE_PATH` | `/opt/qti-aic/integrations/torch_qaic` | SDK path for torch_qaic wheels |
-| `VLLM_QAIC_SDK_PATH` | `/opt/qti-aic/integrations/vllm_qaic` | SDK path for pre-built vllm-qaic wheels |
+| `VLLM_QAIC_SDK_PATH` | `/opt/qti-aic/integrations/vllm-qaic` | SDK path for pre-built vllm-qaic wheels |
 
 ¹ Defined in `scripts/install_triton_cpu.sh`, not `utility.sh`.

@@ -18,8 +18,8 @@
 # Install source detection:
 #   - Run from vllm-qaic repo (GitHub/Gerrit clone):
 #       setup.py found at repo root → installs from source via pip install .
-#   - Run from SDK (/opt/qti-aic/integrations/vllm_qaic/):
-#       no setup.py → installs pre-built wheel from /opt/qti-aic/integrations/vllm_qaic/pyXXX/
+#   - Run from SDK (/opt/qti-aic/integrations/vllm-qaic/):
+#       no setup.py → installs pre-built wheel from /opt/qti-aic/integrations/vllm-qaic/pyXXX/
 #
 # Environment overrides:
 #   TRANSFORMERS_VERSION_AOT   If set, pins transformers version after qefficient install
