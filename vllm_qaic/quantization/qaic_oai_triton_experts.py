@@ -31,7 +31,7 @@ def make_routing_data_qaic(
 
     bm_cols = oai_moe.triton.cdiv(num_local_experts, block_size_k)
     bitmatrix = torch.zeros(
-        (n_rows, bm_cols), dtype=torch.uint32, device=topk_ids.device
+        (n_rows, bm_cols), dtype=torch.int32, device=topk_ids.device
     )
 
     grid = (oai_moe.triton.cdiv(n_rows, block_size_m),)
