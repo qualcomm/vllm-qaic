@@ -44,9 +44,6 @@ from vllm.model_executor.layers.fused_moe import (
     RoutedExperts,
 )
 from vllm.model_executor.layers.fused_moe.config import biased_moe_quant_config
-from vllm.model_executor.layers.fused_moe.experts.gpt_oss_triton_kernels_moe import (
-    OAITritonExperts,
-)
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization import register_quantization_config
@@ -62,6 +59,7 @@ from vllm.utils.math_utils import round_up
 from vllm_qaic.logger import init_logger
 from vllm_qaic.ops._triton_flags import triton_op_enabled
 from vllm_qaic.ops.unquantized_fused_moe_method import QAicUnquantizedFusedMoEMethod
+from vllm_qaic.quantization.qaic_oai_triton_experts import QaicOAITritonExperts
 from vllm_qaic.utils import QAIC_GPT_OSS_MXFP4_METHOD
 
 # Import this compatibility adapter at the point where the modular OAI Triton
@@ -114,7 +112,7 @@ class QaicTritonGptOssMxfp4MoEMethod(GptOssMxfp4MoEMethod):
         # validated this Triton backend separately, so explicitly select the
         # modular OAI implementation here.
         self.mxfp4_backend = Mxfp4MoeBackend.TRITON
-        self.experts_cls = OAITritonExperts
+        self.experts_cls = QaicOAITritonExperts
         logger.info_once(
             "QAIC GPT-OSS MXFP4: forcing backend=%s, experts=%s",
             self.mxfp4_backend.value,
