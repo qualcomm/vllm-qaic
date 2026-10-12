@@ -6,10 +6,19 @@
 """QAIC routing dtype overrides for the OAI Triton GPT-OSS experts."""
 
 import torch
+import triton
 
-from vllm.model_executor.layers.fused_moe.experts import (
-    gpt_oss_triton_kernels_moe as oai_moe,
+from vllm.model_executor.layers.fused_moe.experts.gpt_oss_triton_kernels_moe import (
+    OAITritonExperts,
+    pack_bitmatrix,
 )
+from triton_kernels.matmul_ogs import GatherIndx, RoutingData, ScatterIndx
+from triton_kernels.tensor import (
+    SparseMatrix,
+    make_ragged_tensor_metadata,
+    wrap_torch_tensor,
+)
+from triton_kernels.tensor_details.dtype import BIT
 
 
 def make_routing_data_qaic(
@@ -29,13 +38,13 @@ def make_routing_data_qaic(
     block_size_m = 512
     block_size_k = 32
 
-    bm_cols = oai_moe.triton.cdiv(num_local_experts, block_size_k)
+    bm_cols = triton.cdiv(num_local_experts, block_size_k)
     bitmatrix = torch.zeros(
         (n_rows, bm_cols), dtype=torch.int32, device=topk_ids.device
     )
 
-    grid = (oai_moe.triton.cdiv(n_rows, block_size_m),)
-    oai_moe.pack_bitmatrix[grid](
+    grid = (triton.cdiv(n_rows, block_size_m),)
+    pack_bitmatrix[grid](
         bitmatrix,
         topk_ids,
         n_rows,
@@ -47,61 +56,41 @@ def make_routing_data_qaic(
 
     bitmatrix_shape = [n_rows, bm_cols * 32]
     bitmatrix_shape_max = [n_rows, None]
-    bitmatrix = (
-        oai_moe.Bitmatrix(
-            bitmatrix,
-            dtype=oai_moe.BIT,
-            shape=bitmatrix_shape,
-            shape_max=bitmatrix_shape_max,
-        )
-        if not oai_moe.use_legacy_triton_kernels
-        else oai_moe.Bitmatrix(
-            bitmatrix,
-            shape=bitmatrix_shape,
-            shape_max=bitmatrix_shape_max,
-            scratchpad=None,
-        )
+    bitmatrix = wrap_torch_tensor(
+        bitmatrix,
+        dtype=BIT,
+        shape=bitmatrix_shape,
+        shape_max=bitmatrix_shape_max,
     )
 
     # matmul_ogs expects invalid routing weights to contain -1.
     topk_weights = torch.where(topk_ids == -1, -1.0, topk_weights)
 
-    if oai_moe.use_legacy_triton_kernels:
-        from triton_kernels.routing import routing_from_bitmatrix
-
-        return routing_from_bitmatrix(
-            bitmatrix,
-            topk_weights,
-            topk_ids,
-            num_local_experts,
-            num_topk,
-        )
-
-    sparse_logits = oai_moe.SparseMatrix(
+    sparse_logits = SparseMatrix(
         indx=topk_ids,
         vals=topk_weights,
         mask=bitmatrix,
     )
     dispatch_indx = sparse_logits.mask_metadata.row_sorted_indx
     combine_indx = sparse_logits.mask_metadata.col_sorted_indx
-    ragged_batch_metadata = oai_moe.make_ragged_tensor_metadata(
+    ragged_batch_metadata = make_ragged_tensor_metadata(
         sparse_logits.mask_metadata.col_sum,
         dispatch_indx.shape[0],
     )
     gate_scal = sparse_logits.vals.flatten()[combine_indx]
-    routing_data = oai_moe.RoutingData(
+    routing_data = RoutingData(
         gate_scal,
         ragged_batch_metadata.block_sizes,
         num_local_experts,
         num_topk,
         ragged_batch_metadata,
     )
-    gather_indx = oai_moe.GatherIndx(combine_indx, dispatch_indx)
-    scatter_indx = oai_moe.ScatterIndx(dispatch_indx, combine_indx)
+    gather_indx = GatherIndx(combine_indx, dispatch_indx)
+    scatter_indx = ScatterIndx(dispatch_indx, combine_indx)
     return routing_data, gather_indx, scatter_indx
 
 
-class QaicOAITritonExperts(oai_moe.OAITritonExperts):
+class QaicOAITritonExperts(OAITritonExperts):
     """OAI Triton experts using QAIC-compatible routing tensor dtypes."""
 
     def _make_routing_data(
