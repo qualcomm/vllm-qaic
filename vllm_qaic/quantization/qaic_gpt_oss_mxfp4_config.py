@@ -46,7 +46,6 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.fused_moe.config import biased_moe_quant_config
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
-from vllm.model_executor.layers.quantization import register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
@@ -59,14 +58,6 @@ from vllm.utils.math_utils import round_up
 from vllm_qaic.logger import init_logger
 from vllm_qaic.ops._triton_flags import triton_op_enabled
 from vllm_qaic.ops.unquantized_fused_moe_method import QAicUnquantizedFusedMoEMethod
-from vllm_qaic.quantization.qaic_oai_triton_experts import QaicOAITritonExperts
-from vllm_qaic.utils import QAIC_GPT_OSS_MXFP4_METHOD
-
-# Import this compatibility adapter at the point where the modular OAI Triton
-# MXFP4 path is defined.  The earlier platform patch can run before Triton's
-# active target is finalized, while loading this module guarantees that the
-# QAIC GPT-OSS quantization path is actually being selected.
-import vllm_qaic.patch.patch_triton_kernels_layout  # noqa: F401
 
 _MXFP4_BLOCK_SIZE = 32
 # GPT-OSS's clamped SwiGLU constants (vllm's swigluoai activation).
@@ -105,6 +96,19 @@ class QaicTritonGptOssMxfp4MoEMethod(GptOssMxfp4MoEMethod):
     """QAIC adapter for the upstream modular Triton MXFP4 MoE path."""
 
     def __init__(self, moe: FusedMoEConfig):
+        # Keep triton_kernels optional until a GPT-OSS routed-expert layer
+        # actually selects the Triton backend. Importing this module during
+        # platform pre-registration affects every model and can fail when the
+        # installed triton_kernels revision does not match vLLM's revision.
+        from vllm_qaic.patch.patch_qaic_triton_import import (
+            enable_qaic_triton_kernels,
+        )
+
+        enable_qaic_triton_kernels()
+        from vllm_qaic.quantization.qaic_oai_triton_experts import (
+            QaicOAITritonExperts,
+        )
+
         super().__init__(moe)
 
         # Upstream auto-selection returns (NONE, None) for an OOT platform
@@ -226,7 +230,6 @@ class QaicTritonGptOssMxfp4MoEMethod(GptOssMxfp4MoEMethod):
             set_weight_attrs(w2_bias, extra_weight_attrs)
 
 
-@register_quantization_config(QAIC_GPT_OSS_MXFP4_METHOD)
 class QaicGptOssMxfp4Config(QuantizationConfig):
     """QAIC eager-mode MXFP4 config for GPT-OSS checkpoints."""
 

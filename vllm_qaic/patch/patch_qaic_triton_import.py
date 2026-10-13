@@ -7,9 +7,9 @@
 
 """
 This patch is required for enabling Triton with the QAIC backend.
-It imports vLLM's Triton utilities, re-enables ``HAS_TRITON``, and makes
-``has_triton_kernels()`` recognize the Triton kernels bundled with vLLM when
-the Qualcomm backend is registered.
+It imports vLLM's Triton utilities and re-enables ``HAS_TRITON`` without
+importing the optional ``triton_kernels`` package. GPT-OSS enables and imports
+``triton_kernels`` explicitly through ``enable_qaic_triton_kernels``.
 """
 
 # What's Patched and how it works:
@@ -36,19 +36,34 @@ from vllm.utils import import_utils
 QAIC_TRITON_BACKEND_KEY = "qcom_hexagon_backend"
 
 
+def _qaic_has_triton_kernels_disabled() -> bool:
+    """Keep optional Triton kernels hidden during non-GPT-OSS startup."""
+    return False
+
+
 def _qaic_has_triton_kernels() -> bool:
-    """Expose Triton kernels after QAIC's Triton backend is registered.
+    """Load Triton kernels after the GPT-OSS path explicitly enables them.
 
     ``import_triton_kernels`` also aliases vLLM's vendored package as the
     top-level ``triton_kernels`` module, which is how the GPT-OSS kernels
     import it.
     """
+
     if "triton_kernels" not in sys.modules:
         # Retry if vLLM cached an import attempt made before QAIC registered
         # its Triton backend.
         import_utils.import_triton_kernels.cache_clear()
         import_utils.import_triton_kernels()
     return True
+
+
+def enable_qaic_triton_kernels() -> None:
+    """Enable and patch ``triton_kernels`` for the GPT-OSS execution path."""
+    import_utils.has_triton_kernels = _qaic_has_triton_kernels
+    _qaic_has_triton_kernels()
+
+    import vllm_qaic.patch.patch_triton_kernels_layout  # noqa: F401
+    import vllm_qaic.patch.patch_triton_kernels_opt_flags  # noqa: F401
 
 
 try:
@@ -61,8 +76,6 @@ try:
         triton_utils.triton = triton
         triton_utils.tl = tl
         triton_utils.tldevice = tldevice
-        import_utils.has_triton_kernels = _qaic_has_triton_kernels
-        import vllm_qaic.patch.patch_triton_kernels_opt_flags  # noqa: F401
-        import vllm_qaic.patch.patch_triton_kernels_layout  # noqa: F401
+        import_utils.has_triton_kernels = _qaic_has_triton_kernels_disabled
 except Exception:
     triton_utils.HAS_TRITON = False
