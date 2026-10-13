@@ -31,6 +31,7 @@ from vllm.lora.request import LoRARequest
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, SupportedTask
 from vllm.utils.import_utils import PlaceholderModule
+from vllm_qaic.utils.qaic_utils import compute_max_decode_tokens
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
@@ -568,7 +569,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
             else None
         )
         self.num_decode_tokens = 0
-        self.max_decode_tokens = 1 + self.num_spec_tokens
+        self.max_decode_tokens = compute_max_decode_tokens(self.speculative_config)
         # Variable-K decode specializations: for ngram/suffix we compile two
         # kernels (K=0 and K=max_k) and select the cheapest one each step.
         _method = self.speculative_config.method if self.speculative_config else None
