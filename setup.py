@@ -107,6 +107,14 @@ def get_qaic_extensions() -> list[Extension]:
     extra_link_args = ["-O0", "-g"] if debug_mode else []
     print(f"Building vllm_qaic in {'debug' if debug_mode else 'release'} mode...")
 
+    qaicapps_ext = ROOT_DIR.parents[1] / "pytorch/qaiclibrary/include/QAicAppsExt"
+    for include_dir in (
+        qaicapps_ext / "qaic-hexagon-api",
+        qaicapps_ext / "qaic-common-api",
+    ):
+        if include_dir.exists():
+            extra_compile_args += [f"-I{include_dir}"]
+
     # QAIC_DEVICE_ARCH: when set, bypass all torch_qaic imports (torch_qaic._C
     # triggers the QAIC driver which SIGABRTs without live devices in Docker builds).
     device_arch = os.environ.get("QAIC_DEVICE_ARCH")
