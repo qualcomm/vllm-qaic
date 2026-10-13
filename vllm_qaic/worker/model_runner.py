@@ -1923,7 +1923,11 @@ class QaicModelRunnerAoT(GPUModelRunner):
             req_id_to_index=self.input_batch.req_id_to_index.copy(),
         )
 
-        if mm_embeds is not None and has_ec_transfer() and get_ec_transfer().is_producer:
+        if (
+            mm_embeds is not None
+            and has_ec_transfer()
+            and get_ec_transfer().is_producer
+        ):
             mm_embeds = [
                 torch.zeros((1,) * t.ndim, dtype=t.dtype, device=t.device)
                 for t in mm_embeds

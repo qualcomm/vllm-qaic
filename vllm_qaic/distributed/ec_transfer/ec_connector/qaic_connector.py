@@ -193,7 +193,9 @@ class QaicECConnector(ECConnectorBase):
     # Worker-side methods
     # ==============================
 
-    def start_load_caches(self, encoder_cache: dict[str, torch.Tensor], **kwargs) -> None:
+    def start_load_caches(
+        self, encoder_cache: dict[str, torch.Tensor], **kwargs
+    ) -> None:
         """
         Start loading the cache from the connector into vLLM's encoder cache.
 
@@ -386,7 +388,9 @@ class QaicECConnector(ECConnectorBase):
                     gc.collect()
                     time.sleep(random.randint(20, 100) / 1000)
         except Exception as e:
-            raise ValueError(f"Unable to access ECStore due to an exception: {e}") from e
+            raise ValueError(
+                f"Unable to access ECStore due to an exception: {e}"
+            ) from e
         else:
             # Detach the producer's own handle now that the name is PUT to the
             # store. Creator path: resource_tracker.unregister + close(), NO
