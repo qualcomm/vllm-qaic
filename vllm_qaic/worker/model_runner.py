@@ -21,7 +21,6 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from torch import nn
-from vllm.utils.func_utils import supports_kw
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
@@ -1956,7 +1955,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
         return tuple(tasks)
 
     def _uses_torch_view_kv_connector(self) -> bool:
-        return self._kv_connector_name in ("NixlConnector", "MooncakeConnector")
+        return self._kv_connector_name in ("NixlConnector", "MooncakeConnector","NixlPushConnector")
 
     def _uses_prefill_bank(self) -> bool:
         # Only producers need to wait for remote KV sends before reusing blocks.
@@ -2128,6 +2127,10 @@ class QaicModelRunnerAoT(GPUModelRunner):
         # fails.
         save_kwargs = dict(kwargs)
         if connector_metadata is not None:
+            # Async producers clear the connector's bound metadata before
+            # returning the output. Rebind it here so wait_for_save() can
+            # access the metadata after the deferred model execution.
+            kv_connector.bind_connector_metadata(connector_metadata)
             save_kwargs["connector_metadata"] = connector_metadata
         kv_connector.save_kv_layer(
             layer_name=None,
@@ -2135,10 +2138,10 @@ class QaicModelRunnerAoT(GPUModelRunner):
             attn_metadata=None,
             **save_kwargs,
         )
-        if kwargs and supports_kw(kv_connector.wait_for_save, "kv_cache_info"):
-            kv_connector.wait_for_save(**kwargs)
-        else:
-            kv_connector.wait_for_save()
+        # wait_for_save() has no metadata arguments in the vLLM connector API
+        # used by NIXL.  The cache information belongs to save_kv_layer();
+        # forwarding it here makes NixlBaseConnector raise TypeError.
+        kv_connector.wait_for_save()
         output.finished_sending, output.finished_recving = kv_connector.get_finished(
             finished_req_ids
         )
@@ -2206,14 +2209,20 @@ def _torch_cuda_wrapper():
         def __init__(self, *args, **kwargs) -> None:
             pass
 
-    cuda_event = torch.Event
+    torch_event = torch.Event
+    cuda_event = torch.cuda.Event
     cuda_stream = torch.cuda.Stream
     try:
+        # GPUModelRunner uses torch.cuda.Event, while some vLLM versions use
+        # torch.Event.  AoT runs on CPU and neither CUDA implementation is
+        # available, so patch both entry points during the parent constructor.
         torch.Event = _EventPlaceholder
+        torch.cuda.Event = _EventPlaceholder
         torch.cuda.Stream = _StreamPlaceholder
         yield
     finally:
-        torch.Event = cuda_event
+        torch.Event = torch_event
+        torch.cuda.Event = cuda_event
         torch.cuda.Stream = cuda_stream
 
 

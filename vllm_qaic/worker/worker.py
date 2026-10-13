@@ -638,7 +638,7 @@ class QaicWorkerAoT(QaicWorker):
             and kv_transfer_config.kv_connector
             in (
                 "NixlConnector",
-                "MooncakeConnector",
+                "MooncakeConnector", "NixlPushConnector"
             )
             and kv_transfer_config.kv_role == "kv_producer"
         ):
