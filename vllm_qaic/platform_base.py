@@ -516,7 +516,8 @@ class QaicPlatform(Platform):
         # matches across the encoder and PD instances.
         ec_transfer_config = vllm_config.ec_transfer_config
         ec_enabled = (
-            ec_transfer_config is not None and ec_transfer_config.is_ec_transfer_instance
+            ec_transfer_config is not None
+            and ec_transfer_config.is_ec_transfer_instance
         )
         if model_config.multimodal_config is not None and not ec_enabled:
             model_config.multimodal_config.mm_processor_cache_gb = 0
