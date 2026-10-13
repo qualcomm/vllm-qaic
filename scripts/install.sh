@@ -195,7 +195,7 @@ if [ "${MODE}" = "aot" ]; then
 
     echo "=== Step 3: vllm-qaic-aot ==="
     if [ "${INSTALL_SOURCE}" = "source" ]; then
-        TORCH_QAIC_INSTALLED=0 ${PIP} install --no-build-isolation -e "${REPO_ROOT}"
+        TORCH_QAIC_INSTALLED=0 ${PIP} install --no-build-isolation "${REPO_ROOT}"
     else
         ${PIP} install "${SDK_WHEEL_DIR}"/vllm_qaic-*aot*.whl
     fi
