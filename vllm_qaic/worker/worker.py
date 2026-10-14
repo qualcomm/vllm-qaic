@@ -481,10 +481,9 @@ class QaicWorkerPyt(QaicWorker):
         # cuda graph capture.
         kernel_warmup(self)
 
+        # No static graph capture on QAIC (cudagraph_mode is forced to NONE by
+        # the platform), torch.compile is triggered by the dummy runs.
         cuda_graph_memory_bytes = 0
-
-        if not current_platform.is_aot:
-            cuda_graph_memory_bytes = self.model_runner.capture_model()
 
         if self.cache_config.kv_cache_memory_bytes is None and hasattr(
             self, "peak_activation_memory"
@@ -568,7 +567,10 @@ class QaicWorkerPyt(QaicWorker):
             # the model initialization and profiling.
             set_random_seed(self.model_config.seed)
         # self.model_runner.warming_up_model()
-        return CompilationTimes(language_model=0.0, encoder=0.0)
+        return CompilationTimes(
+            language_model=self.compilation_config.compilation_time,
+            encoder=self.compilation_config.encoder_compilation_time,
+        )
 
     def execute_model(
         self,
