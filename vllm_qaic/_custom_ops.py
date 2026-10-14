@@ -16,7 +16,6 @@ logger = init_logger(__name__)
 _rms_norm_kernel = _qaic_custom_ops.rms_norm_dispatch
 _NSP_COUNT = current_platform.get_num_cores()
 _THREAD_COUNT = current_platform.get_num_hvx_threads()
-_HMX_THREAD_COUNT = _THREAD_COUNT + 1
 
 
 def rms_norm_hexagon(
@@ -51,27 +50,233 @@ def rms_norm_hexagon(
     return dst, out
 
 
+# ---------------------------------------------------------------------------
+# Qwen3.5 gated-delta-net (GDN) core — on-device Hexagon kernels.
+#
+# These back the kernel path in patch_qwen3_5._gdn_core_qaic, replacing the
+# pure-torch CPU fallback. Three stages, each a separate NSP entry point in
+# csrc/gdn_core/kernel.cpp, staged from Python exactly like the torch reference.
+# Scalars are passed as raw Python ints/floats (read as *(int32_t*)/*(float*)
+# in the kernel), matching the topk_router convention below.
+#
+# All device tensors are fp16 (v68 is fp16-only); g/beta are fp32 to match the
+# torch reference's fp32 gating/recurrence accumulation.
+# ---------------------------------------------------------------------------
+
+
+def _act_flags(activation: str | None) -> int:
+    """1 if the conv activation is silu/swish, else 0 (matches causal_conv1d.py)."""
+    return 1 if activation in ("silu", "swish") else 0
+
+
+def gdn_gating_hexagon(
+    a: torch.Tensor,  # fp16 [T, HV]
+    b: torch.Tensor,  # fp16 [T, HV]
+    A_log: torch.Tensor,  # fp32 [HV]
+    dt_bias: torch.Tensor,  # fp32 [HV]
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute GDN gating: g=-exp(A_log)*softplus(a+dt_bias), beta=sigmoid(b).
+
+    Returns (g, beta) as fp32 tensors.
+    """
+    a = a.to(torch.float16).contiguous()
+    b = b.to(torch.float16).contiguous()
+    A_log = A_log.to(torch.float32).contiguous()
+    dt_bias = dt_bias.to(torch.float32).contiguous()
+    T, HV = a.shape
+    g = torch.empty((T, HV), dtype=torch.float32, device=a.device)
+    beta = torch.empty((T, HV), dtype=torch.float32, device=a.device)
+    _kernel("gdn_gating")[_NSP_COUNT, _THREAD_COUNT](
+        a, b, A_log, dt_bias, g, beta, int(T), int(HV)
+    )
+    return g, beta
+
+
+def gdn_conv1d_update_hexagon(
+    x: torch.Tensor,  # fp16 [ND, conv_dim]
+    conv_state: torch.Tensor,  # fp16 [num_slots, conv_dim, state_len] (mutated)
+    weight: torch.Tensor,  # fp16 [conv_dim, K_CONV]
+    bias: torch.Tensor | None,  # fp16 [conv_dim] or None
+    slot_ids: torch.Tensor,  # int32 [ND]  KV slot per decode seq
+    activation: str | None,
+) -> torch.Tensor:
+    """Decode (1-token) depthwise causal conv + in-place state roll + silu.
+
+    Returns [ND, conv_dim]. Indexes ``conv_state`` by ``slot_ids`` inside the
+    kernel, so the full cache is passed and no per-token gather/scatter is
+    needed (mirrors ``gdn_recurrent_decode_hexagon``).
+    """
+    x = x.to(torch.float16).contiguous()
+    weight = weight.to(torch.float16).contiguous()
+    slot_ids = slot_ids.to(torch.int32).contiguous()
+    ND, conv_dim = x.shape
+    K_CONV = weight.shape[1]
+    bias_present = 1 if bias is not None else 0
+    if bias is None:
+        bias = torch.empty((conv_dim,), dtype=torch.float16, device=x.device)
+    else:
+        bias = bias.to(torch.float16).contiguous()
+    out = torch.empty((ND, conv_dim), dtype=torch.float16, device=x.device)
+    _kernel("gdn_conv1d_update")[_NSP_COUNT, _THREAD_COUNT](
+        x,
+        conv_state,
+        weight,
+        bias,
+        out,
+        slot_ids,
+        int(ND),
+        int(conv_dim),
+        int(K_CONV),
+        int(bias_present),
+        _act_flags(activation),
+    )
+    return out
+
+
+def gdn_conv1d_prefill_hexagon(
+    x: torch.Tensor,  # fp16 [conv_dim, Ttot]  (channel-major)
+    weight: torch.Tensor,  # fp16 [conv_dim, K_CONV]
+    bias: torch.Tensor | None,  # fp16 [conv_dim] or None
+    conv_states: torch.Tensor,  # fp16 [num_slots, conv_dim, state_len]  (read/write)
+    query_start_loc: torch.Tensor,  # int32 [num_seqs+1]
+    cache_indices: torch.Tensor,  # int32 [num_seqs]
+    has_initial_state: torch.Tensor,  # bool/int [num_seqs]
+    activation: str | None,
+) -> torch.Tensor:
+    """Varlen prefill depthwise causal conv + state write-back + silu.
+
+    Returns [conv_dim, Ttot].
+    """
+    x = x.to(torch.float16).contiguous()
+    weight = weight.to(torch.float16).contiguous()
+    conv_dim, Ttot = x.shape
+    K_CONV = weight.shape[1]
+    num_seqs = cache_indices.shape[0]
+    bias_present = 1 if bias is not None else 0
+    if bias is None:
+        bias = torch.empty((conv_dim,), dtype=torch.float16, device=x.device)
+    else:
+        bias = bias.to(torch.float16).contiguous()
+    qstart = query_start_loc.to(torch.int32).contiguous()
+    cidx = cache_indices.to(torch.int32).contiguous()
+    hinit = has_initial_state.to(torch.int32).contiguous()
+    out = torch.empty((conv_dim, Ttot), dtype=torch.float16, device=x.device)
+    _kernel("gdn_conv1d_prefill")[_NSP_COUNT, _THREAD_COUNT](
+        x,
+        weight,
+        bias,
+        conv_states,
+        qstart,
+        cidx,
+        hinit,
+        out,
+        int(conv_dim),
+        int(Ttot),
+        int(num_seqs),
+        int(K_CONV),
+        int(bias_present),
+        _act_flags(activation),
+    )
+    return out
+
+
+def gdn_recurrent_decode_hexagon(
+    q: torch.Tensor,  # fp16 [ND, H, K]
+    k: torch.Tensor,  # fp16 [ND, H, K]
+    v: torch.Tensor,  # fp16 [ND, HV, V]
+    g: torch.Tensor,  # fp32 [ND, HV]
+    beta: torch.Tensor,  # fp32 [ND, HV]
+    ssm_state: torch.Tensor,  # fp16 [num_slots, HV, V, K]  (read/write)
+    slot_ids: torch.Tensor,  # int32 [ND]
+    scale: float,
+    l2_eps: float = 1e-6,
+) -> torch.Tensor:
+    """Per-token decode gated delta-rule scan (one token per seq).
+
+    Returns o fp16 [ND, HV, V].
+    """
+    q = q.to(torch.float16).contiguous()
+    k = k.to(torch.float16).contiguous()
+    v = v.to(torch.float16).contiguous()
+    g = g.to(torch.float32).contiguous()
+    beta = beta.to(torch.float32).contiguous()
+    slot_ids = slot_ids.to(torch.int32).contiguous()
+    ND, H, Kd = q.shape
+    HV, Vd = v.shape[1], v.shape[2]
+    o = torch.empty((ND, HV, Vd), dtype=torch.float16, device=q.device)
+    _kernel("gdn_recurrent_decode")[_NSP_COUNT, _THREAD_COUNT](
+        q,
+        k,
+        v,
+        g,
+        beta,
+        o,
+        ssm_state,
+        slot_ids,
+        int(ND),
+        int(H),
+        int(HV),
+        int(Kd),
+        int(Vd),
+        float(scale),
+        float(l2_eps),
+    )
+    return o
+
+
+def gdn_recurrent_prefill_hexagon(
+    q: torch.Tensor,  # fp16 [Ttot, H, K]
+    k: torch.Tensor,  # fp16 [Ttot, H, K]
+    v: torch.Tensor,  # fp16 [Ttot, HV, V]
+    g: torch.Tensor,  # fp32 [Ttot, HV]
+    beta: torch.Tensor,  # fp32 [Ttot, HV]
+    ssm_state: torch.Tensor,  # fp16 [num_slots, HV, V, K]  (read/write)
+    query_start_loc: torch.Tensor,  # int32 [num_seqs+1]
+    state_indices: torch.Tensor,  # int32 [num_seqs]
+    has_initial_state: torch.Tensor,  # bool/int [num_seqs]
+    scale: float,
+    l2_eps: float = 1e-6,
+) -> torch.Tensor:
+    """Varlen prefill gated delta-rule sequential scan. Returns o fp16 [Ttot, HV, V]."""
+    q = q.to(torch.float16).contiguous()
+    k = k.to(torch.float16).contiguous()
+    v = v.to(torch.float16).contiguous()
+    g = g.to(torch.float32).contiguous()
+    beta = beta.to(torch.float32).contiguous()
+    qstart = query_start_loc.to(torch.int32).contiguous()
+    sidx = state_indices.to(torch.int32).contiguous()
+    hinit = has_initial_state.to(torch.int32).contiguous()
+    Ttot, H, Kd = q.shape
+    HV, Vd = v.shape[1], v.shape[2]
+    num_seqs = sidx.shape[0]
+    o = torch.empty((Ttot, HV, Vd), dtype=torch.float16, device=q.device)
+    _kernel("gdn_recurrent_prefill")[_NSP_COUNT, _THREAD_COUNT](
+        q,
+        k,
+        v,
+        g,
+        beta,
+        o,
+        ssm_state,
+        qstart,
+        sidx,
+        hinit,
+        int(num_seqs),
+        int(H),
+        int(HV),
+        int(Kd),
+        int(Vd),
+        float(scale),
+        float(l2_eps),
+    )
+    return o
+
+
 current_platform.import_kernels()
 # Set QAIC_ROUTER_FP32_SCORING=1 to use fp32 softmax/sigmoid math instead of
 # the default fp16 HVX math.  The kernel receives one score-mode id:
 # 0=fp16 softmax, 1=fp32 softmax, 2=fp16 sigmoid, 3=fp32 sigmoid.
 _FP32_SCORING = os.environ.get("QAIC_ROUTER_FP32_SCORING", "0") == "1"
-
-_MOE_ACTIVATION_IDS = {
-    "silu": 0,
-    "gelu": 1,
-    "gelu_tanh": 2,
-    "swigluoai": 3,
-    "swiglustep": 4,
-    "silu_no_mul": 5,
-    "gelu_no_mul": 6,
-    "gelu_tanh_no_mul": 7,
-    "relu2_no_mul": 8,
-}
-
-_UNQUANTIZED_FUSED_MOE_HMX_KERNEL = (
-    "multinsp_multithreaded_unquantized_fused_moe_route_compute_hmx"
-)
 
 
 def _kernel(name: str):
@@ -91,216 +296,6 @@ def _kernel_score_mode(scoring_func: int) -> int:
     if scoring_func == 0:
         return 1 if _FP32_SCORING else 0
     return 3 if _FP32_SCORING else 2
-
-
-@torch.library.custom_op(
-    "qaic::unquantized_fused_moe_hvx", mutates_args=(), device_types="qaic"
-)
-def _unquantized_fused_moe_hvx_op(
-    x: Tensor,
-    topk_weights: Tensor,
-    topk_ids: Tensor,
-    w13_weight: Tensor,
-    w2_weight: Tensor,
-    bias: Tensor,
-    expert_map: Tensor,
-    activation_id: int,
-    has_bias: bool,
-    apply_router_weight_on_input: bool,
-    has_expert_map: bool,
-) -> Tensor:
-    """Low-level QAIC HVX routed-MoE variant using route_out + reduce."""
-    num_tokens = x.shape[0]
-    hidden_size = x.shape[1]
-    num_experts = w13_weight.shape[0]
-    global_num_experts = expert_map.shape[0] if has_expert_map else num_experts
-    w13_dim = w13_weight.shape[1]
-    intermediate_size = w2_weight.shape[2]
-    topk = topk_ids.shape[1]
-    total_routes = num_tokens * topk
-    workers = _NSP_COUNT * _THREAD_COUNT
-    route_out = torch.empty((total_routes, hidden_size), dtype=x.dtype, device=x.device)
-    expert_route_indices = torch.empty(
-        (total_routes,), dtype=torch.float32, device=x.device
-    )
-    expert_offsets = torch.empty(
-        (num_experts + 1,), dtype=torch.float32, device=x.device
-    )
-    worker_counts = torch.empty(
-        (workers, num_experts), dtype=torch.float32, device=x.device
-    )
-    worker_offsets = torch.empty(
-        (workers, num_experts), dtype=torch.float32, device=x.device
-    )
-    out = torch.empty_like(x)
-    params = torch.tensor(
-        [
-            num_tokens,
-            hidden_size,
-            w13_dim,
-            intermediate_size,
-            num_experts,
-            topk,
-            activation_id,
-            int(has_bias),
-            int(apply_router_weight_on_input),
-            global_num_experts,
-            int(has_expert_map),
-        ],
-        dtype=torch.float32,
-        device=x.device,
-    ).contiguous()
-
-    group_count_kernel = _kernel(
-        "multinsp_multithreaded_unquantized_fused_moe_route_group_count"
-    )
-    group_prefix_kernel = _kernel(
-        "multinsp_multithreaded_unquantized_fused_moe_route_group_prefix"
-    )
-    group_fill_kernel = _kernel(
-        "multinsp_multithreaded_unquantized_fused_moe_route_group_fill"
-    )
-    route_kernel = _kernel("multinsp_multithreaded_unquantized_fused_moe_route_compute")
-    reduce_kernel = _kernel("multinsp_multithreaded_unquantized_fused_moe_route_reduce")
-    group_count_kernel[_NSP_COUNT, _THREAD_COUNT](
-        topk_ids,
-        expert_map,
-        worker_counts,
-        params,
-    )
-    group_prefix_kernel[_NSP_COUNT, _THREAD_COUNT](
-        worker_counts,
-        worker_offsets,
-        expert_offsets,
-        params,
-    )
-    group_fill_kernel[_NSP_COUNT, _THREAD_COUNT](
-        topk_ids,
-        expert_map,
-        worker_offsets,
-        expert_route_indices,
-        params,
-    )
-    route_kernel[_NSP_COUNT, _THREAD_COUNT](
-        x,
-        topk_weights,
-        topk_ids,
-        w13_weight,
-        w2_weight,
-        bias,
-        route_out,
-        expert_route_indices,
-        expert_offsets,
-        expert_map,
-        params,
-    )
-    reduce_kernel[_NSP_COUNT, _THREAD_COUNT](route_out, out, params)
-    return out
-
-
-@torch.library.custom_op(
-    "qaic::unquantized_fused_moe_hmx", mutates_args=(), device_types="qaic"
-)
-def _unquantized_fused_moe_hmx_op(
-    x: Tensor,
-    topk_weights: Tensor,
-    topk_ids: Tensor,
-    w13_weight: Tensor,
-    w2_weight: Tensor,
-    bias: Tensor,
-    expert_map: Tensor,
-    activation_id: int,
-    has_bias: bool,
-    apply_router_weight_on_input: bool,
-    has_expert_map: bool,
-) -> Tensor:
-    """Low-level QAIC HMX routed-MoE variant using route_out + reduce."""
-    num_tokens = x.shape[0]
-    hidden_size = x.shape[1]
-    num_experts = w13_weight.shape[0]
-    global_num_experts = expert_map.shape[0] if has_expert_map else num_experts
-    w13_dim = w13_weight.shape[1]
-    intermediate_size = w2_weight.shape[2]
-    topk = topk_ids.shape[1]
-    total_routes = num_tokens * topk
-    workers = _NSP_COUNT * _THREAD_COUNT
-    route_out = torch.empty((total_routes, hidden_size), dtype=x.dtype, device=x.device)
-    expert_route_indices = torch.empty(
-        (total_routes,), dtype=torch.float32, device=x.device
-    )
-    expert_offsets = torch.empty(
-        (num_experts + 1,), dtype=torch.float32, device=x.device
-    )
-    worker_counts = torch.empty(
-        (workers, num_experts), dtype=torch.float32, device=x.device
-    )
-    worker_offsets = torch.empty(
-        (workers, num_experts), dtype=torch.float32, device=x.device
-    )
-    out = torch.empty_like(x)
-    params = torch.tensor(
-        [
-            num_tokens,
-            hidden_size,
-            w13_dim,
-            intermediate_size,
-            num_experts,
-            topk,
-            activation_id,
-            int(has_bias),
-            int(apply_router_weight_on_input),
-            global_num_experts,
-            int(has_expert_map),
-        ],
-        dtype=torch.float32,
-        device=x.device,
-    ).contiguous()
-
-    group_count_kernel = _kernel(
-        "multinsp_multithreaded_unquantized_fused_moe_route_group_count"
-    )
-    group_prefix_kernel = _kernel(
-        "multinsp_multithreaded_unquantized_fused_moe_route_group_prefix"
-    )
-    group_fill_kernel = _kernel(
-        "multinsp_multithreaded_unquantized_fused_moe_route_group_fill"
-    )
-    route_kernel = _kernel(_UNQUANTIZED_FUSED_MOE_HMX_KERNEL)
-    reduce_kernel = _kernel("multinsp_multithreaded_unquantized_fused_moe_route_reduce")
-    group_count_kernel[_NSP_COUNT, _THREAD_COUNT](
-        topk_ids,
-        expert_map,
-        worker_counts,
-        params,
-    )
-    group_prefix_kernel[_NSP_COUNT, _THREAD_COUNT](
-        worker_counts,
-        worker_offsets,
-        expert_offsets,
-        params,
-    )
-    group_fill_kernel[_NSP_COUNT, _THREAD_COUNT](
-        topk_ids,
-        expert_map,
-        worker_offsets,
-        expert_route_indices,
-        params,
-    )
-    route_kernel[_NSP_COUNT, _HMX_THREAD_COUNT](
-        x,
-        topk_weights,
-        topk_ids,
-        w13_weight,
-        w2_weight,
-        bias,
-        route_out,
-        expert_route_indices,
-        expert_offsets,
-        expert_map,
-        params,
-    )
-    reduce_kernel[_NSP_COUNT, _THREAD_COUNT](route_out, out, params)
-    return out
 
 
 @torch.library.custom_op(
@@ -561,132 +556,4 @@ def regular_topk(
         routed_scaling_factor,
         use_bias,
         _scoring_func_id(scoring_func),
-    )
-
-
-def unquantized_fused_moe_hvx(
-    x: Tensor,
-    topk_weights: Tensor,
-    topk_ids: Tensor,
-    w13_weight: Tensor,
-    w2_weight: Tensor,
-    w13_bias: Tensor | None,
-    w2_bias: Tensor | None,
-    activation: str,
-    has_bias: bool,
-    apply_router_weight_on_input: bool,
-    expert_map: Tensor | None = None,
-) -> Tensor:
-    """Run the QAIC HVX route_out + reducer MoE kernel."""
-    if activation not in _MOE_ACTIVATION_IDS:
-        raise ValueError(f"Unsupported QAIC MoE activation: {activation}")
-
-    x = x.contiguous()
-    topk_weights = topk_weights.to(device=x.device, dtype=x.dtype).contiguous()
-    topk_ids = topk_ids.to(device=x.device, dtype=x.dtype).contiguous()
-    w13_weight = w13_weight.to(device=x.device, dtype=x.dtype).contiguous()
-    w2_weight = w2_weight.to(device=x.device, dtype=x.dtype).contiguous()
-    has_expert_map = expert_map is not None
-    if expert_map is None:
-        expert_map_tensor = torch.empty((1,), dtype=torch.float32, device=x.device)
-    else:
-        expert_map_tensor = expert_map.to(
-            device=x.device, dtype=torch.float32
-        ).contiguous()
-
-    if has_bias:
-        assert w13_bias is not None and w2_bias is not None
-        w13_bias = w13_bias.to(device=x.device, dtype=x.dtype).contiguous()
-        w2_bias = w2_bias.to(device=x.device, dtype=x.dtype).contiguous()
-        w13_bias_flat = w13_bias.reshape(-1)
-        w2_bias_flat = w2_bias.reshape(-1)
-        bias = torch.empty(
-            (w13_bias_flat.numel() + w2_bias_flat.numel(),),
-            dtype=x.dtype,
-            device=x.device,
-        )
-        bias[: w13_bias_flat.numel()].copy_(w13_bias_flat)
-        bias[w13_bias_flat.numel() :].copy_(w2_bias_flat)
-    else:
-        bias = torch.empty((1,), dtype=x.dtype, device=x.device)
-
-    return _unquantized_fused_moe_hvx_op(
-        x,
-        topk_weights,
-        topk_ids,
-        w13_weight,
-        w2_weight,
-        bias,
-        expert_map_tensor,
-        _MOE_ACTIVATION_IDS[activation],
-        has_bias,
-        apply_router_weight_on_input,
-        has_expert_map,
-    )
-
-
-def unquantized_fused_moe_hmx(
-    x: Tensor,
-    topk_weights: Tensor,
-    topk_ids: Tensor,
-    w13_weight: Tensor,
-    w2_weight: Tensor,
-    w13_bias: Tensor | None,
-    w2_bias: Tensor | None,
-    activation: str,
-    has_bias: bool,
-    apply_router_weight_on_input: bool,
-    expert_map: Tensor | None = None,
-) -> Tensor:
-    """Run the QAIC HMX route_out + reducer MoE kernel."""
-    if activation not in _MOE_ACTIVATION_IDS:
-        raise ValueError(f"Unsupported QAIC MoE activation: {activation}")
-    if not hasattr(_qaic_custom_ops, _UNQUANTIZED_FUSED_MOE_HMX_KERNEL):
-        raise RuntimeError(
-            "QAIC HMX fused-MoE kernel is not available in this build. "
-            "Rebuild on an HMX-capable QAIC arch with QAicAppsExt headers, "
-            "or set QAIC_UNQUANTIZED_FUSED_MOE_KERNEL=hvx."
-        )
-
-    x = x.contiguous()
-    topk_weights = topk_weights.to(device=x.device, dtype=x.dtype).contiguous()
-    topk_ids = topk_ids.to(device=x.device, dtype=x.dtype).contiguous()
-    w13_weight = w13_weight.to(device=x.device, dtype=x.dtype).contiguous()
-    w2_weight = w2_weight.to(device=x.device, dtype=x.dtype).contiguous()
-    has_expert_map = expert_map is not None
-    if expert_map is None:
-        expert_map_tensor = torch.empty((1,), dtype=torch.float32, device=x.device)
-    else:
-        expert_map_tensor = expert_map.to(
-            device=x.device, dtype=torch.float32
-        ).contiguous()
-
-    if has_bias:
-        assert w13_bias is not None and w2_bias is not None
-        w13_bias = w13_bias.to(device=x.device, dtype=x.dtype).contiguous()
-        w2_bias = w2_bias.to(device=x.device, dtype=x.dtype).contiguous()
-        w13_bias_flat = w13_bias.reshape(-1)
-        w2_bias_flat = w2_bias.reshape(-1)
-        bias = torch.empty(
-            (w13_bias_flat.numel() + w2_bias_flat.numel(),),
-            dtype=x.dtype,
-            device=x.device,
-        )
-        bias[: w13_bias_flat.numel()].copy_(w13_bias_flat)
-        bias[w13_bias_flat.numel() :].copy_(w2_bias_flat)
-    else:
-        bias = torch.empty((1,), dtype=x.dtype, device=x.device)
-
-    return _unquantized_fused_moe_hmx_op(
-        x,
-        topk_weights,
-        topk_ids,
-        w13_weight,
-        w2_weight,
-        bias,
-        expert_map_tensor,
-        _MOE_ACTIVATION_IDS[activation],
-        has_bias,
-        apply_router_weight_on_input,
-        has_expert_map,
     )

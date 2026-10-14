@@ -201,6 +201,7 @@ class QaicWorkerPyt(QaicWorker):
             distributed_init_method=distributed_init_method,
             is_driver_worker=is_driver_worker,
         )
+        assert self.model_config.enforce_eager
         self.use_v2_model_runner = False
         self.parallel_config.disable_custom_all_reduce = True
         self.profiler_config = vllm_config.profiler_config
@@ -479,12 +480,26 @@ class QaicWorkerPyt(QaicWorker):
 
         # Warmup and tune the kernels used during model execution before
         # cuda graph capture.
-        kernel_warmup(self)
+        # qwen_triton_warmup (added in newer vllm) calls triton.next_power_of_2
+        # which was removed in Triton 3.x. On QAIC, GDN runs on Hexagon kernels
+        # so this Triton warmup is a no-op. Patch it out before calling
+        # kernel_warmup, restoring it unconditionally afterward.
+        import vllm.model_executor.warmup.kernel_warmup as _kw_mod
+
+        _orig_qwen_warmup = getattr(_kw_mod, "qwen_triton_warmup", None)
+        if _orig_qwen_warmup is not None:
+            _kw_mod.qwen_triton_warmup = lambda *a, **kw: None
+        try:
+            kernel_warmup(self)
+        finally:
+            if _orig_qwen_warmup is not None:
+                _kw_mod.qwen_triton_warmup = _orig_qwen_warmup
 
         cuda_graph_memory_bytes = 0
-
-        if not current_platform.is_aot:
-            cuda_graph_memory_bytes = self.model_runner.capture_model()
+        # FIXME need better handling of AoT v/s torch compile mode when
+        # that needs to be supported
+        # if not self.model_config.enforce_eager:
+        #     cuda_graph_memory_bytes = self.model_runner.capture_model()
 
         if self.cache_config.kv_cache_memory_bytes is None and hasattr(
             self, "peak_activation_memory"
