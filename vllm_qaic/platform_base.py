@@ -234,7 +234,9 @@ class QaicPlatform(Platform):
             vllm_config.model_config.enforce_eager = False
             device_config.device = torch.device("cpu")
         else:
-            vllm_config.model_config.enforce_eager = True
+            # PyT mode: `enforce_eager=True` keeps pure eager execution,
+            # otherwise the model is run through torch.compile (see
+            # _configure_pyt_compilation below).
             device_config.device = torch.device("qaic")
             # set QAIC_VISIBLE_DEVICES from device_group
             # if not already set
@@ -426,17 +428,18 @@ class QaicPlatform(Platform):
         from vllm.config import CompilationMode
 
         compilation_config = vllm_config.compilation_config
-        # QAIC_FIXME: default uses torch.compile based custom vllm-backend.
-        # Turning off all torch.compile modes to fallback to purely eager for now.
-        if compilation_config and compilation_config.mode != CompilationMode.NONE:
-            mode = "AoT" if cls.is_aot else "PyT"
-            logger.warning_once(
-                "vllm qaic platform doesn't support compilation mode = %s,"
-                "disabling and running with %s...",
-                compilation_config.mode,
-                mode,
-            )
-            compilation_config.mode = CompilationMode.NONE
+        if cls.is_aot:
+            # AoT executes pre-compiled QPCs, torch.compile is not applicable.
+            if compilation_config.mode != CompilationMode.NONE:
+                logger.warning_once(
+                    "vllm qaic platform doesn't support compilation mode = %s "
+                    "in AoT, disabling...",
+                    compilation_config.mode,
+                )
+                compilation_config.mode = CompilationMode.NONE
+        else:
+            cls._configure_pyt_compilation(vllm_config)
+
         on_device_sampling_en = override_qaic_config.get("aic_include_sampler", False)
         if isinstance(on_device_sampling_en, str):
             on_device_sampling_en = on_device_sampling_en.lower() in [
@@ -502,6 +505,92 @@ class QaicPlatform(Platform):
                 cls._configure_multimodal_model(
                     vllm_config, model_config, scheduler_config, model_type
                 )
+
+    @classmethod
+    def _configure_pyt_compilation(cls, vllm_config: VllmConfig) -> None:
+        """Configure torch.compile for PyT mode.
+
+        vLLM's default VLLM_COMPILE mode (piecewise VllmBackend) hijacks
+        inductor's `inner_compile`, bypassing the QAIC lowerings installed by
+        torch_qaic's patched `compile_fx`. Like the vLLM CPU platform, fall
+        back to DYNAMO_TRACE_ONCE so the full graph is handed to the
+        "inductor" backend, which torch_qaic routes according to
+        QAIC_INDUCTOR_LEVEL (must be exported before launch).
+        """
+        from vllm.config import CompilationMode, CUDAGraphMode
+
+        compilation_config = vllm_config.compilation_config
+        if compilation_config.mode == CompilationMode.VLLM_COMPILE:
+            logger.info_once(
+                "vllm qaic platform doesn't support compilation mode = %s, "
+                "using %s with backend=%s instead.",
+                compilation_config.mode,
+                CompilationMode.DYNAMO_TRACE_ONCE,
+                compilation_config.backend,
+            )
+            compilation_config.mode = CompilationMode.DYNAMO_TRACE_ONCE
+            compilation_config.ir_enable_torch_wrap = False
+
+        if (
+            vllm_config.lora_config is not None
+            and compilation_config.mode != CompilationMode.NONE
+        ):
+            logger.warning_once(
+                "torch.compile is not yet supported with LoRA on QAIC, "
+                "disabling and running in eager mode..."
+            )
+            compilation_config.mode = CompilationMode.NONE
+
+        # No static graph capture on QAIC.
+        compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+
+        if compilation_config.mode == CompilationMode.NONE:
+            return
+
+        # vLLM enables AOT compile caching by default on newer torch, but the
+        # torch_qaic backends don't produce serializable artifacts and
+        # QAIC_INDUCTOR_LEVEL is not part of vLLM's compile cache key.
+        os.environ.setdefault("VLLM_USE_AOT_COMPILE", "0")
+        # Disable torch async compiling which won't work with daemonic processes
+        os.environ.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "1")
+        # vLLM turns on combo kernels for all non-CPU platforms. Benchmarking
+        # them reads launcher.n_spills, which the Hexagon Triton backend
+        # doesn't report, so turn them off (as vLLM does for CPU).
+        inductor_config = compilation_config.inductor_compile_config
+        inductor_config["combo_kernels"] = False
+        inductor_config["benchmark_combo_kernel"] = False
+
+    @classmethod
+    def apply_config_platform_defaults(cls, vllm_config: VllmConfig) -> None:
+        if cls.is_aot:
+            return
+        # vLLM defaults custom_ops to "none" with the inductor backend, which
+        # would replace the QAIC kernels (traceable via torch_qaic fake impls)
+        # with their native torch implementations.
+        custom_ops = vllm_config.compilation_config.custom_ops
+        if all(s not in custom_ops for s in ("all", "none")):
+            custom_ops.append("all")
+
+    @classmethod
+    def get_compile_backend(cls) -> str:
+        # Default backend for model compilation (CompilationConfig.backend).
+        # simple_compile_backend stays "eager" for the standalone
+        # @torch.compile helpers which are compiled even in eager mode.
+        return cls.simple_compile_backend if cls.is_aot else "inductor"
+
+    @classmethod
+    def opaque_attention_op(cls) -> bool:
+        # QAIC attention keeps per-request KV state in python, hide it from
+        # dynamo behind vLLM's unified attention custom op when compiling.
+        if cls.is_aot:
+            return False
+        from vllm.config import CompilationMode, get_current_vllm_config_or_none
+
+        vllm_config = get_current_vllm_config_or_none()
+        return (
+            vllm_config is not None
+            and vllm_config.compilation_config.mode != CompilationMode.NONE
+        )
 
     @classmethod
     def is_pin_memory_available(cls) -> bool:
