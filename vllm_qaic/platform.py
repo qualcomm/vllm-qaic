@@ -54,6 +54,21 @@ DYNAMIC_RESOLUTION_MODELS = [
 _HAS_TRITON: bool = importlib.util.find_spec("triton") is not None
 
 
+@functools.cache
+def _triton_backend() -> str | None:
+    """Return the installed Triton backend: "qcom_hexagon_backend", "cpu" or None.
+
+    The Qualcomm Hexagon build ships triton.backends.qcom_hexagon_backend; triton-cpu
+    ships triton.backends.cpu. Hexagon wins if both are present.
+    """
+    if not _HAS_TRITON:
+        return None
+    for backend in ("qcom_hexagon_backend", "cpu"):
+        if importlib.util.find_spec(f"triton.backends.{backend}") is not None:
+            return backend
+    return None
+
+
 class QaicPlatform(Platform):
     _enum = PlatformEnum.OOT
     primary_attn_backend_cls = (
@@ -212,9 +227,10 @@ class QaicPlatform(Platform):
 
     @classmethod
     def num_compute_units(cls, device_id: int = 0) -> int:
-        # matmul_persistent (batch_invariant Triton GEMM) sizes its persistent
-        # launch grid by this; map it to the NSP core count. Without this,
-        # matmul_persistent raises NotImplementedError on QAIC.
+        # Under triton-cpu the kernel runs on host threads, so size the grid by
+        # the torch thread pool instead.
+        if _triton_backend() == "cpu":
+            return torch.get_num_threads()
         return cls.get_num_cores(device_id)
 
     @classmethod
