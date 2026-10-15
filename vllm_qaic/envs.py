@@ -59,6 +59,8 @@ if TYPE_CHECKING:
     # Triton kernel (masked_moe_sum) via patch_fused_moe_sum; when unset the
     # PyTorch implementation of the same semantics is used.
     VLLM_QAIC_TRITON_MOE_SUM: bool = False
+    # Route the GPT-OSS MXFP4 quantized fused-MoE forward to vLLM's Triton
+    VLLM_QAIC_TRITON_GPT_OSS_MOE: bool = False
 
 
 # --8<-- [start:env-vars-definition]
@@ -92,6 +94,10 @@ qaic_environment_variables: dict[str, Callable[[], Any]] = {
     )
     == "1",
     "VLLM_QAIC_TRITON_ALL_OPS_EN": lambda: os.getenv("VLLM_QAIC_TRITON_ALL_OPS_EN", "0")
+    == "1",
+    "VLLM_QAIC_TRITON_GPT_OSS_MOE": lambda: os.getenv(
+        "VLLM_QAIC_TRITON_GPT_OSS_MOE", "0"
+    )
     == "1",
 }
 
