@@ -177,6 +177,12 @@ class QaicPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        from vllm.triton_utils import HAS_TRITON
+
+        if HAS_TRITON:
+            # Set default QAIC_NUM_CORES=16 and QAIC_NUM_THREADS=4 for AI 100
+            os.environ.setdefault("QAIC_NUM_CORES", "16")
+            os.environ.setdefault("QAIC_NUM_THREADS", "4")
         additional_config = vllm_config.additional_config
         device_config = vllm_config.device_config
         if additional_config:
