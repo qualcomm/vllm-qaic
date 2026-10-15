@@ -1196,7 +1196,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
 
             if self.max_decode_tokens > 1:
                 # mark padded positions as -1 so QAIC hardware ignores them
-                decode_positions[decode_input_ids == -1] = -1
+                decode_positions[..., decode_input_ids == -1] = -1
 
             # prefill arrays
             prefill_input_ids: np.ndarray = input_ids[
@@ -1293,7 +1293,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 tlm_prefill_hidden_chunks = None
                 if _dflash_prefill:
                     _n_chunks = self.model.num_prefill_chunks(prefill_cum_sum)
-                    _hidden_size = self.model_config.get_hidden_size()
+                    _hidden_size = self.model.dflash_hidden_size
                     _pfl = self.model.prefill_seq_len
                     # Must match the QPC's hidden_states binding dtype (float16 for
                     # mxfp6/mxint8 models) or setData rejects the buffer.
@@ -1328,7 +1328,9 @@ class QaicModelRunnerAoT(GPUModelRunner):
                     assert tlm_prefill_hidden_chunks is not None
                     self.drafter.build_prefill_pending(
                         prefill_cum_sum,
-                        prefill_positions,
+                        prefill_positions[0]
+                        if self.model.uses_mrope
+                        else prefill_positions,
                         prefill_block_ids,
                         prefill_is_partial,
                         hidden_states_prefill,
@@ -1541,6 +1543,9 @@ class QaicModelRunnerAoT(GPUModelRunner):
             scheduler_output.total_num_scheduled_tokens,
         )
 
+        if getattr(self.model, "dflash_requires_replay", False):
+            self.model.commit_dflash_prefix(valid_sampled_token_ids[: self.num_decodes])
+
         # DFlash: advance DLM KV cache for prefilled requests every step, even when
         # decode drafting is skipped (e.g. sequence too long for the drafter).
         if (
@@ -1643,10 +1648,21 @@ class QaicModelRunnerAoT(GPUModelRunner):
         the TLM decode hidden states into it via the bound output."""
         # Public num_speculative_tokens is block_size - 1, so block_size = K + 1.
         block_size = self.speculative_config.num_speculative_tokens + 1
-        hidden_size = self.model_config.get_hidden_size()
+        hidden_size = self.model.dflash_hidden_size
         decode_bsz = self.model.decode_bsz
-        _hs_info = self.model.get_io_shape_and_dtype("hidden_states", is_input=False)
-        self._dflash_hidden_dtype = _hs_info[1] if _hs_info is not None else np.float32
+        _hs_info = self.model.get_io_shape_and_dtype(
+            self.model.dflash_hidden_name, is_input=False
+        )
+        if _hs_info is None:
+            raise ValueError(
+                "DFlash target QPC is missing projected target hidden states."
+            )
+        assert self.drafter is not None
+        if hidden_size != self.drafter.hidden_size:
+            raise ValueError(
+                "DFlash target feature width does not match the draft model."
+            )
+        self._dflash_hidden_dtype = _hs_info[1]
         self._tlm_hidden_buf = np.zeros(
             (decode_bsz, block_size, hidden_size), dtype=self._dflash_hidden_dtype
         )
@@ -1739,7 +1755,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
         decode_num_tokens = decode_bsz * self.max_decode_tokens
         decode_input_ids = np.array([0] * decode_num_tokens, dtype=np.int64)
         if self.uses_mrope:
-            decode_positions = np.array([[0] * decode_bsz] * 4, dtype=np.int64)
+            decode_positions = np.zeros((4, decode_num_tokens), dtype=np.int64)
         else:
             decode_positions = np.array([0] * decode_num_tokens, dtype=np.int64)
         decode_block_ids = np.arange(decode_bsz, dtype=np.int64)
