@@ -186,6 +186,35 @@ docker run --rm -it --network host \
     an exact multiple of the DLM's `block_size`, since prefill chunks are fanned
     out into `block_size`-sized sub-blocks for the DLM.
 
+### Vision-Language Models
+
+The DFlash examples use MXFP6 matmul and MXINT8 KV caches. Depth-first compilation
+is disabled by default for DFlash; pass `--aic-enable-depth-first` to either
+`qaic_spd_dflash.py` or `qaic_spd_dflash_vlm.py` to enable it. Existing QAIC
+environment overrides still take precedence. Supplied QPCs retain their compiled
+settings and are not recompiled by this flag.
+
+DFlash supports Qwen3.5, Qwen3.5-MoE, Qwen3-VL, and Gemma4 VLMs in AOT mode
+with `max_num_seqs=1`, synchronous scheduling, and separate vision and language
+engines. Disaggregated serving and other speculative methods are not supported
+for VLMs in this path. Use QEfficient with the DFlash VLM changes from
+[PR #1389](https://github.com/qualcomm/efficient-transformers/pull/1389).
+
+```bash
+python examples/qaic_spd_dflash_vlm.py \
+  --model Qwen/Qwen3.5-4B --image /path/to/image.png \
+  --prompt "Describe this image in detail." --prefill-seq-len 128 \
+  --tlm-devices 0,1,2,3 --dlm-devices 4,5,6,7 --vision-devices 8,9,10,11
+```
+
+Omit `--image` for text-only input. Pass `--draft-model` for a target without
+a default draft mapping, including a local Qwen3-VL draft checkpoint.
+Existing vLLM-compatible QPCs can be supplied with `--tlm-qpc`, `--dlm-qpc`,
+and `--vision-qpc`; text-only requests do not need a vision QPC.
+Target QPCs must return vocabulary logits and projected target hidden states.
+Qwen3.5 targets also require accepted-prefix cache replay, and Gemma4 targets
+require sliding-cache capacity for block verification.
+
 ## Core Allocation
 
 On a Cloud AI 100 Ultra card (4 QIDs, 16 cores per QID), cores are split between the target model (TLM) and draft model (DLM) on each QID:

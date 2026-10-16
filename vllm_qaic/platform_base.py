@@ -254,9 +254,23 @@ class QaicPlatform(Platform):
         assert not (vllm_config.lora_config and model_config.is_multimodal_model), (
             "LORA with Multi-modality is not yet supported for QAIC backend"
         )
-        assert not (
-            vllm_config.speculative_config and model_config.is_multimodal_model
-        ), "SPD with Multi-modality is not yet supported for QAIC backend"
+        if vllm_config.speculative_config and model_config.is_multimodal_model:
+            if (
+                vllm_config.speculative_config.method != "dflash"
+                or model_config.hf_config.model_type
+                not in {"qwen3_5", "qwen3_5_moe", "qwen3_vl", "gemma4"}
+            ):
+                raise ValueError(
+                    "QAIC multimodal speculative decoding currently supports "
+                    "DFlash with Qwen3.5, Qwen3.5-MoE, Qwen3-VL, and Gemma4 only."
+                )
+            if scheduler_config.max_num_seqs != 1 or vllm_config.kv_transfer_config:
+                raise ValueError(
+                    "Multimodal DFlash currently requires max_num_seqs=1 "
+                    "without disaggregated serving."
+                )
+            if scheduler_config.async_scheduling:
+                raise ValueError("Multimodal DFlash requires async_scheduling=False.")
 
         if (
             cls.is_aot
@@ -349,6 +363,16 @@ class QaicPlatform(Platform):
                         else __prefill_seq_len
                     ),
                     scheduler_config.max_num_batched_tokens,
+                )
+            if (
+                vllm_config.speculative_config
+                and vllm_config.speculative_config.method == "dflash"
+                and model_config.is_multimodal_model
+            ):
+                # vLLM reserves extra drafting slots outside the scheduled budget.
+                scheduler_config.max_num_batched_tokens += (
+                    vllm_config.speculative_config.max_num_new_slots_for_drafting
+                    * scheduler_config.max_num_seqs
                 )
             # Reset max_num_scheduled_tokens so that
             # _set_max_num_scheduled_tokens() recalculates it from the
