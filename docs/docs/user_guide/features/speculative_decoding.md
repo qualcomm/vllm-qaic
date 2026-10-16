@@ -188,6 +188,12 @@ docker run --rm -it --network host \
 
 ### Vision-Language Models
 
+The DFlash examples use MXFP6 matmul and MXINT8 KV caches. Depth-first compilation
+is disabled by default for DFlash; pass `--aic-enable-depth-first` to either
+`qaic_spd_dflash.py` or `qaic_spd_dflash_vlm.py` to enable it. Existing QAIC
+environment overrides still take precedence. Supplied QPCs retain their compiled
+settings and are not recompiled by this flag.
+
 DFlash supports Qwen3.5, Qwen3.5-MoE, Qwen3-VL, and Gemma4 VLMs in AOT mode
 with `max_num_seqs=1`, synchronous scheduling, and separate vision and language
 engines. Disaggregated serving and other speculative methods are not supported

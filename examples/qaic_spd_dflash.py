@@ -6,6 +6,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Adapted from examples/qaic_spd.py — DFlash (Diffusion-LM draft) SpD.
 
+import argparse
 import gc
 import json
 import random
@@ -26,6 +27,16 @@ def _dflash_block_size(dlm_repo: str) -> int:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Run the QAIC DFlash SpD example.")
+    parser.add_argument(
+        "--aic-enable-depth-first",
+        "--aic_enable_depth_first",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable depth-first compilation (default: disabled for DFlash).",
+    )
+    args = parser.parse_args()
+
     prompts = [
         "The history of artificial intelligence dates back",
         "Speculative decoding accelerates inference by",
@@ -71,6 +82,7 @@ def main() -> None:
                 "device_group": device_group,
                 "num_cores": 8,
                 "prefill_seq_len": seq_len,
+                "aic_enable_depth_first": args.aic_enable_depth_first,
                 "mxfp6_matmul": True,
                 "mxint8_kv_cache": True,
                 "mos": 1,
@@ -79,6 +91,7 @@ def main() -> None:
                 "device_group": device_group,
                 "num_cores": 8,
                 "prefill_seq_len": block_size,  # DLM prefills block_size at a time
+                "aic_enable_depth_first": args.aic_enable_depth_first,
                 "mxfp6_matmul": True,
                 "mxint8_kv_cache": True,
                 "mos": 1,

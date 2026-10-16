@@ -2033,6 +2033,7 @@ def _get_qaic_compile_config(
     # Number of kv cache blocks should be same as num_gpu_blocks, if CPL==blk_size
     kv_cache_batch_size = vllm_config.cache_config.num_cpu_blocks
     additional_config = vllm_config.additional_config or {}
+    dflash_cfg = additional_config.get("dflash_cfg")
     prefill_only = None
     # prefill_only options
     if vllm_config.kv_transfer_config:
@@ -2064,7 +2065,7 @@ def _get_qaic_compile_config(
         "mxfp6_matmul": mxfp6_en,
         "mxint8_kv_cache": mxint8_en,
         "num_speculative_tokens": None,
-        "aic_enable_depth_first": True,
+        "aic_enable_depth_first": dflash_cfg is None,
         "mos": -1,
         "prefill_only": prefill_only,
         "compile_only": False,
@@ -2138,7 +2139,6 @@ def _get_qaic_compile_config(
     if cfg["mos"] == -1:
         del cfg["mos"]
     num_logits_to_keep = None
-    dflash_cfg = additional_config.get("dflash_cfg")
     # DFlash DLM build: prefill-only with prefill_seq_len == block_size.
     if speculative_model_type == "draft" and dflash_cfg is not None:
         block_size = int(dflash_cfg["block_size"])
@@ -2254,7 +2254,6 @@ def _get_qaic_compile_config(
                 cfg.pop("vision_size", None)
             if model_type == "gemma4":
                 cfg["node_precision_info"] = True
-                cfg["aic_enable_depth_first"] = True
             if model_type in {"qwen3_5", "qwen3_5_moe"}:
                 block_size = dflash_cfg["block_size"]
                 if block_size < 2 or block_size & (block_size - 1):

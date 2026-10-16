@@ -39,6 +39,13 @@ def run(cleanup):
     parser.add_argument("--max-model-len", type=int, default=4096)
     parser.add_argument("--max-tokens", type=int, default=128)
     parser.add_argument("--prefill-seq-len", type=int, default=128)
+    parser.add_argument(
+        "--aic-enable-depth-first",
+        "--aic_enable_depth_first",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable depth-first compilation (default: disabled for DFlash).",
+    )
     parser.add_argument("--tlm-devices", type=device_group, default=[0, 1, 2, 3])
     parser.add_argument("--dlm-devices", type=device_group, default=[4, 5, 6, 7])
     parser.add_argument("--vision-devices", type=device_group, default=[8, 9, 10, 11])
@@ -102,8 +109,9 @@ def run(cleanup):
             device_group=devices,
             num_cores=8,
             prefill_seq_len=args.prefill_seq_len,
+            aic_enable_depth_first=args.aic_enable_depth_first,
             mxfp6_matmul=True,
-            mxint8_kv_cache=False,
+            mxint8_kv_cache=True,
             use_onnx_subfunctions=False,
             split_model_io=True,
             mos=1,
@@ -167,8 +175,9 @@ def run(cleanup):
         device_group=args.dlm_devices,
         num_cores=8,
         prefill_seq_len=block_size,
+        aic_enable_depth_first=args.aic_enable_depth_first,
         mxfp6_matmul=True,
-        mxint8_kv_cache=False,
+        mxint8_kv_cache=True,
         mos=1,
     )
     if args.dlm_qpc:
