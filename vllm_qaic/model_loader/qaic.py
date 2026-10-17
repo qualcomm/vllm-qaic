@@ -1302,6 +1302,25 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     self.decode_bsz, dtype=np.int64
                 ).reshape(-1, 1)
 
+            # Paged attention: the dict rebuilt here replaces the one created in
+            # load_model(), so block_table/slot_id must be added again. All rows
+            # are padding (position_ids == -1), so -1 / 0 matches load_model().
+            if self.paged_attention:
+                decode_single_inputs["block_table"] = np.full(
+                    (1, self.num_gpu_blocks_per_batch),
+                    -1,
+                    dtype=np.int64,
+                )
+                decode_single_inputs["slot_id"] = np.zeros((1,), dtype=np.int64)
+                decode_batch_inputs["block_table"] = np.full(
+                    (self.decode_bsz, self.num_gpu_blocks_per_batch),
+                    -1,
+                    dtype=np.int64,
+                )
+                decode_batch_inputs["slot_id"] = np.zeros(
+                    (self.decode_bsz,), dtype=np.int64
+                )
+
             # TODO: mllama3.2 is currently not supported in v0.15.0
             # if input_info := self.get_io_shape_and_dtype("cross_attention_mask"):
             #     self.is_cross_attention = True
@@ -1381,6 +1400,17 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                         ).reshape(-1, 1)
                     if self.is_multimodal_model and self.default_mm_kwargs:
                         prefill_inputs.update(self.default_mm_kwargs)
+                    # Paged attention: reuse the regular prefill injector with
+                    # dummy arrays (one request, block ids 0..W-1, slot 0).
+                    self._inject_pa_prefill_inputs(
+                        prefill_inputs,
+                        0,
+                        np.arange(
+                            self.num_gpu_blocks_per_batch, dtype=np.int64
+                        ).reshape(1, -1),
+                        np.zeros(1, dtype=np.int64),
+                        0,
+                    )
                     KvCache_buff = []
                     for kv_shape, kv_type, _ in self.kv_cache_info:
                         _kv_shape = (1,) + kv_shape[1:]
