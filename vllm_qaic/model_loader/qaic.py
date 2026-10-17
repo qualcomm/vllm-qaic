@@ -1712,7 +1712,9 @@ def load_qaic_model(
                     speculative_model_type,
                 )
             logger.info("QEFF Compile called with %s", qaic_compile_config.cfg)
-            qpc_path = qeff_model.compile(**qaic_compile_config.cfg)
+            qpc_path = qeff_model.compile(
+                **qaic_compile_config.cfg, qaic_config=qaic_compile_config.qaic_config
+            )
             if isinstance(qpc_path, dict):
                 if (
                     "skip_lang" in qaic_compile_config.cfg
