@@ -488,14 +488,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             np.dtype(_logits_info[1]) if _logits_info is not None else np.float32
         )
 
-        if "block_table" in self.session.input_names:
-            self.decode_batch_inputs["block_table"] = np.full(
-                (self.decode_bsz, self.num_gpu_blocks_per_batch), -1, dtype=np.int64
-            )
-            self.decode_batch_inputs["slot_id"] = np.full(
-                (self.decode_bsz,), 0, dtype=np.int64
-            )
-
         e = time.perf_counter() - s
         logger.info("Successfully loaded QPC in %s secs", e)
 
@@ -563,6 +555,14 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             self.prefill_num_logits_buffer = dict(
                 num_logits_to_keep=np.empty((1, 1), dtype=np.int64)
             )
+        if "block_table" in self.session.input_names:
+            for decode_inputs in self.decode_batch_inputs_by_k.values():
+                decode_inputs["block_table"] = np.full(
+                    (self.decode_bsz, self.num_gpu_blocks_per_batch),
+                    -1,
+                    dtype=np.int64,
+                )
+                decode_inputs["slot_id"] = np.zeros((self.decode_bsz,), dtype=np.int64)
         # CCL state for disaggregated prefill: dict keyed by exec-object slot id, value
         # is the bucket currently in flight on that slot (0 = idle). Used by
         # _run_pipeline_prefill to pick one CCL per batch =
@@ -1326,6 +1326,16 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             if self.lora_mode:
                 decode_single_inputs["lora_ids"] = np.array([[0]])
 
+            # The dummy decode uses a separate single-request dictionary,
+            # so add the paged-attention inputs required by the QPC here as well.
+            if self.paged_attention:
+                decode_single_inputs["block_table"] = np.full(
+                    (1, self.num_gpu_blocks_per_batch),
+                    -1,
+                    dtype=np.int64,
+                )
+                decode_single_inputs["slot_id"] = np.zeros((1,), dtype=np.int64)
+
             self.decode_single_inputs = decode_single_inputs
             if getattr(self, "default_mm_kwargs", None):
                 for _decode_inputs in self.decode_batch_inputs_by_k.values():
@@ -1383,6 +1393,17 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                         ).reshape(-1, 1)
                     if self.is_multimodal_model and self.default_mm_kwargs:
                         prefill_inputs.update(self.default_mm_kwargs)
+                    # Paged attention: reuse the regular prefill injector with
+                    # dummy arrays (one request, block ids 0..W-1, slot 0).
+                    self._inject_pa_prefill_inputs(
+                        prefill_inputs,
+                        0,
+                        np.arange(
+                            self.num_gpu_blocks_per_batch, dtype=np.int64
+                        ).reshape(1, -1),
+                        np.zeros(1, dtype=np.int64),
+                        0,
+                    )
                     KvCache_buff = []
                     for kv_shape, kv_type, _, _ in self.kv_cache_info:
                         _kv_shape = (1,) + kv_shape[1:]
