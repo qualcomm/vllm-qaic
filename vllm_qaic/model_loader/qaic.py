@@ -555,7 +555,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             self.prefill_num_logits_buffer = dict(
                 num_logits_to_keep=np.empty((1, 1), dtype=np.int64)
             )
-        if "block_table" in self.session.input_names:
+        if "block_table" in self.session.input_names and self.paged_attention:
             for decode_inputs in self.decode_batch_inputs_by_k.values():
                 decode_inputs["block_table"] = np.full(
                     (self.decode_bsz, self.num_gpu_blocks_per_batch),
