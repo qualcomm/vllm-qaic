@@ -439,7 +439,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             np.dtype(_logits_info[1]) if _logits_info is not None else np.float32
         )
 
-        if "block_table" in self.session.input_names:
+        if "block_table" in self.session.input_names and self.paged_attention:
             self.decode_batch_inputs["block_table"] = np.full(
                 (self.decode_bsz, self.num_gpu_blocks_per_batch), -1, dtype=np.int64
             )
