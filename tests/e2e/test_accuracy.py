@@ -210,20 +210,6 @@ def log_perf_metrics(id, metrics, device_group):
 
 
 class _AccuracyTestBase:
-    @pytest.mark.qaic_test_config(
-        {
-            "aot": dict(
-                model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-                ctx_len=256,
-                dtype="mxfp6",
-                kv_dtype="mxint8",
-            ),
-            "eager": dict(
-                model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-                ctx_len=256,
-            ),
-        }
-    )
     def test_accuracy(
         self,
         qaic_model,
