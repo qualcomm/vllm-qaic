@@ -875,21 +875,6 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 self.input_batch.block_table[0].get_numpy_array()[:num_reqs].copy() - 1
             )
             block_size = self.cache_config.block_size
-            # Compute slot_mapping via compute_slot_mapping
-            # vLLM v0.23's expects (num_reqs, query_start_loc, positions) signature.
-            query_start_loc_np = np.concatenate(([0], cu_num_tokens[:num_reqs])).astype(
-                np.int32
-            )
-            self.input_batch.block_table.compute_slot_mapping(
-                num_reqs,
-                torch.from_numpy(query_start_loc_np),
-                torch.from_numpy(positions_np),
-            )
-            self.slot_mapping = (
-                self.input_batch.block_table[0]
-                .slot_mapping.np[:total_num_scheduled_tokens]
-                .copy()
-            )
             # Compute per-request slot_id:
             num_computed = self.input_batch.num_computed_tokens_cpu[:num_reqs]
             self.slot_id = (num_computed % block_size).astype(np.int64)
