@@ -10,6 +10,7 @@ import os
 import threading
 import time
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass
 from queue import Queue
 from typing import Any
@@ -1900,6 +1901,18 @@ def get_hf_model(
         override_qaic_config.pop("pretrained_extra_args")
 
     model_type = "lora" if lora_config else "default"
+    if (
+        hf_config.model_type == "gpt_oss"
+        and qaic_config
+        and qaic_config.get("target_layer_ids")
+    ):
+        args["dtype"] = "float32"
+        if (getattr(hf_config, "quantization_config", None) or {}).get(
+            "quant_method"
+        ) == "gpt_oss_mxfp4":
+            # Restore the HF quantizer name without changing vLLM's config.
+            args["config"] = deepcopy(hf_config)
+            args["config"].quantization_config["quant_method"] = "mxfp4"
     if model_config.is_multimodal_model:
         if model_config.hf_config.model_type == "whisper":
             model_type = "speech"
@@ -2244,6 +2257,28 @@ def _get_qaic_compile_config(
             qaic_config["target_layer_ids"] = dflash_cfg["target_layer_ids"]
             qaic_config["dflash_dlm_repo"] = dflash_cfg["dlm_repo"]
             model_type = vllm_config.model_config.hf_config.model_type
+            if model_type == "gpt_oss":
+                cfg["qaic_config"] = qaic_config
+                block_size = int(dflash_cfg["block_size"])
+                sliding_window = vllm_config.model_config.hf_config.sliding_window
+                cfg["prefill_only"] = True
+                cfg["enable_chunking"] = True
+                cfg["use_onnx_subfunctions"] = False
+                cfg["specializations"] = [
+                    {
+                        "batch_size": batch,
+                        "full_batch_size": cfg.get("kv_cache_batch_size")
+                        or cfg["full_batch_size"],
+                        "seq_len": length,
+                        "ctx_len": cfg["ctx_len"],
+                        "sliding_window": sliding_window,
+                        "num_logits_to_keep": num_logits,
+                    }
+                    for batch, length, num_logits in (
+                        (1, cfg["prefill_seq_len"], 1),
+                        (cfg["full_batch_size"], block_size, block_size),
+                    )
+                ]
             if model_type in {"qwen3_5", "qwen3_5_moe", "qwen3_vl", "gemma4"}:
                 cfg["use_onnx_subfunctions"] = False
                 cfg["split_model_io"] = True
