@@ -388,6 +388,9 @@ class QaicPlatform(Platform):
             # re-runs in the EngineCore subprocess (core.py:1038).
             scheduler_config.max_num_scheduled_tokens = None
 
+        if cache_config and cache_config.enable_prefix_caching:
+            cache_config.block_size = cls._pa_block_size(vllm_config)
+
         if cls.is_aot:
             # libiomp5.so (Intel's OpenMP runtime) OMP barrier/blocktime tuning —
             # only activate when the user has already preloaded it via LD_PRELOAD.
