@@ -985,18 +985,12 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             if num_decodes < self.decode_bsz:
                 batch_inputs["lora_ids"][num_decodes:] = -1
 
-        if self.paged_attention:
-            if block_table is not None and slot_id is not None:
-                batch_inputs["block_table"][:num_decodes] = block_table[:num_decodes]
-                batch_inputs["slot_id"][:num_decodes] = slot_id[:num_decodes]
-                if num_decodes < self.decode_bsz:
-                    batch_inputs["block_table"][num_decodes:] = -1
-                    batch_inputs["slot_id"][num_decodes:] = 0
-            else:
-                batch_inputs["block_table"][:num_decodes] = batch_indices
-                if num_decodes < self.decode_bsz:
-                    batch_inputs["block_table"][num_decodes:] = -1
-                    batch_inputs["slot_id"][num_decodes:] = 0
+        if self.paged_attention and block_table is not None and slot_id is not None:
+            batch_inputs["block_table"][:num_decodes] = block_table[:num_decodes]
+            batch_inputs["slot_id"][:num_decodes] = slot_id[:num_decodes]
+            if num_decodes < self.decode_bsz:
+                batch_inputs["block_table"][num_decodes:] = -1
+                batch_inputs["slot_id"][num_decodes:] = 0
 
         # For spec-decode target: include num_logits_to_keep in batch_inputs
         # so the hardware knows how many token positions to compute logits for.
