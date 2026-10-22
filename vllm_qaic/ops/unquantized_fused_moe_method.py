@@ -26,6 +26,18 @@ from vllm_qaic.ops._triton_flags import triton_op_enabled
 triton_en = triton_op_enabled("FUSED_MOE")
 
 
+def _supports_triton_fused_moe_without_alignment(
+    layer,
+    x: torch.Tensor,
+    topk_ids: torch.Tensor,
+) -> bool:
+    """Whether upstream will use its alignment-free Triton assignment path."""
+    return (
+        layer.expert_map is None
+        and x.shape[0] * topk_ids.shape[1] * 4 <= layer.global_num_experts
+    )
+
+
 class QAicUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     """QAIC OOT implementation for unquantized fused MoE."""
 
@@ -60,7 +72,9 @@ class QAicUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # Biases (has_bias) are threaded through via biased_moe_quant_config; the
         # activation string is parsed to the MoEActivation enum. Flag off -> the
         # QAIC NSP path below, bit-for-bit.
-        if triton_en:
+        if triton_en and _supports_triton_fused_moe_without_alignment(
+            layer, x, topk_ids
+        ):
             from vllm.model_executor.layers.fused_moe.activation import (
                 MoEActivation,
             )
