@@ -39,6 +39,12 @@ triton_en = triton_op_enabled("LINEAR")
 _orig_linear_apply = UnquantizedLinearMethod.apply
 _orig_embedding_apply = UnquantizedEmbeddingMethod.apply
 
+GDN_PROJECTION_SUFFIXES = (
+    "linear_attn.in_proj_qkvz",
+    "linear_attn.in_proj_ba",
+    "linear_attn.out_proj",
+)
+
 
 def _qaic_linear_apply(self, layer, x, bias=None):
     if triton_en:
