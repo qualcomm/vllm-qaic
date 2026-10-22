@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     # Per-operator opt-in flags: dispatch the CustomOp forward_oot to the
     # corresponding vLLM Triton kernel
     VLLM_QAIC_TRITON_RMS_NORM: bool = False
+    VLLM_QAIC_TRITON_RMS_NORM_GATED: bool = False
     VLLM_QAIC_TRITON_MM_ENCODER_ATTENTION: bool = False
     VLLM_QAIC_TRITON_MROTARY_EMBEDDING: bool = False
     # Repurpose vLLM's SWIGLUSTEP Triton kernel (swiglustep_and_mul_triton) as
