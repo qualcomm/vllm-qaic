@@ -219,9 +219,42 @@ class QAicLlama3RotaryEmbedding(Llama3RotaryEmbedding):
         cos_sin_cache: torch.Tensor,
         is_neox_style: bool,
     ):
-        return QAicRotaryEmbedding.forward_static(
-            positions, query, key, head_size, rotary_dim, cos_sin_cache, is_neox_style
-        )
+        positions = positions.flatten()
+        num_tokens = positions.shape[0]
+
+        cos_sin = cos_sin_cache.index_select(0, positions)
+        cos, sin = cos_sin.chunk(2, dim=-1)
+
+        query_shape = query.shape
+        query = query.view(num_tokens, -1, head_size)
+        query_rot = query[..., :rotary_dim]
+        query_pass = query[..., rotary_dim:]
+
+        if key is not None:
+            key_shape = key.shape
+            key = key.view(num_tokens, -1, head_size)
+            key_rot = key[..., :rotary_dim]
+            key_pass = key[..., rotary_dim:]
+
+            # Combine Q and K heads for a single QAIC op call.
+            # torch.cat produces a contiguous tensor (required by the QAIC op).
+            # Two separate calls cause stream throttle errors (error 500) when K
+            # has significantly fewer heads than Q (GQA).
+            num_q_heads = query_rot.shape[1]
+            qk_rot = torch.cat([query_rot, key_rot], dim=1)
+            qk_rot = QAicApplyRotaryEmb.forward_static(qk_rot, cos, sin, is_neox_style)
+            query_rot = qk_rot[:, :num_q_heads]
+            key_rot = qk_rot[:, num_q_heads:]
+
+            query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
+            key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
+        else:
+            query_rot = QAicApplyRotaryEmb.forward_static(
+                query_rot, cos, sin, is_neox_style
+            )
+            query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
+
+        return query, key
 
     def forward_oot(
         self,
@@ -230,7 +263,7 @@ class QAicLlama3RotaryEmbedding(Llama3RotaryEmbedding):
         key: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         cos_sin_cache = self._match_cos_sin_cache_dtype(query)
-        return QAicRotaryEmbedding.forward_static(
+        return self.forward_static(
             positions,
             query,
             key,
