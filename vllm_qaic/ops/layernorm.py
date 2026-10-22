@@ -83,6 +83,7 @@ class QAicGemmaRMSNorm(GemmaRMSNorm):
 
 class QAicRMSNormGated(RMSNormGated):
     """RMS Normalization with optional gating.
+    Also supports optional gating via Triton.
 
     This is a native PyTorch implementation that supports:
     - Standard RMS normalization
@@ -98,6 +99,22 @@ class QAicRMSNormGated(RMSNormGated):
         # Group norm not handled here; delegate to the parent's native path
         if self.group_size is not None:
             return super().forward_native(x, z)
+
+        if triton_op_enabled("RMS_NORM_GATED"):
+            from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
+                rmsnorm_fn,
+            )
+
+            return rmsnorm_fn(
+                x,
+                self.weight,
+                self.bias,
+                z=z,
+                eps=self.eps,
+                group_size=self.group_size,
+                norm_before_gate=self.norm_before_gate,
+                activation=self.activation,
+            )
 
         # norm_before_gate=False: gate first, then normalize (Mamba2 / Hawk style)
         if z is not None and not self.norm_before_gate:
