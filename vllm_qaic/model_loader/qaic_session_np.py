@@ -59,6 +59,7 @@ class QAICInferenceSession:
         stages: int | None = 1,
         cluster_id: str | None = None,
         use_async_scheduling: bool = False,
+        is_vision_encoder: bool = False,
     ):
         self.stages: int = stages if stages is not None else 1
         self.cluster_id = cluster_id
@@ -75,6 +76,10 @@ class QAICInferenceSession:
             )
             self.decode_num_execObj = 0
             self.decode_execObj_idx = None
+        elif is_vision_encoder:
+            self.prefill_num_execObj = 0
+            self.decode_num_execObj = 1
+            self.decode_execObj_idx = 0
         else:
             # one additional prefill_exeObj in case of async scheduling
             # so that we can early enqueue to LRT
