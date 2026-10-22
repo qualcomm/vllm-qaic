@@ -19,7 +19,7 @@ PYT (Eager/PyTorch) mode uses `torch_qaic` for dynamic model execution without a
 
     # Install from pre-built wheel
     VLLM_QAIC_INSTALL_SOURCE=wheel \
-    VLLM_QAIC_SDK_PATH=/opt/qti-aic/integrations/vllm_qaic \
+    VLLM_QAIC_SDK_PATH=/opt/qti-aic/integrations/vllm-qaic \
         ./scripts/install.sh pyt
     ```
 

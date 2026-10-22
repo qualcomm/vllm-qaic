@@ -37,7 +37,7 @@ AOT (Ahead-of-Time) mode uses the QEfficient library to compile models into Qual
 
     # Install from pre-built wheel
     VLLM_QAIC_INSTALL_SOURCE=wheel \
-    VLLM_QAIC_SDK_PATH=/opt/qti-aic/integrations/vllm_qaic \
+    VLLM_QAIC_SDK_PATH=/opt/qti-aic/integrations/vllm-qaic \
         ./scripts/install.sh aot
     ```
 

@@ -31,4 +31,4 @@ TORCHAUDIO_VERSION_PYT="${TORCHAUDIO_VERSION_PYT:-2.11.0+cpu}"
 
 # === Paths ===
 TORCH_QAIC_BASE_PATH="${TORCH_QAIC_BASE_PATH:-/opt/qti-aic/integrations/torch_qaic}"
-VLLM_QAIC_SDK_PATH="${VLLM_QAIC_SDK_PATH:-/opt/qti-aic/integrations/vllm_qaic}"
+VLLM_QAIC_SDK_PATH="${VLLM_QAIC_SDK_PATH:-/opt/qti-aic/integrations/vllm-qaic}"
