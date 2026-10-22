@@ -57,12 +57,10 @@ class QAicRMSNorm(RMSNorm):
 
 
 class QAicGemmaRMSNorm(GemmaRMSNorm):
-    """RMS normalization for Gemma.
+    """RMS normalization for Gemma with an optional Triton path.
 
     Gemma uses a shifted weight convention: the learned parameter represents
-    (gamma - 1), so the effective scale is (1 + weight).  No NSP kernel path
-    here because the weight offset makes it non-trivially different from the
-    standard RMS norm kernel interface.
+    (gamma - 1), so the effective scale is (1 + weight).
     """
 
     def forward_oot(
@@ -70,6 +68,18 @@ class QAicGemmaRMSNorm(GemmaRMSNorm):
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if triton_op_enabled("RMS_NORM"):
+            from vllm.models.minimax_m3.amd.ops.gemma_rmsnorm import (
+                gemma_fused_add_rmsnorm,
+                gemma_rmsnorm,
+            )
+
+            if residual is None:
+                return gemma_rmsnorm(x, self.weight, self.variance_epsilon)
+            return gemma_fused_add_rmsnorm(
+                x, residual, self.weight, self.variance_epsilon
+            )
+
         if residual is not None:
             normed, new_residual = _call_hexagon_rms_norm(
                 residual, x, self.weight, self.variance_epsilon
