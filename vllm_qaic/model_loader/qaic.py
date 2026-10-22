@@ -1835,6 +1835,17 @@ def get_hf_model(
         # If tie_word_embeddings is not set correctly,
         # single QPC's output would be wrong
         hf_config.tie_word_embeddings = pretrained_hf_config.tie_word_embeddings
+    # For Gptoss models, vllm sets the quantization to gpt_oss_mxfp4 while qeff
+    # needs mxfp4 quantization. Because of this mismatch, qeff do not adds MoE 
+    # weights to the graph and model generates garbage output
+    architectures = getattr(hf_config, "architectures", None) or []
+    quantization_config = getattr(hf_config, "quantization_config", None)
+    if "GptOssForCausalLM" in architectures:
+        if isinstance(quantization_config, dict):
+            if quantization_config.get("quant_method") == "gpt_oss_mxfp4":
+                quantization_config["quant_method"] = "mxfp4"
+        elif getattr(quantization_config, "quant_method", None) == "gpt_oss_mxfp4":
+            quantization_config.quant_method = "mxfp4"
     override_qaic_config = (
         additional_config.get("override_qaic_config") if additional_config else None
     )
