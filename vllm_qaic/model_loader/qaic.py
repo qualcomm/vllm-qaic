@@ -398,6 +398,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             stages=self.stages,
             cluster_id=cluster_id,
             use_async_scheduling=self.use_async_scheduling,
+            is_vision_encoder=self.is_vision_encoder,
         )
         self.logits_ndim = self.session.get_logits_ndim()
         # Resolve the logits output dtype directly from the QPC binding so the
