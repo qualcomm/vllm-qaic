@@ -101,6 +101,7 @@ class QaicDFlashProposer:
         self._dlm_logits_buf: np.ndarray | None = None
         self._req_state: dict[str, _ReqState] = {}
         self._prefill_pending: list[dict] = []
+        self._streaming_req_ids: set[str] = set()
 
     def load_model(self) -> None:
         self.num_sub_blocks = self.tlm_prefill_seq_len // self.block_size
@@ -130,7 +131,7 @@ class QaicDFlashProposer:
     def _gc_finished_reqs(self, alive: set[str]) -> None:
         """Drop state for requests no longer in the input batch."""
         for req_id in list(self._req_state.keys()):
-            if req_id not in alive:
+            if req_id not in alive and req_id not in self._streaming_req_ids:
                 del self._req_state[req_id]
 
     def _reset_dlm_inputs(self) -> None:
@@ -193,6 +194,24 @@ class QaicDFlashProposer:
         for ctx in self._prefill_pending:
             self.prefill_step(**ctx)
         self._prefill_pending = []
+
+    def stream_prefill_block(self, req_id, slot, position, features) -> None:
+        self._streaming_req_ids.add(req_id)
+        self.prefill_step(
+            target_hidden=[features[np.newaxis]],
+            prefill_positions=np.arange(
+                position, position + self.block_size, dtype=np.int64
+            ),
+            prefill_cum_sum=np.array([self.block_size], dtype=np.int64),
+            batch_indices=np.array([slot], dtype=np.int64),
+            prefill_is_partial=np.array([True]),
+            last_chunk_logits=None,
+            req_id=req_id,
+        )
+
+    def cancel_stream_prefill(self, req_id) -> None:
+        self._streaming_req_ids.discard(req_id)
+        self._req_state.pop(req_id, None)
 
     def prefill_step(
         self,
@@ -329,6 +348,7 @@ class QaicDFlashProposer:
         # Slot 0 is the bonus seed; slots 1..block-1 are the drafts.
         st.dlm_candidates = active_logits.argmax(axis=-1).astype(np.int64)
         st.candidates_from_prefill = True
+        self._streaming_req_ids.discard(req_id)
 
     def propose(
         self,

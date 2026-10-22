@@ -260,6 +260,11 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 )
                 return pending_prefill_exec_queue
             else:
+                if self.is_dflash_target:
+                    extra = 2 if self.dflash_stream_prefill else 1
+                    kv_caches = [
+                        buffers[:-extra] if buffers else [] for buffers in kv_caches
+                    ]
                 self._kv_handoff(batch_indices, kv_caches)
         else:
             with lock:  # TODO: Re-evaluate if needed for MultiProcExecutor
@@ -380,6 +385,9 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self.stages: int = stages if stages is not None else 1
         self.disagg_serving_en = kv_transfer_role is not None
         self.disagg_producer_en = kv_transfer_role == "kv_producer"
+        self._dflash_prompt_hidden: dict[int, np.ndarray] = {}
+        self._dflash_pipeline_buffers: list[dict[str, np.ndarray]] = []
+        self.dflash_stream_prefill = False
 
         logger.info("Loading QPC...")
         logger.info(
@@ -509,6 +517,13 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             self.prefill_num_logits_buffer = dict(
                 num_logits_to_keep=np.zeros((1, 1), np.int64)
             )
+            if (
+                self.is_dflash_target
+                and "num_logits_to_keep" not in self.session.input_names
+            ):
+                self.prefill_num_logits_buffer.clear()
+                for buffer in self.decode_num_logits_buffer_by_k.values():
+                    buffer.clear()
         else:
             self.decode_logits = dict(
                 logits=np.random.randn(self.decode_bsz, 1, self.vocab_size).astype(
@@ -637,6 +652,54 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         if self.last_decode:
             self.last_decode = False
 
+        dflash_pending = {}
+        free_dflash_buffers = []
+        if self.is_dflash_target:
+            if not self._dflash_pipeline_buffers:
+                self._dflash_pipeline_buffers = [
+                    {
+                        self.dflash_hidden_name: np.empty_like(
+                            self._dflash_prefill_hidden_scratch
+                        ),
+                        "logits": np.empty_like(logits[:1]),
+                    }
+                    for _ in range(self.session.prefill_num_execObj)
+                ]
+            free_dflash_buffers = list(range(len(self._dflash_pipeline_buffers)))
+
+        def complete_chunk(exec_obj_idx):
+            self.complete_inf(exec_obj_idx, True, pipeline_prefill_en=True)
+            if not self.is_dflash_target:
+                return
+            inputs, row, last_chunk, buffer_index = dflash_pending.pop(exec_obj_idx)
+            slot = int(inputs["batch_index"].item())
+            chunk_positions = inputs["position_ids"][0]
+            valid = chunk_positions >= 0
+            logits[row : row + 1] = inputs["logits"]
+            if self.dflash_stream_prefill:
+                self.publish_dflash_chunk(
+                    slot, chunk_positions, inputs[self.dflash_hidden_name]
+                )
+                free_dflash_buffers.append(buffer_index)
+                return
+            if chunk_positions[0] == 0:
+                self._dflash_prompt_hidden[slot] = np.empty(
+                    (self.ctx_len, self.dflash_hidden_size),
+                    dtype=inputs[self.dflash_hidden_name].dtype,
+                )
+            prompt_hidden = self._dflash_prompt_hidden[slot]
+            prompt_hidden[chunk_positions[valid]] = inputs[self.dflash_hidden_name][
+                0, valid
+            ]
+            logits[row : row + 1] = inputs["logits"]
+            if last_chunk:
+                prompt_length = int(chunk_positions[valid][-1]) + 1
+                kv_caches[slot][-1][0, 0, :prompt_length] = prompt_hidden[
+                    :prompt_length
+                ]
+                del self._dflash_prompt_hidden[slot]
+            free_dflash_buffers.append(buffer_index)
+
         # One CCL bucket for the batch, keyed off each request's TOTAL prompt
         # length (final position) so every chunk of a request keeps one bucket
         # across steps — positions.max() would only see the current chunk.
@@ -689,6 +752,9 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             n_chunks: int = iids.shape[-1] // self.prefill_seq_len
             assert n_chunks > 0
             for chunk in range(n_chunks):
+                if self.is_dflash_target:
+                    # Pending executions retain their input arrays until completion.
+                    chunk_inputs = dict(chunk_inputs)
                 last_chunk = False
                 lower_idx = int(chunk * self.prefill_seq_len)
                 upper_idx = int((chunk + 1) * self.prefill_seq_len)
@@ -737,13 +803,34 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                         "completion."
                     )
                     eid = pending_exec_queue.get(timeout=120)
-                    self.complete_inf(eid, True, pipeline_prefill_en=True)
+                    complete_chunk(eid)
+                if self.is_dflash_target:
+                    buffer_index = free_dflash_buffers.pop()
+                    chunk_inputs.update(self.prefill_num_logits_buffer)
+                    chunk_inputs.update(self._dflash_pipeline_buffers[buffer_index])
                 # Submit Chunk to LRT Queue
                 exec_obj_idx = self.session.np_run_pipeline(
                     inputs=chunk_inputs,
                     last_chunk=last_chunk,
-                    kv_cache_buffers=kv_caches[batch_index] if last_chunk else None,
+                    kv_cache_buffers=(
+                        kv_caches[batch_index][
+                            : -(2 if self.dflash_stream_prefill else 1)
+                        ]
+                        if self.is_dflash_target
+                        else kv_caches[batch_index]
+                    )
+                    if last_chunk
+                    else None,
                 )
+                if self.is_dflash_target:
+                    dflash_pending[exec_obj_idx] = (
+                        chunk_inputs,
+                        index,
+                        last_chunk,
+                        buffer_index,
+                    )
+                    pending_exec_queue.put(exec_obj_idx)
+                    continue
                 if self.comp_ctx_lengths_prefill is not None:
                     # Record the bucket this slot is now running so future
                     # batches can fold it into max(active_ccl.values()).
@@ -756,7 +843,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 exec_obj_idx = pending_exec_queue.get(timeout=120)
                 if callback:
                     callback()
-                self.complete_inf(exec_obj_idx, True, pipeline_prefill_en=True)
+                complete_chunk(exec_obj_idx)
         elif callback:
             # async path: free shm buffers, overlapping cleanup with device execution
             callback(self.stages)
@@ -1349,6 +1436,11 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                         prefill_inputs["comp_ctx_lengths"] = np.zeros(
                             self.comp_ctx_lengths_prefill[-1], dtype=np.int64
                         )
+                    if self.is_dflash_target:
+                        prefill_inputs.update(self.prefill_num_logits_buffer)
+                        prefill_inputs[self.dflash_hidden_name] = (
+                            self._dflash_prefill_hidden_scratch
+                        )
                     exec_obj_idx = self.session.np_run_pipeline(
                         inputs=prefill_inputs,
                         slicing_parameters=None,
@@ -1368,7 +1460,11 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     KvCache_buff.append(np.empty(shape=kv_shape, dtype=kv_type))
 
                 decode_logits_shape = (
-                    (self.decode_bsz, 1, self.vocab_size)
+                    (
+                        self.decode_bsz,
+                        self.max_decode_tokens if self.is_dflash_target else 1,
+                        self.vocab_size,
+                    )
                     if self.logits_ndim == 3
                     else (self.decode_bsz, self.vocab_size)
                 )
@@ -1389,6 +1485,16 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 if self.comp_ctx_lengths_decode is not None:
                     self.decode_batch_inputs["comp_ctx_lengths"] = np.zeros(
                         self.comp_ctx_lengths_decode[-1], dtype=np.int64
+                    )
+                if self.is_dflash_target:
+                    self.decode_batch_inputs.update(self.decode_num_logits_buffer)
+                    self.decode_batch_inputs[self.dflash_hidden_name] = np.empty(
+                        (
+                            self.decode_bsz,
+                            self.max_decode_tokens,
+                            self.dflash_hidden_size,
+                        ),
+                        dtype=self._dflash_prefill_hidden_scratch.dtype,
                     )
                 _ = self.session.set_data_for_kv_handoff(
                     KvCache_buff,
@@ -1461,7 +1567,9 @@ def _derive_dflash_config(vllm_config) -> None:
 
 
 def load_qaic_model(
-    vllm_config: VllmConfig, speculative_model_type: str | None = None
+    vllm_config: VllmConfig,
+    speculative_model_type: str | None = None,
+    raise_on_compile_complete: bool = True,
 ) -> nn.Module:
     # DFlash: derive cross-checkpoint config before the draft build
     # clears speculative_config.
@@ -1722,6 +1830,9 @@ def load_qaic_model(
     logger.info("Using qpc:-%s", qpc_path)
 
     if qaic_compile_config.compile_only:
+        if not raise_on_compile_complete:
+            model.disagg_serving_en = False
+            return model.eval()
         # Hack for Model-IP execution flow
         # TODO: remove this in future
         # This will create error in parent process if exited,
@@ -2279,6 +2390,18 @@ def _get_qaic_compile_config(
                         (cfg["full_batch_size"], block_size, block_size),
                     )
                 ]
+                if vllm_config.kv_transfer_config:
+                    phase = 0 if kv_role == "kv_producer" else 1
+                    cfg["specializations"] = [cfg["specializations"][phase]]
+            if vllm_config.kv_transfer_config:
+                if kv_role == "kv_producer" and int(cfg.get("stages", 1)) > 1:
+                    cfg["split_model_io"] = True
+                    cfg.pop("split_retained_state_io", None)
+                else:
+                    cfg["split_retained_state_io"] = True
+                    cfg.pop("split_model_io", None)
+                if kv_role == "kv_producer":
+                    num_logits_to_keep = 1
             if model_type in {"qwen3_5", "qwen3_5_moe", "qwen3_vl", "gemma4"}:
                 cfg["use_onnx_subfunctions"] = False
                 cfg["split_model_io"] = True
@@ -2404,6 +2527,12 @@ def _get_qaic_compile_config(
         assert (
             (kv_role == "kv_producer" and cfg["prefill_only"])
             or (kv_role == "kv_consumer" and not cfg["prefill_only"])
+            or (
+                kv_role == "kv_consumer"
+                and dflash_cfg is not None
+                and vllm_config.model_config.hf_config.model_type == "gpt_oss"
+                and cfg["prefill_only"]
+            )
             or (kv_role == "kv_both" and cfg["prefill_only"] is None)
         ), (
             "prefill_only False is only supported for kv_consumer"

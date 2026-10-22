@@ -27,6 +27,7 @@ Shared Memory Naming:
 """
 
 import atexit
+import fcntl
 import gc
 import os
 import random
@@ -72,6 +73,7 @@ KV_LOOKUP_RETRIES = 5
 KV_LOOKUP_RETRIES_INTERVAL = 0.05
 FORCE_CLEAN_UP_MULTIPLIER = 2
 MAX_UID = 1000000
+DFLASH_STREAM_PREFILL_ENV = "VLLM_QAIC_DFLASH_STREAM_PREFILL"
 VLLM_QAIC_USE_FULL_KV_TRANSFER_ENV = "VLLM_QAIC_USE_FULL_KV_TRANSFER"
 VLLM_QAIC_DISABLE_HANDOFF_ID_ENV = "VLLM_QAIC_DISABLE_HANDOFF_ID"
 
@@ -96,6 +98,7 @@ class ReqMeta:
     # Keeping List[str] for backward compatibility with QAIC handoff server;
     # even though will store only KV shm name.
     kv_handoff_metadata: list[str] | None = None
+    req_id: str | None = None
 
     @staticmethod
     def make_meta(
@@ -104,6 +107,7 @@ class ReqMeta:
         is_prefill_partial: bool,
         block_id: int,
         handoff_id: str | None = None,
+        req_id: str | None = None,
     ) -> "ReqMeta":
         token_ids_tensor = torch.tensor(token_ids)
         return ReqMeta(
@@ -114,15 +118,18 @@ class ReqMeta:
             is_store=is_store,
             is_prefill_partial=is_prefill_partial,
             block_id=block_id,
+            req_id=req_id,
         )
 
 
 @dataclass
 class QaicConnectorMetadata(KVConnectorMetadata):
     requests: list[ReqMeta]
+    dflash_loads: list[ReqMeta]
 
     def __init__(self):
         self.requests = []
+        self.dflash_loads = []
 
     def add_request(
         self,
@@ -131,10 +138,11 @@ class QaicConnectorMetadata(KVConnectorMetadata):
         is_partial_prefill: bool,
         block_id: int,
         handoff_id: str | None = None,
+        req_id: str | None = None,
     ) -> None:
         self.requests.append(
             ReqMeta.make_meta(
-                token_ids, is_store, is_partial_prefill, block_id, handoff_id
+                token_ids, is_store, is_partial_prefill, block_id, handoff_id, req_id
             )
         )
 
@@ -235,17 +243,26 @@ class ShmBuffer:
         # Use batch size 1 and keep other dims intact
         return (1,) + kv_shape[1:]
 
-    def cleanup(self):
+    def cleanup(self, unlink=False):
         if not self.cleanup_done:
             self.cleanup_done = True
             self.shared_memory.close()
-            if not self.is_creator:
+            if not self.is_creator or unlink:
                 self.shared_memory.unlink()
             del self.list_of_np_buff
             del self.shared_memory
 
     def __del__(self):
         self.cleanup()
+
+    @contextmanager
+    def publication_lock(self):
+        # Only protects publication metadata, never device execution.
+        fcntl.flock(self.shared_memory._fd, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(self.shared_memory._fd, fcntl.LOCK_UN)
 
     @contextmanager
     def get_data(self, current_idx: int = 0):
@@ -289,7 +306,7 @@ class QaicKVCacheBank:
         self.MemBank[shm.name] = shm
         return shm.name, shm.list_of_np_buff
 
-    def release_Storage(self, name: str | None = None):
+    def release_Storage(self, name: str | None = None, unlink_creator: bool = False):
         """
         Release a shared memory (SHM) segment from the memory bank.
 
@@ -316,15 +333,23 @@ class QaicKVCacheBank:
         """
         assert name in self.MemBank, f"Storage {name} not found in MemBank"
         shm = self.MemBank[name]
-        if shm.is_creator:
+        if shm.is_creator and not unlink_creator:
             resource_tracker.unregister(shm.shared_memory._name, "shared_memory")
-        shm.cleanup()
+        shm.cleanup(unlink=unlink_creator)
         del self.MemBank[name]
 
     def cleanup(self):
         buff_name = list(self.MemBank.keys())
         for _name in buff_name:
             self.release_Storage(_name)
+
+
+@dataclass
+class DFlashLoad:
+    request: ReqMeta
+    position: int = 0
+    next_lookup: float = 0
+    reported: bool = False
 
 
 class QaicConnector(KVConnectorBase_V1):
@@ -354,6 +379,23 @@ class QaicConnector(KVConnectorBase_V1):
         self.kv_caches: list[list] = []
         self.use_async_scheduling = vllm_config.scheduler_config.async_scheduling
         self.is_async_kv_producer: bool = self.use_async_scheduling and self.is_producer
+        spec = vllm_config.speculative_config
+        self.dflash_stream_prefill = bool(
+            spec
+            and spec.use_dflash()
+            and os.getenv(DFLASH_STREAM_PREFILL_ENV, "0") == "1"
+        )
+        self._dflash_load_queue: dict[str, ReqMeta] = {}
+        self._dflash_pending: dict[str, DFlashLoad] = {}
+        self._dflash_loaded: dict[str, DFlashLoad] = {}
+        self._dflash_ready: set[str] = set()
+        self._dflash_producers: dict[int, ReqMeta] = {}
+        self._dflash_cache_info = None
+        self._dflash_consume = None
+        self._dflash_cancel = None
+        self._dflash_block_size = (
+            spec.num_speculative_tokens + 1 if self.dflash_stream_prefill else 0
+        )
 
         logger.info(
             "Initializing QaicConnector under kv_transfer_config %s",
@@ -399,6 +441,14 @@ class QaicConnector(KVConnectorBase_V1):
         self.close()
 
     def close(self):
+        if self.dflash_stream_prefill:
+            for request in self._dflash_producers.values():
+                if request.kv_handoff_metadata:
+                    shm = self.mem_bank.MemBank.get(request.kv_handoff_metadata[0])
+                    if shm is not None:
+                        with shm.publication_lock():
+                            shm.list_of_np_buff[-1][0, 1] = -1
+            self._dflash_producers.clear()
         self.mem_bank.cleanup()
         if hasattr(self, "ctx") and self.ctx:
             self.ctx.destroy(linger=10)
@@ -429,7 +479,9 @@ class QaicConnector(KVConnectorBase_V1):
                 f"Unable to access KV store due to an exception: {e}"
             ) from e
 
-    def get_kvcache_from_store(self, prompt_hash) -> QaicKvHandOffGetResp | None:
+    def get_kvcache_from_store(
+        self, prompt_hash, wait=True
+    ) -> QaicKvHandOffGetResp | None:
         """Get kv cache from kv_store."""
         result = None
         # Get kv cache from kv_store
@@ -440,7 +492,7 @@ class QaicConnector(KVConnectorBase_V1):
             rank=self.kv_rank,
         )
         encode_req_pkt = self.encoder.encode(req_pkt)[0]
-        max_retries = KV_LOOKUP_RETRIES
+        max_retries = KV_LOOKUP_RETRIES if wait else 1
         retry_count = 0
         while retry_count < max_retries:
             try:
@@ -455,6 +507,8 @@ class QaicConnector(KVConnectorBase_V1):
                     break
                 if resp == QaicKvHandOffReqType.RESP_NOT_FOUND:
                     retry_count += 1
+                    if not wait:
+                        break
                     time.sleep(KV_LOOKUP_RETRIES_INTERVAL)
                     print(f"KV Resp Not Found Received for {req_pkt}")
                     logger.debug("KV Resp Not Found Received for %s", req_pkt)
@@ -468,8 +522,10 @@ class QaicConnector(KVConnectorBase_V1):
                 raise ValueError(
                     f"Unable to access KV store due to an exception: {e}"
                 ) from e
-        if self.kv_role == "kv_consumer" and (
-            retry_count >= max_retries or result is None
+        if (
+            wait
+            and self.kv_role == "kv_consumer"
+            and (retry_count >= max_retries or result is None)
         ):
             raise ValueError(
                 f"Unable to find prompt hash {req_pkt.key_hash} in KV store!"
@@ -494,6 +550,183 @@ class QaicConnector(KVConnectorBase_V1):
         assert len(self.kv_caches) == 0 and len(kv_caches) > 0
         self.kv_caches = kv_caches
 
+    def register_dflash_stream(self, kv_cache_info, consume=None, cancel=None):
+        self._dflash_cache_info = kv_cache_info
+        self._dflash_consume = consume
+        self._dflash_cancel = cancel
+
+    def publish_dflash_chunk(self, slot, positions, hidden):
+        request = self._dflash_producers[slot]
+        shm = self.mem_bank.MemBank[request.kv_handoff_metadata[0]]
+        valid = positions >= 0
+        token_positions = positions[valid]
+        start, end = int(token_positions[0]), int(token_positions[-1]) + 1
+        if not np.array_equal(token_positions, np.arange(start, end)):
+            raise ValueError("DFlash streaming requires contiguous prompt positions.")
+        shm.list_of_np_buff[-2][0, 0, start:end] = hidden[0, valid]
+        with shm.publication_lock():
+            control = shm.list_of_np_buff[-1]
+            if control[0, 0] != start:
+                raise ValueError("DFlash prompt chunks arrived out of order.")
+            control[0, 0] = end
+
+    def _start_dflash_streams(self, metadata):
+        for request in metadata.dflash_loads:
+            self._dflash_pending.setdefault(request.req_id, DFlashLoad(request))
+        for request in metadata.requests:
+            slot = request.block_id - 1
+            if self.is_producer:
+                if slot not in self._dflash_producers:
+                    name, buffers = self.mem_bank.get_Storage(
+                        self._dflash_cache_info, len(request.token_ids)
+                    )
+                    buffers[-1][:] = 0
+                    self.kv_caches[slot] = buffers
+                    request.kv_handoff_metadata = [name]
+                    self._dflash_producers[slot] = request
+                    self.send_kv_cache_to_store(
+                        QaicKvHandOffPutReq(
+                            buff_type=QaicBufferType.SHM,
+                            timestamp=time.perf_counter(),
+                            key_hash=request.token_hash,
+                            rank=self.kv_rank,
+                            payload=[name],
+                            num_buff=1,
+                        )
+                    )
+                else:
+                    request.kv_handoff_metadata = self._dflash_producers[
+                        slot
+                    ].kv_handoff_metadata
+            else:
+                # A one-token prompt has no external tokens for an async load.
+                if request.req_id not in self._dflash_loaded:
+                    if len(request.token_ids) != 1:
+                        raise RuntimeError(
+                            "DFlash request scheduled before prefill completed."
+                        )
+                    self._dflash_pending.setdefault(request.req_id, DFlashLoad(request))
+                    deadline = time.monotonic() + 120
+                    while request.req_id not in self._dflash_loaded:
+                        if time.monotonic() > deadline:
+                            raise TimeoutError(
+                                "DFlash one-token prefill transfer timed out."
+                            )
+                        self._dflash_ready.update(
+                            self._progress_dflash_streams() - {request.req_id}
+                        )
+                        time.sleep(0.001)
+                loaded = self._dflash_loaded.pop(request.req_id)
+                request.kv_handoff_metadata = loaded.request.kv_handoff_metadata
+
+    def _progress_dflash_streams(self):
+        received = set()
+        ran_dlm = False
+        for req_id, load in list(self._dflash_pending.items()):
+            request = load.request
+            if not request.kv_handoff_metadata:
+                if time.monotonic() < load.next_lookup:
+                    continue
+                load.next_lookup = time.monotonic() + 0.005
+                response = self.get_kvcache_from_store(request.token_hash, wait=False)
+                if response is None:
+                    continue
+                name, _ = self.mem_bank.get_Storage(
+                    self._dflash_cache_info,
+                    len(request.token_ids),
+                    name=response.payload[0],
+                )
+                request.kv_handoff_metadata = [name]
+            shm = self.mem_bank.MemBank[request.kv_handoff_metadata[0]]
+            with shm.publication_lock():
+                ready, kv_ready = shm.list_of_np_buff[-1][0]
+            if kv_ready < 0:
+                # The proxy cancels the corresponding consumer request as well.
+                continue
+            block = self._dflash_block_size
+            final_start = (len(request.token_ids) - 1) // block * block
+            if (
+                not ran_dlm
+                and load.position < final_start
+                and ready >= load.position + block
+            ):
+                if load.position == 0:
+                    logger.debug(
+                        "DFlash stream %s starts DLM prefill: ready=%d/%d, kv_ready=%s",
+                        req_id,
+                        ready,
+                        len(request.token_ids),
+                        bool(kv_ready),
+                    )
+                features = shm.list_of_np_buff[-2][
+                    0, 0, load.position : load.position + block
+                ]
+                self._dflash_consume(
+                    req_id, request.block_id - 1, load.position, features
+                )
+                load.position += block
+                ran_dlm = True
+                # Rotate ready requests so long prompts cannot monopolize DLM.
+                self._dflash_pending[req_id] = self._dflash_pending.pop(req_id)
+            if (
+                kv_ready
+                and ready == len(request.token_ids)
+                and load.position == final_start
+            ):
+                self.kv_caches[request.block_id - 1] = shm.list_of_np_buff
+                self._dflash_loaded[req_id] = self._dflash_pending.pop(req_id)
+                received.add(req_id)
+        return received
+
+    def get_finished(self, finished_req_ids):
+        if not self.dflash_stream_prefill:
+            return super().get_finished(finished_req_ids)
+        if self.is_producer:
+            for slot, request in list(self._dflash_producers.items()):
+                if request.req_id in finished_req_ids:
+                    name = request.kv_handoff_metadata[0]
+                    shm = self.mem_bank.MemBank[name]
+                    with shm.publication_lock():
+                        shm.list_of_np_buff[-1][0, 1] = -1
+                    unclaimed = self.get_kvcache_from_store(
+                        request.token_hash, wait=False
+                    )
+                    self.mem_bank.release_Storage(
+                        name, unlink_creator=unclaimed is not None
+                    )
+                    self.kv_caches[slot] = []
+                    del self._dflash_producers[slot]
+            return None, None
+        received = self._dflash_ready
+        self._dflash_ready = set()
+        for req_id in finished_req_ids:
+            load = self._dflash_pending.pop(req_id, None) or self._dflash_loaded.pop(
+                req_id, None
+            )
+            if load is None:
+                continue
+            request = load.request
+            if not request.kv_handoff_metadata:
+                response = self.get_kvcache_from_store(request.token_hash, wait=False)
+                if response is not None:
+                    name, _ = self.mem_bank.get_Storage(
+                        self._dflash_cache_info,
+                        len(request.token_ids),
+                        name=response.payload[0],
+                    )
+                    request.kv_handoff_metadata = [name]
+            if request.kv_handoff_metadata:
+                self.mem_bank.release_Storage(request.kv_handoff_metadata[0])
+            self.kv_caches[request.block_id - 1] = []
+            self._dflash_cancel(req_id)
+            if not load.reported:
+                received.add(req_id)
+        received.update(self._progress_dflash_streams())
+        for req_id in received:
+            if req_id in self._dflash_loaded:
+                self._dflash_loaded[req_id].reported = True
+        return None, received or None
+
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         """Start loading the KV cache from the connector buffer to vLLM's
         paged KV buffer.
@@ -516,6 +749,13 @@ class QaicConnector(KVConnectorBase_V1):
             )
             return
         assert isinstance(metadata, QaicConnectorMetadata)
+
+        if self.dflash_stream_prefill:
+            forward_context.additional_kwargs["cleanup_callback"] = (
+                self.cleanup_callback
+            )
+            self._start_dflash_streams(metadata)
+            return
 
         if "kv_cache_info" not in kwargs:
             logger.debug("In connector.start_load_kv, but the kv_cache_info is None")
@@ -599,6 +839,17 @@ class QaicConnector(KVConnectorBase_V1):
 
         assert isinstance(connector_metadata, QaicConnectorMetadata)
         for request in connector_metadata.requests:
+            if self.dflash_stream_prefill and self.is_producer:
+                if request.is_prefill_partial:
+                    continue
+                shm = self.mem_bank.MemBank[request.kv_handoff_metadata[0]]
+                with shm.publication_lock():
+                    if shm.list_of_np_buff[-1][0, 0] != len(request.token_ids):
+                        raise RuntimeError(
+                            "DFlash KV completed before prompt features were published."
+                        )
+                    shm.list_of_np_buff[-1][0, 1] = 1
+                del self._dflash_producers[request.block_id - 1]
             # Partial prefill are not expected to have kv_handoff_metadata
             if request.kv_handoff_metadata:
                 assert request.block_id is not None
@@ -608,6 +859,8 @@ class QaicConnector(KVConnectorBase_V1):
                     self.kv_caches[request.block_id - 1] = []
 
             if request.is_store:
+                if self.dflash_stream_prefill:
+                    continue
                 assert request.kv_handoff_metadata is not None, (
                     "KV Handoff metadata is needed to save KV to connector"
                 )
@@ -662,7 +915,8 @@ class QaicConnector(KVConnectorBase_V1):
             return 0, False
 
         # NOTE: We assume KV store will always have tokens ready in case of consumer.
-        return (request.num_prompt_tokens - 1) - num_computed_tokens, False
+        count = (request.num_prompt_tokens - 1) - num_computed_tokens
+        return count, self.dflash_stream_prefill and count > 0
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
@@ -674,7 +928,23 @@ class QaicConnector(KVConnectorBase_V1):
         such that we load the KVs in the next forward pass.
         """
         # Always load KV cache. In case of producer KV cache will be empty buffers
-        self._request_tracker[request.request_id] = ReqTrackerObj(request, None)
+        if self.dflash_stream_prefill and not self.is_producer:
+            if request.request_id not in self._request_tracker:
+                block_id = blocks.get_block_ids()[0][0]
+                self._request_tracker[request.request_id] = ReqTrackerObj(
+                    request, block_id
+                )
+                if num_external_tokens:
+                    self._dflash_load_queue[request.request_id] = ReqMeta.make_meta(
+                        request.prompt_token_ids,
+                        False,
+                        False,
+                        block_id,
+                        self._handoff_id(request),
+                        request.request_id,
+                    )
+        else:
+            self._request_tracker[request.request_id] = ReqTrackerObj(request, None)
 
     def _handoff_id(self, request) -> str | None:
         if self.disable_handoff_id:
@@ -700,6 +970,12 @@ class QaicConnector(KVConnectorBase_V1):
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
         meta = QaicConnectorMetadata()
+        if self.dflash_stream_prefill:
+            for req_id in scheduler_output.finished_req_ids:
+                self._request_tracker.pop(req_id, None)
+                self._dflash_load_queue.pop(req_id, None)
+            meta.dflash_loads = list(self._dflash_load_queue.values())
+            self._dflash_load_queue.clear()
 
         total_need_load = 0
         for new_req in scheduler_output.scheduled_new_reqs:
@@ -720,6 +996,7 @@ class QaicConnector(KVConnectorBase_V1):
                     handoff_id=self._handoff_id(
                         self._request_tracker[new_req.req_id].request
                     ),
+                    req_id=new_req.req_id,
                 )
                 self._request_tracker[new_req.req_id].block_id = block_id
                 total_need_load += 1
@@ -748,6 +1025,7 @@ class QaicConnector(KVConnectorBase_V1):
                     is_partial_prefill=is_partial_prefill,
                     block_id=cached_block_id,
                     handoff_id=self._handoff_id(self._request_tracker[req_id].request),
+                    req_id=req_id,
                 )  # For QAIC one request is mapped to only one block_id
                 total_need_load += 1
 
