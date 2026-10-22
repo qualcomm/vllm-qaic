@@ -34,7 +34,11 @@ def register_qaic_customop():
     )
     from .mm_encoder_attention import QAicMMEncoderAttention
     from .mrope import QAicMRotaryEmbedding
-    from .rotary_embedding import QAicApplyRotaryEmb, QAicRotaryEmbedding  # noqa: F401
+    from .rotary_embedding import (
+        QAicApplyRotaryEmb,
+        QAicLlama3RotaryEmbedding,
+        QAicRotaryEmbedding,
+    )  # noqa: F401
 
     register_qaic_topk_router()
     register_qaic_grouped_topk_router()
@@ -55,5 +59,8 @@ def register_qaic_customop():
     )
     CustomOp.register_oot(_decorated_op_cls=QAicApplyRotaryEmb, name="ApplyRotaryEmb")
     CustomOp.register_oot(_decorated_op_cls=QAicRotaryEmbedding, name="RotaryEmbedding")
+    CustomOp.register_oot(
+        _decorated_op_cls=QAicLlama3RotaryEmbedding, name="Llama3RotaryEmbedding"
+    )
     # NOTE: Keep this at last to ensure all custom actions are registered
     _QAIC_CUSTOMOP_IS_REGISTERED = True
