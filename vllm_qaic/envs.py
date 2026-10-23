@@ -17,6 +17,8 @@ from vllm.envs import (
 if TYPE_CHECKING:
     VLLM_QAIC_COMPILER_ARGS: str | None = None
     VLLM_QAIC_DFS_EN: bool = True
+    VLLM_QAIC_FP8_BLOCK_MM_DISABLE: bool = False
+    VLLM_QAIC_FP8_BLOCK_MM_MAX_M: int = 32
     VLLM_QAIC_MAX_CPU_THREADS: int | None = None
     VLLM_QAIC_MOS: int | None = None
     VLLM_QAIC_NUM_CORES: int | None = None
@@ -27,6 +29,17 @@ if TYPE_CHECKING:
 qaic_environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_QAIC_COMPILER_ARGS": lambda: os.getenv("VLLM_QAIC_COMPILER_ARGS", None),
     "VLLM_QAIC_DFS_EN": lambda: maybe_convert_bool(os.getenv("VLLM_QAIC_DFS_EN", None)),
+    # Force the block-scaled FP8 linear layer onto the PyTorch path, bypassing
+    # the fused NSP kernel. Escape hatch for debugging / A-B comparison.
+    "VLLM_QAIC_FP8_BLOCK_MM_DISABLE": lambda: bool(
+        int(os.getenv("VLLM_QAIC_FP8_BLOCK_MM_DISABLE", "0"))
+    ),
+    # Largest M routed to the fused block-scaled FP8 NSP kernel. The kernel is
+    # HVX-only and targets bandwidth-bound decode shapes; above this the
+    # compute-bound PyTorch/HMX path wins.
+    "VLLM_QAIC_FP8_BLOCK_MM_MAX_M": lambda: int(
+        os.getenv("VLLM_QAIC_FP8_BLOCK_MM_MAX_M", "32")
+    ),
     "VLLM_QAIC_MAX_CPU_THREADS": lambda: maybe_convert_int(
         os.getenv("VLLM_QAIC_MAX_CPU_THREADS", None)
     ),
