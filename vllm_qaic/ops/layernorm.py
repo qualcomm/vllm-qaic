@@ -56,12 +56,12 @@ class QAicGemmaRMSNorm(GemmaRMSNorm):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if residual is not None:
             normed, new_residual = _call_hexagon_rms_norm(
-                residual, x, self.weight, self.variance_epsilon
+                residual, x, 1.0 + self.weight, self.variance_epsilon
             )
             return normed, new_residual
 
         return F.rms_norm(
-            x, self.weight.shape, 1.0 + self.weight, self.variance_epsilon
+            x, [self.weight.shape[0]], 1.0 + self.weight, self.variance_epsilon
         )
 
 
@@ -83,14 +83,20 @@ class QAicRMSNormGated(RMSNormGated):
         if self.group_size is not None:
             return super().forward_native(x, z)
 
+        orig_dtype = x.dtype
+        x = x.float()
+        weight = self.weight.float()
+        if z is not None:
+            z = z.float()
+
         # norm_before_gate=False: gate first, then normalize (Mamba2 / Hawk style)
         if z is not None and not self.norm_before_gate:
             x = x * F.silu(z)
 
-        out = F.rms_norm(x, [self.hidden_size], self.weight, self.eps)
+        out = F.rms_norm(x, [weight.shape[0]], weight, self.eps)
 
         # norm_before_gate=True: normalize first, then gate (some SSM variants)
         if z is not None and self.norm_before_gate:
             out = out * F.silu(z)
 
-        return out
+        return out.to(orig_dtype)
