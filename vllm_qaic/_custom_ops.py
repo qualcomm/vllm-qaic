@@ -19,12 +19,21 @@ _THREAD_COUNT = current_platform.get_num_hvx_threads()
 _HMX_THREAD_COUNT = _THREAD_COUNT + 1
 
 
+def _rms_norm_out_dtype(attn_out: Tensor) -> torch.dtype:
+    return torch.float32 if attn_out.dtype == torch.bfloat16 else attn_out.dtype
+
+
+# Registered as a custom op so torch.compile records the raw kernel launch
+# as a single graph node instead of failing to trace the pybind dispatch.
+@torch.library.custom_op(
+    "qaic::fused_add_rms_norm", mutates_args=(), device_types="qaic"
+)
 def rms_norm_hexagon(
-    attn_out: torch.Tensor,  # previous layer's output (acts as the residual)
-    x: torch.Tensor,  # current layer's input
-    weight: torch.Tensor,  # per-channel scale (gamma)
+    attn_out: Tensor,  # previous layer's output (acts as the residual)
+    x: Tensor,  # current layer's input
+    weight: Tensor,  # per-channel scale (gamma)
     epsilon: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[Tensor, Tensor]:
     """Dispatch the fused add+RMS-norm to the Hexagon NSP kernel.
 
     Returns (normed, new_residual) where:
@@ -32,7 +41,7 @@ def rms_norm_hexagon(
       normed = new_residual / rms(new_residual) * weight
     """
     is_bf16 = attn_out.dtype == torch.bfloat16
-    out_dtype = torch.float32 if is_bf16 else attn_out.dtype
+    out_dtype = _rms_norm_out_dtype(attn_out)
     out = torch.empty(attn_out.shape, dtype=out_dtype, device=attn_out.device)
     dst = torch.empty(attn_out.shape, dtype=out_dtype, device=attn_out.device)
     # Launch grid: [_NSP_COUNT cores, _THREAD_COUNT HVX threads per core]
@@ -49,6 +58,15 @@ def rms_norm_hexagon(
     )
 
     return dst, out
+
+
+@rms_norm_hexagon.register_fake
+def _(attn_out: Tensor, x: Tensor, weight: Tensor, epsilon: float):
+    out_dtype = _rms_norm_out_dtype(attn_out)
+    return (
+        attn_out.new_empty(attn_out.shape, dtype=out_dtype),
+        attn_out.new_empty(attn_out.shape, dtype=out_dtype),
+    )
 
 
 current_platform.import_kernels()

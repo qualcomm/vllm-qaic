@@ -45,15 +45,28 @@ DYNAMIC_RESOLUTION_MODELS = [
 ]
 
 
+# Checked locally rather than via vllm.triton_utils.HAS_TRITON: importing
+# vllm.triton_utils resolves vllm.platforms.current_platform, which is still
+# being initialized (it is what imports this module).
+_HAS_TRITON: bool = importlib.util.find_spec("triton") is not None
+
+
 class QaicPlatform(Platform):
     _enum = PlatformEnum.OOT
     primary_attn_backend_cls = (
         "vllm_qaic.attention.backends.qaic_attn.QAicTorchAttentionBackend"
     )
     if os.environ.get("VLLM_QAIC_ENABLE_TRITON_ATTN") == "1":
-        primary_attn_backend_cls = (
-            "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"
-        )
+        if _HAS_TRITON:
+            primary_attn_backend_cls = (
+                "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"
+            )
+        else:
+            logger.warning(
+                "VLLM_QAIC_ENABLE_TRITON_ATTN=1 but Triton is not installed; "
+                "keeping the QAIC attention backend %s",
+                primary_attn_backend_cls,
+            )
     device_name: str = "qaic"
     # Set device type to cpu if it's AOT.
     # This is a workaround for online serving's AsyncEngineArgs.
@@ -142,6 +155,13 @@ class QaicPlatform(Platform):
         )
 
     @classmethod
+    def num_compute_units(cls, device_id: int = 0) -> int:
+        # matmul_persistent (batch_invariant Triton GEMM) sizes its persistent
+        # launch grid by this; map it to the NSP core count. Without this,
+        # matmul_persistent raises NotImplementedError on QAIC.
+        return cls.get_num_cores(device_id)
+
+    @classmethod
     def check_if_supports_dtype(cls, dtype: torch.dtype):
         # Keep worker-side validation consistent with the plugin dtype contract.
         if dtype not in [torch.bfloat16, torch.float16, torch.float32]:
@@ -214,7 +234,9 @@ class QaicPlatform(Platform):
             vllm_config.model_config.enforce_eager = False
             device_config.device = torch.device("cpu")
         else:
-            vllm_config.model_config.enforce_eager = True
+            # PyT mode: `enforce_eager=True` keeps pure eager execution,
+            # otherwise the model is run through torch.compile (see
+            # _configure_pyt_compilation below).
             device_config.device = torch.device("qaic")
             # set QAIC_VISIBLE_DEVICES from device_group
             # if not already set
@@ -406,17 +428,18 @@ class QaicPlatform(Platform):
         from vllm.config import CompilationMode
 
         compilation_config = vllm_config.compilation_config
-        # QAIC_FIXME: default uses torch.compile based custom vllm-backend.
-        # Turning off all torch.compile modes to fallback to purely eager for now.
-        if compilation_config and compilation_config.mode != CompilationMode.NONE:
-            mode = "AoT" if cls.is_aot else "PyT"
-            logger.warning_once(
-                "vllm qaic platform doesn't support compilation mode = %s,"
-                "disabling and running with %s...",
-                compilation_config.mode,
-                mode,
-            )
-            compilation_config.mode = CompilationMode.NONE
+        if cls.is_aot:
+            # AoT executes pre-compiled QPCs, torch.compile is not applicable.
+            if compilation_config.mode != CompilationMode.NONE:
+                logger.warning_once(
+                    "vllm qaic platform doesn't support compilation mode = %s "
+                    "in AoT, disabling...",
+                    compilation_config.mode,
+                )
+                compilation_config.mode = CompilationMode.NONE
+        else:
+            cls._configure_pyt_compilation(vllm_config)
+
         on_device_sampling_en = override_qaic_config.get("aic_include_sampler", False)
         if isinstance(on_device_sampling_en, str):
             on_device_sampling_en = on_device_sampling_en.lower() in [
@@ -484,6 +507,92 @@ class QaicPlatform(Platform):
                 )
 
     @classmethod
+    def _configure_pyt_compilation(cls, vllm_config: VllmConfig) -> None:
+        """Configure torch.compile for PyT mode.
+
+        vLLM's default VLLM_COMPILE mode (piecewise VllmBackend) hijacks
+        inductor's `inner_compile`, bypassing the QAIC lowerings installed by
+        torch_qaic's patched `compile_fx`. Like the vLLM CPU platform, fall
+        back to DYNAMO_TRACE_ONCE so the full graph is handed to the
+        "inductor" backend, which torch_qaic routes according to
+        QAIC_INDUCTOR_LEVEL (must be exported before launch).
+        """
+        from vllm.config import CompilationMode, CUDAGraphMode
+
+        compilation_config = vllm_config.compilation_config
+        if compilation_config.mode == CompilationMode.VLLM_COMPILE:
+            logger.info_once(
+                "vllm qaic platform doesn't support compilation mode = %s, "
+                "using %s with backend=%s instead.",
+                compilation_config.mode,
+                CompilationMode.DYNAMO_TRACE_ONCE,
+                compilation_config.backend,
+            )
+            compilation_config.mode = CompilationMode.DYNAMO_TRACE_ONCE
+            compilation_config.ir_enable_torch_wrap = False
+
+        if (
+            vllm_config.lora_config is not None
+            and compilation_config.mode != CompilationMode.NONE
+        ):
+            logger.warning_once(
+                "torch.compile is not yet supported with LoRA on QAIC, "
+                "disabling and running in eager mode..."
+            )
+            compilation_config.mode = CompilationMode.NONE
+
+        # No static graph capture on QAIC.
+        compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+
+        if compilation_config.mode == CompilationMode.NONE:
+            return
+
+        # vLLM enables AOT compile caching by default on newer torch, but the
+        # torch_qaic backends don't produce serializable artifacts and
+        # QAIC_INDUCTOR_LEVEL is not part of vLLM's compile cache key.
+        os.environ.setdefault("VLLM_USE_AOT_COMPILE", "0")
+        # Disable torch async compiling which won't work with daemonic processes
+        os.environ.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "1")
+        # vLLM turns on combo kernels for all non-CPU platforms. Benchmarking
+        # them reads launcher.n_spills, which the Hexagon Triton backend
+        # doesn't report, so turn them off (as vLLM does for CPU).
+        inductor_config = compilation_config.inductor_compile_config
+        inductor_config["combo_kernels"] = False
+        inductor_config["benchmark_combo_kernel"] = False
+
+    @classmethod
+    def apply_config_platform_defaults(cls, vllm_config: VllmConfig) -> None:
+        if cls.is_aot:
+            return
+        # vLLM defaults custom_ops to "none" with the inductor backend, which
+        # would replace the QAIC kernels (traceable via torch_qaic fake impls)
+        # with their native torch implementations.
+        custom_ops = vllm_config.compilation_config.custom_ops
+        if all(s not in custom_ops for s in ("all", "none")):
+            custom_ops.append("all")
+
+    @classmethod
+    def get_compile_backend(cls) -> str:
+        # Default backend for model compilation (CompilationConfig.backend).
+        # simple_compile_backend stays "eager" for the standalone
+        # @torch.compile helpers which are compiled even in eager mode.
+        return cls.simple_compile_backend if cls.is_aot else "inductor"
+
+    @classmethod
+    def opaque_attention_op(cls) -> bool:
+        # QAIC attention keeps per-request KV state in python, hide it from
+        # dynamo behind vLLM's unified attention custom op when compiling.
+        if cls.is_aot:
+            return False
+        from vllm.config import CompilationMode, get_current_vllm_config_or_none
+
+        vllm_config = get_current_vllm_config_or_none()
+        return (
+            vllm_config is not None
+            and vllm_config.compilation_config.mode != CompilationMode.NONE
+        )
+
+    @classmethod
     def is_pin_memory_available(cls) -> bool:
         logger.warning("Pin memory is not supported on Qaic.")
         return False
@@ -516,6 +625,38 @@ class QaicPlatform(Platform):
             raise NotImplementedError("QAic doesn't support sparse attention")
 
         return cls.primary_attn_backend_cls
+
+    @classmethod
+    def get_supported_vit_attn_backends(cls) -> list[AttentionBackendEnum]:
+        backends = [AttentionBackendEnum.TORCH_SDPA]
+        if _HAS_TRITON:
+            backends.append(AttentionBackendEnum.TRITON_ATTN)
+        return backends
+
+    @classmethod
+    def get_vit_attn_backend(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        backend: AttentionBackendEnum | None = None,
+    ) -> AttentionBackendEnum:
+        """Select the ViT (multimodal encoder) attention backend for QAIC.
+
+        ``QAicMMEncoderAttention.forward_oot`` dispatches to vLLM's Triton ViT
+        prefill kernel when ``VLLM_QAIC_TRITON_MM_ENCODER_ATTENTION=1``.
+        Reporting TRITON_ATTN here keeps the metadata consistent with the kernel
+        actually being invoked.
+        """
+        from vllm_qaic.ops._triton_flags import triton_op_enabled
+
+        if backend is None and triton_op_enabled("MM_ENCODER_ATTENTION"):
+            logger.info_once(
+                "VLLM_QAIC_TRITON_MM_ENCODER_ATTENTION=1: using %s for vit attention",
+                AttentionBackendEnum.TRITON_ATTN,
+            )
+            return AttentionBackendEnum.TRITON_ATTN
+
+        return super().get_vit_attn_backend(head_size, dtype, backend=backend)
 
     @classmethod
     def _configure_multimodal_model(

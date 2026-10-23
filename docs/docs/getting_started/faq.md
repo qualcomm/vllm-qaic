@@ -69,11 +69,11 @@ Common questions and solutions for vLLM QAIC.
     export VLLM_QAIC_QPC_PATH=/path/to/precompiled/qpc/
     ```
 
-??? question "Do I need to pass `enforce_eager`?"
-    No. The QAIC platform sets it for you: `True` in **PYT mode**, `False` in **AOT mode**,
-    where execution is always through pre-compiled QPCs. Passing it yourself is unnecessary,
-    and a value that disagrees with the selected mode is overridden (in AOT mode, overriding
-    an explicit `enforce_eager=True` also logs a warning).
+??? question "What does `enforce_eager` do?"
+    In **PYT mode**, `enforce_eager=True` runs the model in pure eager mode; otherwise it is
+    run with `torch.compile` (inductor backend). In **AOT mode**, execution is always through
+    pre-compiled QPCs, so the platform forces it to `False` (overriding an explicit
+    `enforce_eager=True` logs a warning).
 
 ---
 
