@@ -75,6 +75,15 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
         )  # used by iter_mm_grid_hw / iter_mm_grid_thw
         self.mm_input_info: dict[str, tuple[list[int], np.dtype]] = {}
         self.mm_output_info: dict[str, tuple[list[int], np.dtype]] = {}
+        self.is_dflash_vlm = bool(
+            vllm_config.speculative_config
+            and vllm_config.speculative_config.method == "dflash"
+        )
+        self.dflash_requires_replay = self.is_dflash_vlm and self.config.model_type in {
+            "qwen3_5",
+            "qwen3_5_moe",
+        }
+        self._dflash_verification_inputs: dict[str, np.ndarray] | None = None
 
         if self.uses_mrope:
             # QEfficient requires position ids to be (4, batch_size, seq_len)
@@ -127,6 +136,86 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
                 )
             self.decode_batch_inputs.update(self.default_mm_kwargs)
 
+        if self.is_dflash_vlm:
+            input_shapes = self.session.get_bindings_shapes(["input_ids"]).get(
+                "input_ids", []
+            )
+            sequence_lengths = {
+                shape[1]
+                for shape in input_shapes
+                if len(shape) == 2 and shape[0] == self.decode_bsz
+            }
+            required_lengths = {self.prefill_seq_len, self.num_spec_tokens + 1}
+            if not required_lengths.issubset(sequence_lengths):
+                raise ValueError(
+                    "DFlash VLM target QPC input lengths do not match this run: "
+                    f"prefill_seq_len={self.prefill_seq_len}, "
+                    f"block_size={self.num_spec_tokens + 1}, "
+                    f"compiled sequence lengths={sorted(sequence_lengths)}. "
+                    "Select a matching target QPC or recompile it."
+                )
+            logits_shapes = self.session.get_bindings_shapes(["logits"]).get(
+                "logits", []
+            )
+            if not logits_shapes or any(
+                len(shape) != 3 or shape[-1] != self.vocab_size
+                for shape in logits_shapes
+            ):
+                raise ValueError(
+                    "vLLM DFlash requires a target QPC returning vocabulary logits, "
+                    "not greedy token IDs."
+                )
+            for decode_k, inputs in self.decode_batch_inputs_by_k.items():
+                if "mm_token_type_ids" in self.session.input_names:
+                    inputs["mm_token_type_ids"] = np.zeros(
+                        (self.decode_bsz, decode_k + 1), dtype=np.int64
+                    )
+            if self.config.model_type == "gemma4":
+                text_config = self.config.text_config
+                capacity = min(
+                    self.ctx_len,
+                    text_config.sliding_window
+                    + max(self.prefill_seq_len, self.num_spec_tokens + 1)
+                    - 1,
+                )
+                for index, kind in enumerate(text_config.layer_types):
+                    if kind != "sliding_attention":
+                        continue
+                    name = f"past_key.{index}"
+                    shapes = self.session.get_bindings_shapes([name]).get(name, [])
+                    if not shapes or any(
+                        len(shape) != 4 or shape[2] < capacity for shape in shapes
+                    ):
+                        raise ValueError(
+                            "Recompile the Gemma4 DFlash target QPC with sliding-cache "
+                            "block headroom; the existing QPC may overwrite "
+                            "needed history."
+                        )
+
+        if self.dflash_requires_replay:
+            if "cache_commit" not in self.session.input_names:
+                raise ValueError("Qwen3.5 DFlash target QPC must expose cache_commit.")
+            assert self.default_mm_kwargs is not None
+            assert self._dflash_prefill_hidden_scratch is not None
+            self.default_mm_kwargs["cache_commit"] = np.ones((1,), dtype=np.int64)
+            for inputs in self.decode_batch_inputs_by_k.values():
+                inputs["cache_commit"] = np.zeros((1,), dtype=np.int64)
+            # Replay uses the verification specialization, not the prefill shape.
+            self._dflash_replay_outputs = {
+                "logits": np.empty(
+                    (self.decode_bsz, self.num_spec_tokens + 1, self.vocab_size),
+                    dtype=self.logits_dtype,
+                ),
+                self.dflash_hidden_name: np.empty(
+                    (
+                        self.decode_bsz,
+                        self.num_spec_tokens + 1,
+                        self.dflash_hidden_size,
+                    ),
+                    dtype=self._dflash_prefill_hidden_scratch.dtype,
+                ),
+            }
+
         if self.config.model_type == "whisper":
             self.default_mm_kwargs = {}
             for k, v in self.mm_input_info.items():
@@ -137,6 +226,34 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
                         _shape, dtype=v[1]
                     )
             self.decode_batch_inputs.update(self.default_mm_kwargs)
+
+    def _run_decode(self, *args, **kwargs) -> None:
+        super()._run_decode(*args, **kwargs)
+        if self.dflash_requires_replay:
+            inputs = self.decode_batch_inputs_by_k[self.active_k]
+            self._dflash_verification_inputs = dict(inputs)
+            for name in ("input_ids", "position_ids"):
+                self._dflash_verification_inputs[name] = inputs[name].copy()
+
+    def commit_dflash_prefix(self, sampled_token_ids: list[list[int]]) -> bool:
+        inputs = self._dflash_verification_inputs
+        self._dflash_verification_inputs = None
+        if inputs is None or not sampled_token_ids or not sampled_token_ids[0]:
+            return False
+        if len(sampled_token_ids) != 1:
+            raise ValueError("Qwen3.5 DFlash replay currently supports one request.")
+        # N sampled outputs mean N-1 accepted drafts plus the target's new token.
+        # Commit the seed and accepted drafts, not that unverified new token.
+        count = len(sampled_token_ids[0])
+        if count > inputs["input_ids"].shape[-1]:
+            raise ValueError("Accepted prefix exceeds the verified block.")
+        inputs["input_ids"][:, count:] = 0
+        inputs["position_ids"][..., count:] = -1
+        inputs["cache_commit"] = np.ones((1,), dtype=np.int64)
+        inputs.update(self._dflash_replay_outputs)
+        exec_id = self.session.np_run(inputs, is_prefill=False)
+        self.session.complete_inf(exec_id, is_prefill=False)
+        return True
 
     def _to_np(self, t, dtype: np.dtype | None = None) -> np.ndarray | list[np.ndarray]:
         """
