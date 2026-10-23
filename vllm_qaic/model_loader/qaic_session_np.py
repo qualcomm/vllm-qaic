@@ -142,7 +142,7 @@ class QAICInferenceSession:
         prog_properties = qaicrt.QAicProgramProperties()
         prog_properties.dataPathTimeoutMs = (
             300_000  # MoE models needs high timeout due to expert parallelism
-        ) 
+        )
         queueProperties = qaicrt.QAicQueueProperties()
         queueProperties.numThreadsPerQueue = 1
         self.queue.initProperties(queueProperties)
