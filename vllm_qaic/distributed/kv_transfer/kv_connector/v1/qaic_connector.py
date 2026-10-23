@@ -528,28 +528,29 @@ class QaicConnector(KVConnectorBase_V1):
             if request.is_prefill_partial and self.is_producer:
                 continue
             elif request.block_id is not None:
-                kv_shm_buff_name = None
-                # Get kv cache from kv_store
-                if not self.is_producer:
-                    resp = self.get_kvcache_from_store(request.token_hash)
-                    assert resp is not None
-                    assert resp.buff_type == 0, (
-                        "Raw np.ndarray KV exchange not supported yet"
-                    )
-                    kv_shm_buff_name = resp.payload[0]
-                kv_storage_shm_name, kv_buff = self.mem_bank.get_Storage(
-                    kv_cache_info=kv_cache_info,
-                    num_tokens=len(request.token_ids),
-                    name=kv_shm_buff_name,
-                )
-                request.kv_handoff_metadata = [kv_storage_shm_name]
-                if self.kv_caches[request.block_id - 1]:
-                    logger.warning(
-                        "Overwriting KV cache for running request at"
-                        " block_id=%s; this is unexpected.",
-                        request.block_id,
-                    )
-                self.kv_caches[request.block_id - 1] = kv_buff
+                # kv_shm_buff_name = None
+                # # Get kv cache from kv_store
+                # if not self.is_producer:
+                #     resp = self.get_kvcache_from_store(request.token_hash)
+                #     assert resp is not None
+                #     assert resp.buff_type == 0, (
+                #         "Raw np.ndarray KV exchange not supported yet"
+                #     )
+                #     kv_shm_buff_name = resp.payload[0]
+                # kv_storage_shm_name, kv_buff = self.mem_bank.get_Storage(
+                #     kv_cache_info=kv_cache_info,
+                #     num_tokens=len(request.token_ids),
+                #     name=kv_shm_buff_name,
+                # )
+                # request.kv_handoff_metadata = [kv_storage_shm_name]
+                # if self.kv_caches[request.block_id - 1]:
+                #     logger.warning(
+                #         "Overwriting KV cache for running request at"
+                #         " block_id=%s; this is unexpected.",
+                #         request.block_id,
+                #     )
+                # self.kv_caches[request.block_id - 1] = kv_buff
+                pass
             else:
                 raise ValueError(f"Block ID not found for request {request.token_hash}")
 
