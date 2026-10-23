@@ -236,4 +236,6 @@ No additional hardware is required — both models run on the same device.
 
 ## SpD with Disaggregated Serving
 
-SpD can be combined with disaggregated serving — proposals are generated and verified entirely on the decode node. See [Disaggregated Serving](disaggregated_serving.md#speculative-decoding-with-disaggregated-serving).
+!!! warning "Not supported"
+    Speculative decoding cannot currently be combined with disaggregated
+    serving. This limitation applies to both AOT and Eager modes.

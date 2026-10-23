@@ -49,7 +49,7 @@ Some features cannot be used together. Here is the compatibility matrix for comm
 
 | Combination | AOT | Eager | Notes |
 |-------------|-----|-------|-------|
-| SpD + Disaggregated | ✅ | ❌ | Supported on decode node |
+| SpD + Disaggregated | ❌ | ❌ | Not supported |
 | LoRA + Disaggregated | ❌ | ❌ | Not supported |
 | Multimodal + CCL (Compiled Context Lengths) | ✅ | 🧪 | Supported (vision encoder on separate device) |
 | Tensor Parallel + Disaggregated | ✅ | ❌ | Supported (TP within each node) |

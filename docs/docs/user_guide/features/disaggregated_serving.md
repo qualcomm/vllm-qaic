@@ -74,43 +74,9 @@ docker run --rm -it \
 ```text
 ## Speculative Decoding with Disaggregated Serving
 
-SpD can be layered onto disaggregated serving — proposals are generated and verified entirely on the decode node:
-
-```text
-Prefill Stage (Device Group 0..15)
-  +-- Generates KV cache (no SpD overhead)
-
-Decode Stage (Device Group 16..23)
-  +-- Draft model proposes tokens
-  +-- Target model verifies and streams output
-```text
-Enable with `--decode-speculative-config`:
-
-```bash
-docker run --rm -it \
-  --privileged --shm-size=4gb --network host \
-  -e HF_TOKEN=<your_hf_token> \
-  ghcr.io/quic/cloud_ai_inference_vllm_disagg:1.21.2.0 \
-  --model "meta-llama/Llama-3.1-8B-Instruct" \
-  --prefill-port 9900 \
-  --prefill-device-group 0..15 \
-  --decode-port 9800 \
-  --decode-device-group 16..23 \
-  --port 8000 \
-  --prefill-max-num-seqs 1 \
-  --decode-max-num-seqs 4 \
-  --max-model-len 2048 \
-  --prefill-override-qaic-config "mxfp6_matmul:True" \
-  --decode-override-qaic-config "mxfp6_matmul:True num_cores:10" \
-  --decode-speculative-config '{"speculative_model":"meta-llama/Llama-3.2-1B-Instruct","num_speculative_tokens":3,"draft_override_qaic_config":{"device_group":[0],"num_cores":6}}' \
-  --kv-cache-dtype mxint8 \
-  --generation-config vllm
-```text
-For n-gram without a draft model:
-
-```bash
---decode-speculative-config '{"method":"ngram","num_speculative_tokens":5}'
-```text
+!!! warning "Not supported"
+    Speculative decoding cannot currently be combined with disaggregated
+    serving. This limitation applies to both AOT and Eager modes.
 ## Disaggregation Modes
 
 | Configuration | Encode | Prefill | Decode | Status |
