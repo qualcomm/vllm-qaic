@@ -2043,8 +2043,11 @@ def _get_qaic_compile_config(
         "compile_only": False,
     }
     cfg.update(_clean_config(override_qaic_config, vllm_config))
-    # update through environment variable
-    cfg.update(_clean_config(QAIC_DEVICE_CONFIG[speculative_model_type]))
+    _env_cfg = _clean_config(QAIC_DEVICE_CONFIG[speculative_model_type])
+    if cfg.get("device_group") is not None:
+        _env_cfg.pop("device_group", None)
+        _env_cfg.pop("num_devices", None)
+    cfg.update(_env_cfg)
     # set aic num core as per the hw if not provided
     if cfg["num_cores"] is None:
         _hw_num_cores = 16
