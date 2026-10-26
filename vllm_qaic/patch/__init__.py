@@ -70,6 +70,15 @@
 #       This patch must be applied before vllm.compilation.caching is imported.
 #       Because vLLM defaults to fork-based subprocesses, patching here (in the
 #       main process before fork) is sufficient.
+# ** 6. File: patch_kv_cache_check.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. vllm.v1.core.kv_cache_utils._check_enough_kv_cache_memory
+#    Why:
+#       In QAIC AoT mode, the compiled QPC owns accelerator KV-cache
+#       allocation. The memory value returned to vLLM is logical capacity,
+#       so the upstream physical-memory check can reject a valid QPC setup.
+#    How:
+#       Skip the check for QAIC AoT while retaining the zero-memory guard.
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # =================
 
@@ -78,5 +87,7 @@ import vllm_qaic.patch.patch_parallel_state  # noqa
 import vllm_qaic.patch.patch_utils  # noqa
 import vllm_qaic.patch.patch_rejection_sampler  # noqa
 import vllm_qaic.patch.patch_graph_pickler  # noqa
+import vllm_qaic.patch.patch_kv_cache_check  # noqa
 import vllm_qaic.patch.patch_mem_utils  # noqa
 import vllm_qaic.patch.patch_block_table  # noqa
+import vllm_qaic.patch.patch_multi_connector_metrics  # noqa

@@ -12,18 +12,15 @@ import os
 from typing import TYPE_CHECKING
 
 import torch
-
-from vllm_qaic.logger import init_logger
 from vllm.platforms import Platform, PlatformEnum
 from vllm.utils.import_utils import PlaceholderModule
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-from .utils import (
-    QAIC_QUANTIZATION_LIST,
-)
+from vllm_qaic.logger import init_logger
+
+from .utils import QAIC_QUANTIZATION_LIST, get_qaic_kv_connector_names
 
 try:
-    import torch_qaic
     import torch_qaic.qaic as qaic
 except ImportError:
     qaic = PlaceholderModule("qaic")
@@ -100,6 +97,10 @@ class QaicPlatform(Platform):
         return "qaic"
 
     @classmethod
+    def discover_numa_topology(cls) -> list[list[int]]:
+        return []
+
+    @classmethod
     def get_device_uuid(cls, device_id: int = 0) -> str:
         # Not Implemented for aot
         if isinstance(qaic, PlaceholderModule):
@@ -127,7 +128,9 @@ class QaicPlatform(Platform):
     @functools.cache
     def get_num_cores(cls, device_id: int = 0) -> int:
         if not cls.is_aot:
-            return torch_qaic.qaic.get_device_info(device_id).num_cores
+            import torch_qaic.qaic as eager_qaic
+
+            return eager_qaic.get_device_info(device_id).num_cores
         raise NotImplementedError(
             "get_num_cores is only supported in eager (non-AOT) mode"
         )
@@ -136,7 +139,9 @@ class QaicPlatform(Platform):
     @functools.cache
     def get_num_hvx_threads(cls, device_id: int = 0) -> int:
         if not cls.is_aot:
-            return torch_qaic.qaic.get_device_info(device_id).per_core_hvx_thread_count
+            import torch_qaic.qaic as eager_qaic
+
+            return eager_qaic.get_device_info(device_id).per_core_hvx_thread_count
         raise NotImplementedError(
             "get_num_hvx_threads is only supported in eager (non-AOT) mode"
         )
@@ -174,6 +179,10 @@ class QaicPlatform(Platform):
     @classmethod
     def manual_seed_all(cls, seed: int) -> None:
         pass
+
+    @classmethod
+    def support_hybrid_kv_cache(cls) -> bool:
+        return True
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
@@ -324,7 +333,18 @@ class QaicPlatform(Platform):
                         "Prefix caching is not yet supported on v1 Engine. "
                         "Will automatically disable it."
                     )
-                cache_config.block_size = model_config.max_model_len  # ctx_len
+                kv_transfer_config = vllm_config.kv_transfer_config
+                connector_names = get_qaic_kv_connector_names(kv_transfer_config)
+                paged_kv_connectors = {
+                    "NixlConnector",
+                    "QaicNixlPushConnector",
+                    "MooncakeConnector",
+                    "MooncakeStoreConnector",
+                }
+                if connector_names & paged_kv_connectors:
+                    cache_config.block_size = 256
+                else:
+                    cache_config.block_size = model_config.max_model_len  # ctx_len
 
         if cls.is_aot:
             if model_config.hf_config.model_type == "whisper":
@@ -465,7 +485,7 @@ class QaicPlatform(Platform):
                 from vllm_qaic.executor.qaic_uniproc_executor import QaicUniProcExecutor
 
                 uniproc_executor.UniProcExecutor = QaicUniProcExecutor
-                stages = int(override_qaic_config.get("stages"))
+                stages = int(override_qaic_config.get("stages", 1))
                 assert not scheduler_config.async_scheduling or (
                     stages is None
                     or int(stages) <= 1

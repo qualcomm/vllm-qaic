@@ -32,6 +32,13 @@ import QAicApi_pb2 as aicapi
 
 logger = init_logger(__name__)
 
+
+def _kv_sort_key(item):
+    name = item[0]
+    part = name.split(".")[1] if "." in name else "0"
+    return int(part.split("_")[0]), name
+
+
 # NumPy has no BF16 dtype. Follow QEfficient's raw two-byte storage convention:
 # https://github.com/quic/efficient-transformers/blob/90f37b914fb808c3e438a186ff4dfac501fd838a/QEfficient/generation/cloud_infer.py#L105
 # LRT receives IEEE BF16 bits in an np.float16 storage view; values in that view
@@ -236,12 +243,6 @@ class QAICInferenceSession:
                 self.decode_buff_map.append((name, self.binding_index_map[name]))
 
         # Sort by layer number, then alphabetically within each layer.
-        # Standard attn: past_key < past_value. MLA: compressed_kv < k_pe.
-        def _kv_sort_key(item):
-            name = item[0]
-            part = name.split(".")[1] if "." in name else "0"
-            return int(part.split("_")[0]), name
-
         self.decode_buff_map.sort(key=_kv_sort_key)
 
         self.prefill_buff_map = []
@@ -299,7 +300,7 @@ class QAICInferenceSession:
 
     def _is_kv_cache_name(self, name: str) -> bool:
         if self.use_legacy_slicing_spec:
-            return name.startswith("past_key") or name.startswith("past_value")
+            return name.startswith(("past_key", "past_value"))
         return VLLM_KV_CACHE_PREFIX in name
 
     def get_json_for_full_kv_cache_slicing(self):
@@ -517,7 +518,7 @@ class QAICInferenceSession:
         return buffer_idx_to_buffer
 
     def extract_outputs(self, input_dict):
-        output_dict = dict()
+        output_dict = {}
         for bufname in self.output_names:
             if bufname in input_dict:
                 output_dict[bufname] = input_dict[bufname]
@@ -692,7 +693,6 @@ class QAICInferenceSession:
                 exec_obj_idx,
                 self.prefill_buff_map[:-1],
             )
-
         self._make_inputs_contiguous(inputs)
         slices_as_tuple_list = self.get_tuple_list_from_dict(inputs)
 

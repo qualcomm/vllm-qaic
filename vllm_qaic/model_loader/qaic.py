@@ -20,10 +20,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from peft import PeftConfig
 from transformers import PretrainedConfig
-
 from vllm.config import ModelConfig, VllmConfig
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
-from vllm_qaic.logger import init_logger
 from vllm.model_executor.layers.pooler.common import ClassifierFn
 from vllm.model_executor.layers.pooler.seqwise import (
     SequencePoolingFn,
@@ -45,6 +43,7 @@ from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
 
+from vllm_qaic.logger import init_logger
 from vllm_qaic.utils.qaic_utils import _clean_config, compute_max_decode_tokens
 
 logger = init_logger(__name__)
@@ -192,6 +191,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self.active_k: int = self.decode_ks[-1]
 
         self.sampler = Sampler(logprobs_mode=model_config.logprobs_mode)
+        self._kv_handoff_buffers: list[np.ndarray] | None = None
+        self._kv_handoff_rows = 0
         self.pad = np.full(self.prefill_seq_len, fill_value=-1, dtype=np.int64)
 
         # Pre-allocate one input dict per K so session.run() receives the correct
@@ -365,7 +366,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             if ks:
                 return sorted(ks)
         except Exception:
-            pass
+            return list(self.decode_ks)
         return list(self.decode_ks)
 
     def to_host_array(self, binding_name: str, buffer: np.ndarray) -> np.ndarray:
@@ -562,34 +563,63 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         batch_indices: list[int],
         kv_caches: list[list[np.ndarray]],
     ):
-        for _, bidx in enumerate(batch_indices):
-            if kv_caches[bidx] is not None and len(kv_caches[bidx]) > 0:
-                assert len(self.kv_cache_info) == len(kv_caches[bidx]), (
-                    f"KV buffer count mismatch: "
-                    f"expected {len(self.kv_cache_info)} buffers, "
-                    f"got {len(kv_caches[bidx])}"
-                )
-                for buff_idx in range(len(kv_caches[bidx])):
-                    buf = kv_caches[bidx][buff_idx]
-                    target_heads = self.kv_cache_info[buff_idx][0][1]
-                    # broadcast MLA buffers across num heads (zero-copy)
-                    if buf.size > 0 and target_heads != buf.shape[1]:
-                        assert buf.shape[1] == 1, (
-                            f"MLA KV head expansion expects num_heads=1 in received "
-                            f"buffer, got {buf.shape[1]} (shape={buf.shape})"
-                        )
-                        kv_caches[bidx][buff_idx] = np.broadcast_to(
-                            buf, (buf.shape[0], target_heads) + buf.shape[2:]
-                        )
+        """Copy transferred KV into one batch-contiguous buffer set."""
+        if len(batch_indices) == 0:
+            return
 
-                # Update kv cache setDataWith
-                _ = self.session.set_data_for_kv_handoff(
-                    kv_caches[bidx],
-                    [("batch_index", bidx), ("ctx_start", 0)],
-                    self.decode_execObj_idx,
-                    self.session.decode_buff_map,
-                )
-        return
+        num_rows = int(max(batch_indices)) + 1
+        needs_realloc = (
+            self._kv_handoff_buffers is None
+            or self._kv_handoff_rows < num_rows
+            or len(self._kv_handoff_buffers) != len(self.kv_cache_info)
+        )
+        if needs_realloc:
+            self._kv_handoff_buffers = [
+                np.empty((num_rows,) + tuple(kv_shape[1:]), dtype=kv_dtype)
+                for kv_shape, kv_dtype, _ in self.kv_cache_info
+            ]
+            self._kv_handoff_rows = num_rows
+        assert self._kv_handoff_buffers is not None
+        contiguous_kv = self._kv_handoff_buffers
+        active_rows = {int(bidx) for bidx in batch_indices}
+        for buffer in contiguous_kv:
+            for row in range(num_rows):
+                if row not in active_rows:
+                    buffer[row].fill(0)
+        for bidx in batch_indices:
+            buffers = kv_caches[bidx]
+            if not buffers:
+                continue
+            assert len(self.kv_cache_info) == len(buffers), (
+                f"KV buffer count mismatch: expected {len(self.kv_cache_info)} "
+                f"buffers, got {len(buffers)}"
+            )
+            for buff_idx, buf in enumerate(buffers):
+                target_heads = self.kv_cache_info[buff_idx][0][1]
+                if buf.size > 0 and target_heads != buf.shape[1]:
+                    assert buf.shape[1] == 1, (
+                        f"MLA KV head expansion expects num_heads=1 in received "
+                        f"buffer, got {buf.shape[1]} (shape={buf.shape})"
+                    )
+                    buf = np.broadcast_to(
+                        buf, (buf.shape[0], target_heads) + buf.shape[2:]
+                    )
+
+                source = buf[0]
+                target = contiguous_kv[buff_idx][bidx]
+                if source.size == target.size and source.shape == target.shape:
+                    target[...] = source
+                else:
+                    target.fill(0)
+                    target_slices = tuple(slice(0, size) for size in source.shape)
+                    target[target_slices] = source
+
+        _ = self.session.set_data_for_kv_handoff(
+            contiguous_kv,
+            [("batch_index", 0), ("ctx_start", 0)],
+            self.decode_execObj_idx,
+            self.session.decode_buff_map,
+        )
 
     def _run_pipeline_prefill(
         self,
