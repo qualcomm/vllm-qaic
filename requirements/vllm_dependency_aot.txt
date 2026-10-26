@@ -47,7 +47,7 @@ pyyaml
 six>=1.16.0; python_version > '3.11' # transitive dependency of pandas that needs to be the latest version for python 3.12
 setuptools>=77.0.3,<81.0.0; python_version > '3.11' # Setuptools is used by triton, we need to ensure a modern version is installed for 3.12+ so that it does not try to import distutils, which was removed in 3.12
 einops # Required for Qwen2-VL.
-compressed-tensors == 0.15.0 # required for compressed-tensors; vllm v0.28.0 requires 0.17.0, but 0.17.0 pulls torch>=2.10; pinned to 0.15.0 to avoid the torch upgrade
+compressed-tensors == 0.17.0 # required for compressed-tensors; also required by QEfficient's dynamo/weight-free export path. Previously pinned to 0.15.0 to avoid the torch>=2.10 pull, but AOT's own torch pin is now 2.13.0+cpu (see TORCH_VERSION_AOT in scripts/utility.sh), so that constraint no longer applies
 depyf==0.20.0 # required for profiling and debugging with compilation config
 cloudpickle # allows pickling lambda functions in model_executor/models/registry.py
 watchfiles # required for http server to monitor the updates of TLS files

@@ -1852,6 +1852,7 @@ def get_hf_model(
         "continuous_batching": (override_qaic_config or {}).get(
             "continuous_batching", True
         ),
+        "weight_free": (override_qaic_config or {}).get("weight_free", False),
         "qaic_config": qaic_config,
         "trust_remote_code": model_config.trust_remote_code,
         "revision": model_config.revision,
@@ -1910,6 +1911,15 @@ def get_hf_model(
             and _task not in ("score", "classify")
         ):
             args["pooling"] = override_qaic_config["pooling_method"]
+    if args["weight_free"] and model_type not in ("default", "encode", "imagetext"):
+        raise ValueError(
+            "weight_free=True is only supported for causal LM, embedding, "
+            "and image-text-to-text models on the QAIC backend "
+            "(QEFFAutoModelForCausalLM / QEffAutoModel / "
+            f"QEFFAutoModelForImageTextToText); not supported for "
+            f"model_type={model_type!r} (LoRA, speech, and "
+            "sequence-classification models)."
+        )
     max_retries = 8
     retry_count = 0
     import requests
@@ -2043,6 +2053,9 @@ def _get_qaic_compile_config(
         "compile_only": False,
     }
     cfg.update(_clean_config(override_qaic_config, vllm_config))
+    # weight_free is from_pretrained()-only; strip so it doesn't leak into
+    # compile()'s **compiler_options. use_onnx_subfunctions must be passed explicitly.
+    cfg.pop("weight_free", None)
     # update through environment variable
     cfg.update(_clean_config(QAIC_DEVICE_CONFIG[speculative_model_type]))
     # set aic num core as per the hw if not provided
