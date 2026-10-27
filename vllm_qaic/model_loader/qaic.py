@@ -51,6 +51,8 @@ logger = init_logger(__name__)
 
 lock = threading.Lock()
 
+UINT16_MAX = np.iinfo(np.uint16).max  # 65535
+
 
 class QaicCompilationComplete(Exception):
     def __init__(
@@ -907,7 +909,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         if not self.ignore_batch_index:
             batch_inputs["batch_index"][:num_decodes, 0] = batch_indices
             if num_decodes < self.decode_bsz:
-                batch_inputs["batch_index"][num_decodes:] = -1
+                batch_inputs["batch_index"][num_decodes:] = UINT16_MAX
 
         if lora_ids is not None:
             batch_inputs["lora_ids"][:num_decodes] = lora_ids.reshape(num_decodes, 1)
