@@ -14,3 +14,18 @@ QAIC_QUANTIZATION_LIST = [
     "compressed-tensors",
     "mxfp4",
 ]
+
+
+def get_qaic_kv_connector_names(kv_transfer_config) -> set[str]:
+    if kv_transfer_config is None:
+        return set()
+    names = {kv_transfer_config.kv_connector}
+    if kv_transfer_config.kv_connector == "MultiConnector":
+        names.update(
+            child["kv_connector"]
+            for child in kv_transfer_config.kv_connector_extra_config.get(
+                "connectors", []
+            )
+            if "kv_connector" in child
+        )
+    return names

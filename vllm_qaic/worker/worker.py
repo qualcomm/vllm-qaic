@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
-
 import vllm.envs as envs
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CompilationMode
@@ -29,8 +28,7 @@ from vllm.distributed.kv_transfer import (
     get_kv_transfer_group,
     has_kv_transfer_group,
 )
-from vllm.distributed.parallel_state import get_pp_group, get_tp_group
-from vllm_qaic.logger import init_logger
+from vllm.distributed.parallel_state import get_pcp_group, get_pp_group, get_tp_group
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.platforms import current_platform
@@ -49,9 +47,10 @@ from vllm.v1.outputs import (
 )
 from vllm.v1.utils import compute_iteration_details
 from vllm.v1.worker.gpu_worker import init_worker_distributed_environment
-from vllm.v1.worker.worker_base import WorkerBase
-from vllm.v1.worker.worker_base import CompilationTimes
+from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 
+from vllm_qaic.logger import init_logger
+from vllm_qaic.utils import get_qaic_kv_connector_names
 from vllm_qaic.worker.model_runner import (
     QaicModelRunnerAoT,
     QaicModelRunnerPyt,
@@ -96,11 +95,9 @@ class QaicWorker(WorkerBase):
 
     def sleep(self, level: int = 1) -> None:
         logger.warning("sleep mode is not supported on QAIC, ignore it.")
-        pass
 
     def wake_up(self, tags: list[str] | None = None) -> None:
         logger.warning("sleep mode is not supported on QAIC, ignore it.")
-        pass
 
     def _configure_thread_parallelism(self):
         # Configure thread parallelism
@@ -131,8 +128,10 @@ class QaicWorker(WorkerBase):
     def update_config(self, overrides: dict[str, Any]) -> None:
         self.model_runner.update_config(overrides)
 
-    def get_kv_connector_handshake_metadata(self) -> dict | None:
-        """Get KV connector metadata from this worker if available."""
+    def get_kv_connector_handshake_metadata(
+        self,
+    ) -> dict[tuple[int, int], Any] | None:
+        """Get KV connector metadata keyed by pipeline and tensor-parallel rank."""
 
         if not has_kv_transfer_group():
             return None
@@ -143,8 +142,17 @@ class QaicWorker(WorkerBase):
         if (metadata := connector.get_handshake_metadata()) is None:
             return None
 
+        pp_rank = get_pp_group().rank_in_group
         tp_rank = get_tp_group().rank_in_group
-        return {tp_rank: metadata}
+        parallel_config = self.vllm_config.parallel_config
+        if (
+            parallel_config.prefill_context_parallel_size > 1
+            and parallel_config.decode_context_parallel_size > 1
+        ):
+            tp_rank += (
+                get_pcp_group().rank_in_group * parallel_config.tensor_parallel_size
+            )
+        return {(pp_rank, tp_rank): metadata}
 
     @torch.inference_mode()
     def sample_tokens(
@@ -318,7 +326,8 @@ class QaicWorkerPyt(QaicWorker):
                 * self.cache_config.gpu_memory_utilization
             )
             if self.init_snapshot.free_memory < self.requested_memory:
-                GiB = lambda b: round(b / GiB_bytes, 2)
+                def GiB(b):
+                    return round(b / GiB_bytes, 2)
                 raise ValueError(
                     f"Free memory on device "
                     f"({GiB(self.init_snapshot.free_memory)}/"
@@ -341,7 +350,8 @@ class QaicWorkerPyt(QaicWorker):
     @torch.inference_mode
     def determine_available_memory(self) -> int:
         """Profiles peak memory usage to determine how much can be used for KV cache."""
-        GiB = lambda b: b / GiB_bytes
+        def GiB(b):
+            return b / GiB_bytes
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
             # still need a profile run which compiles the model for
             # max_num_batched_tokens
@@ -615,6 +625,7 @@ class QaicWorkerPyt(QaicWorker):
                     raise ValueError(
                         f"Invalid profiler value of {self.profiler_config.profiler}"
                     )
+            assert self.profiler is not None
             # If profiler already initialized, restart profiling but keep
             # the original trace name from the first initialization.
             self.profiler.start()
@@ -629,6 +640,52 @@ class QaicWorkerPyt(QaicWorker):
 
 
 class QaicWorkerAoT(QaicWorker):
+    def _configured_kv_connector_names(self) -> set[str]:
+        return get_qaic_kv_connector_names(self.vllm_config.kv_transfer_config)
+
+    def _expected_num_gpu_blocks(self) -> int:
+        if self.cache_config.num_gpu_blocks_override:
+            return self.cache_config.num_gpu_blocks_override + 1
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        if kv_transfer_config is None:
+            return self.scheduler_config.max_num_seqs + 1
+
+        connector_names = self._configured_kv_connector_names()
+        max_num_seqs = self.scheduler_config.max_num_seqs
+        paged_kv_connectors = {
+            "NixlConnector",
+            "QaicNixlPushConnector",
+            "MooncakeConnector",
+            "MooncakeStoreConnector",
+        }
+        if connector_names & paged_kv_connectors:
+            pages_per_request = -(
+                -self.model_config.max_model_len // self.cache_config.block_size
+            )
+            qpc_slots = (
+                2 * max_num_seqs
+                if kv_transfer_config.kv_role == "kv_producer"
+                else max_num_seqs
+            )
+            return 1 + qpc_slots * pages_per_request
+
+        if (
+            "NixlPushConnector" in connector_names
+            and kv_transfer_config.kv_role == "kv_producer"
+        ):
+            return 2 * max_num_seqs + 1
+
+        if (
+            connector_names & {"NixlConnector", "NixlPullConnector"}
+            and kv_transfer_config.kv_role == "kv_consumer"
+            and kv_transfer_config.get_from_extra_config(
+                "bidirectional_kv_xfer", False
+            )
+        ):
+            return 2 * max_num_seqs + 1
+
+        return max_num_seqs + 1
+
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_cpu_blocks = num_cpu_blocks
         # disable sliding window
@@ -638,7 +695,7 @@ class QaicWorkerAoT(QaicWorker):
         if not self.cache_config.enable_prefix_caching:
             self.cache_config.num_gpu_blocks = num_gpu_blocks
             # Sanity check: AOT requires exact block count; eager is flexible
-            assert num_gpu_blocks == self.scheduler_config.max_num_seqs + 1
+            assert num_gpu_blocks == self._expected_num_gpu_blocks()
             return
         else:
             raise NotImplementedError("prefix caching is not supported on QAIC in V1")
@@ -698,23 +755,33 @@ class QaicWorkerAoT(QaicWorker):
 
     def reload_weights(self) -> None:
         logger.warning("reloading weights is not supported on QAIC in AoT mode.")
-        pass
 
     def determine_available_memory(self) -> int:
-        num_gpu_blocks = (
-            self.cache_config.num_gpu_blocks_override
-            if self.cache_config.num_gpu_blocks_override
-            else self.scheduler_config.max_num_seqs
-        ) + 1
-        # adapted from get_uniform_page_size
-        page_sizes = set(
-            layer.page_size_bytes for layer in self.get_kv_cache_spec().values()
-        )
-        assert len(page_sizes) == 1
-        page_size = page_sizes.pop()
+        num_gpu_blocks = self._expected_num_gpu_blocks()
+        paged_connectors = {
+            "NixlConnector",
+            "QaicNixlPushConnector",
+            "MooncakeConnector",
+            "MooncakeStoreConnector",
+        }
+        specs = self.get_kv_cache_spec()
+        if self._configured_kv_connector_names() & paged_connectors:
+            from vllm.v1.core.kv_cache_utils import (
+                _get_kv_cache_bytes_per_block,
+                get_kv_cache_groups,
+            )
+
+            groups = get_kv_cache_groups(self.vllm_config, specs)
+            return num_gpu_blocks * _get_kv_cache_bytes_per_block(groups)
+
+        page_sizes = {layer.page_size_bytes for layer in specs.values()}
+        if len(page_sizes) != 1:
+            raise AssertionError(
+                f"QAIC legacy KV path requires one page size, got {page_sizes}"
+            )
         return (
             num_gpu_blocks
-            * page_size
+            * page_sizes.pop()
             * self.model_config.get_num_layers(self.parallel_config)
         )
 
@@ -780,4 +847,3 @@ class QaicWorkerAoT(QaicWorker):
 
     def profile(self, is_start: bool = True):
         logger.warning("profile is not supported with QAIC AoT mode.")
-        pass

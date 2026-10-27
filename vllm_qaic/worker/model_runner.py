@@ -21,18 +21,16 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from torch import nn
-
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.forward_context import get_forward_context, set_forward_context
-from vllm_qaic.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, SupportedTask
 from vllm.utils.import_utils import PlaceholderModule
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
     AsyncModelRunnerOutput,
@@ -52,8 +50,11 @@ from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import record_function_or_nullcontext
 from vllm.v1.worker.gpu_input_batch import InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+
 from vllm_qaic import envs
-from vllm_qaic.utils.qaic_utils import compute_max_decode_tokens
+from vllm_qaic.logger import init_logger
+from vllm_qaic.utils import get_qaic_kv_connector_names
+from vllm_qaic.utils.qaic_utils import compute_max_decode_tokens, get_qaic_kv_cache_spec
 
 try:
     import torch_qaic.profile as qaic_profile
@@ -64,12 +65,107 @@ except ImportError:
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-    from vllm_qaic.model_loader.qaic import QaicCausalLM
     from vllm.v1.spec_decode.qaic_draft_model import QaicDraftModelProposer
 
-    from vllm_qaic.spec_decode.dflash_draft_model import QaicDFlashProposer
+    from vllm_qaic.model_loader.qaic import QaicCausalLM
+    from vllm_qaic.spec_decode.dflash_draft_model import QaicDFlashProposer  # noqa: F401
 
 logger = init_logger(__name__)
+
+
+class QaicPrefillBank:
+    """A prefill side guard to make sure during
+    nixl/mooncake transfer one request doesn't override the kv$ of another request"""
+
+    def __init__(self, num_blocks: int) -> None:
+        self.num_blocks = num_blocks
+        self.busy = [False] * num_blocks
+        self.owner: dict[str, int] = {}
+
+    def reserve(self, physical_block: int, req_id: str, drain) -> None:
+        if physical_block <= 0 or physical_block >= self.num_blocks:
+            raise RuntimeError(
+                "Qaic Prefill Bank physical block is out of range: "
+                f"physical_block={physical_block}, usable_block=1...."
+                f"{self.num_blocks - 1}"
+            )
+
+        if (self.owner.get(req_id)) == physical_block:
+            return
+
+        timeout_s = float(os.environ.get("QAIC_PREFILL_MEMPOOL_WAIT_TIMEOUT_S", "30"))
+        deadline = time.monotonic() + timeout_s
+        while self.busy[physical_block]:
+            drain()
+            if not self.busy[physical_block]:
+                break
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    "Qaic Prefill Bank timed out while waiting for connector to "
+                    f"finish sending physical block : {physical_block}"
+                )
+            time.sleep(0.01)
+
+        # assign a physical block to current req_id
+        self.busy[physical_block] = True
+        self.owner[req_id] = physical_block
+
+    def mark_finished(self, req_ids) -> None:
+        """Release direct-view blocks after connector completion."""
+        for req_id in req_ids:
+            physical_block = self.owner.pop(req_id, None)
+            if physical_block is not None:
+                self.busy[physical_block] = False
+
+
+class QaicQpcSlotBank:
+    """Own private contiguous QPC retained-state slots."""
+
+    def __init__(self, num_slots: int) -> None:
+        if num_slots <= 0:
+            raise ValueError("QaicQpcSlotBank requires at least one QPC slot")
+        self._owner_by_slot: list[str | None] = [None] * num_slots
+        self._slot_by_req: dict[str, int] = {}
+
+    @property
+    def num_slots(self) -> int:
+        return len(self._owner_by_slot)
+
+    def get(self, req_id: str) -> int | None:
+        return self._slot_by_req.get(req_id)
+
+    def acquire(self, req_id: str, drain) -> int:
+        """Return a stable QPC slot for ``req_id``, waiting for a free slot."""
+        assigned = self._slot_by_req.get(req_id)
+        if assigned is not None:
+            return assigned
+
+        timeout_s = float(os.environ.get("QAIC_PREFILL_MEMPOOL_WAIT_TIMEOUT_S", "30"))
+        deadline = time.monotonic() + timeout_s
+        while True:
+            for slot, owner in enumerate(self._owner_by_slot):
+                if owner is None:
+                    self._owner_by_slot[slot] = req_id
+                    self._slot_by_req[req_id] = slot
+                    return slot
+            drain()
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    "QAIC timed out waiting for a private QPC slot; public KV "
+                    "pages must not be reused to resolve this pressure."
+                )
+            time.sleep(0.01)
+
+    def release(self, req_id: str) -> int | None:
+        """Release a private slot; public page ownership is unaffected."""
+        slot = self._slot_by_req.pop(req_id, None)
+        if slot is not None:
+            self._owner_by_slot[slot] = None
+        return slot
+
+    def release_finished(self, req_ids) -> None:
+        for req_id in req_ids:
+            self.release(req_id)
 
 
 class QaicExecuteModelState(NamedTuple):
@@ -174,8 +270,8 @@ class QaicAsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         grammar_output: GrammarOutput | None,
         kv_connector_output: KVConnectorOutput,
         kv_connector_metadata=None,
-        input_batch_req_ids=None,
-        input_batch_req_id_to_index=None,
+        input_batch_req_ids: list[str] | None = None,
+        input_batch_req_id_to_index: dict[str, int] | None = None,
     ):
         self._model_runner = model_runner
         self._state = state
@@ -201,13 +297,13 @@ class QaicAsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         # Disagg prefill: unblock the next batch early in sample_tokens() and
         # return a dummy sampler output since sampled tokens are not needed.
         if mr.is_async_kv_producer:
-            # 1. Wait for inference completion
+            req_ids = self._input_batch_req_ids or []
             mr.complete_all_inf(
                 state.pending_prefill_exec_queue, state.num_decodes_executed
             )
             # 2. Create dummy sampler output
             sampler_output = mr._make_sampler_output(
-                torch.zeros((len(self._input_batch_req_ids), 1), dtype=torch.int64)
+                torch.zeros((len(req_ids), 1), dtype=torch.int64)
             )
             # 3. Discard sampled tokens for partial prefills
             kv_connector_output = self._kv_connector_output
@@ -217,7 +313,7 @@ class QaicAsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
             valid_sampled_token_ids = sampler_output.sampled_token_ids.tolist()
             for i in discard_sampled_tokens_req_indices:
                 valid_sampled_token_ids[int(i)].clear()
-            # 4. Save KV Cache to connector
+            mr._scatter_paged_prefill_kv()
             if has_kv_transfer_group():
                 kv_connector = get_kv_transfer_group()
                 # Partial or full KV are handled by the connector metadata
@@ -229,7 +325,7 @@ class QaicAsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
                     connector_metadata=self._kv_connector_metadata,
                 )
             self._output = ModelRunnerOutput(
-                req_ids=self._input_batch_req_ids,
+                req_ids=req_ids,
                 req_id_to_index=self._input_batch_req_id_to_index,
                 sampled_token_ids=valid_sampled_token_ids,
                 logprobs=None,
@@ -534,6 +630,24 @@ class QaicModelRunnerAoT(GPUModelRunner):
         self.kv_caches: list[list] = [
             [] for _ in range(vllm_config.scheduler_config.max_num_seqs)
         ]
+        self._kv_caches_by_physical_block: list[list] = []
+        self.kv_cache_layers: dict[str, torch.Tensor | list[torch.Tensor]] = {}
+        self._paged_kv_storage: torch.Tensor | None = None
+        self._paged_layer_tensors: dict[int, torch.Tensor] = {}
+        self._paged_layer_group_by_idx: dict[int, int] = {}
+        self._paged_block_table_idx_by_group: dict[int, int] = {}
+        self._qpc_view_specs: list[tuple[int, int, tuple[int, ...], int, bool]] = []
+        self._paged_pending_scatter: dict[
+            str, tuple[int, dict[int, np.ndarray], int]
+        ] = {}
+        self.prefill_bank: QaicPrefillBank | None = None
+        self.qpc_slot_bank: QaicQpcSlotBank | None = None
+        self._pending_finished_sending: set[str] = set()
+        self._kv_connector_name: str | None = (
+            vllm_config.kv_transfer_config.kv_connector
+            if vllm_config.kv_transfer_config
+            else None
+        )
         self.num_decode_tokens = 0
         self.max_decode_tokens = compute_max_decode_tokens(self.speculative_config)
         # Variable-K decode specializations: for ngram/suffix we compile two
@@ -853,12 +967,20 @@ class QaicModelRunnerAoT(GPUModelRunner):
         token_indices = (
             positions_np + req_indices * self.input_batch.token_ids_cpu.shape[1]
         )
-        torch.index_select(
-            self.input_batch.token_ids_cpu_tensor.flatten(),
-            0,
-            torch.from_numpy(token_indices),
-            out=self.input_ids.cpu[:total_num_scheduled_tokens],
-        )
+        token_source = self.input_batch.token_ids_cpu_tensor.flatten()
+        token_indices_tensor = torch.from_numpy(token_indices)
+        token_output = self.input_ids.cpu[:total_num_scheduled_tokens]
+        if token_source.dtype == token_output.dtype:
+            torch.index_select(
+                token_source,
+                0,
+                token_indices_tensor,
+                out=token_output,
+            )
+        else:
+            token_output.copy_(
+                torch.index_select(token_source, 0, token_indices_tensor)
+            )
         self.batch_indices = (
             self.input_batch.block_table[0].get_numpy_array()[:num_reqs, 0] - 1
         )
@@ -982,6 +1104,251 @@ class QaicModelRunnerAoT(GPUModelRunner):
 
         yield
 
+    def kv_connector_no_forward(
+        self, scheduler_output: SchedulerOutput, vllm_config: VllmConfig
+    ) -> ModelRunnerOutput:
+        """
+        Need to override this function as the base class doesn't know of
+        our prefill bank in case of Nixl/Mooncake is being used
+        """
+        with (
+            set_forward_context(None, vllm_config),
+            self.maybe_get_kv_connector_output(
+                scheduler_output,
+                wait_for_save=False,
+                # Async kv producers receive connector metadata
+                # when save_kv_layer is called. This path has no
+                # forward & saves immediately. so preserve the
+                # scheduler metadata here
+                connector_metadata=scheduler_output.kv_connector_metadata,
+            ) as kv_connector_output,
+        ):
+            pass
+        if self.prefill_bank is not None and kv_connector_output is not None:
+            self._merge_pending_finished_sending(kv_connector_output)
+            self.prefill_bank.mark_finished(kv_connector_output.finished_sending or ())
+
+        return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
+
+    def _reserve_prefill_bank(
+        self,
+        physical_block_ids: np.ndarray,
+        req_ids: list[str],
+    ) -> np.ndarray | None:
+        """
+        Reserve physical block ids for req_ids for Nixl/Mooncake
+        """
+        if not self._uses_torch_view_kv_connector() or physical_block_ids.size == 0:
+            return None
+        if self._uses_paged_public_kv():
+            assert self.qpc_slot_bank is not None
+            slots = np.asarray(
+                [
+                    self.qpc_slot_bank.acquire(req_id, lambda: None)
+                    for req_id in req_ids
+                ],
+                dtype=np.int64,
+            )
+            for slot in slots:
+                assert self.kv_caches[int(slot)]
+            return slots
+        if len(req_ids) != physical_block_ids.size:
+            raise RuntimeError("Qaic Prefill Bank needs one request per physical block")
+        for qpc_slot, (physical_block_id, req_id) in enumerate(
+            zip(physical_block_ids, req_ids, strict=True)
+        ):
+            physical_block = int(physical_block_id) + 1
+            if self.prefill_bank is not None:
+                self.prefill_bank.reserve(
+                    physical_block, req_id, self._drain_prefill_bank
+                )
+            self.kv_caches[qpc_slot] = self._kv_caches_by_physical_block[physical_block]
+        return None
+
+    def _get_layer_page_ids(
+        self, request_index: int, token_count: int, layer_idx: int
+    ) -> np.ndarray:
+        group_idx = self._paged_layer_group_by_idx[layer_idx]
+        group = self.kv_cache_config.kv_cache_groups[group_idx]
+        table_idx = self._paged_block_table_idx_by_group[group_idx]
+        requested_pages = -(-token_count // group.kv_cache_spec.block_size)
+        block_table = self.input_batch.block_table[table_idx].get_numpy_array()
+        page_ids = block_table[request_index, :requested_pages]
+        return page_ids[page_ids > 0]
+
+    def _gather_paged_consumer_kv(
+        self,
+        req_ids: list[str],
+        request_indices: np.ndarray,
+        token_counts: np.ndarray,
+    ) -> np.ndarray:
+        """Gather public pages into private consumer QPC slots."""
+        assert self.qpc_slot_bank is not None
+        page_size = self.cache_config.block_size
+        slots: list[int] = []
+        for req_id, request_index, token_count in zip(
+            req_ids, request_indices, token_counts, strict=True
+        ):
+            slot = self.qpc_slot_bank.acquire(req_id, lambda: None)
+            slots.append(slot)
+            for (layer_idx, kv_idx, _, _, is_attention), destination in zip(
+                self._qpc_view_specs, self.kv_caches[slot], strict=True
+            ):
+                public_layer = self._paged_layer_tensors[layer_idx]
+                page_ids = self._get_layer_page_ids(
+                    int(request_index), int(token_count), layer_idx
+                )
+                if page_ids.size == 0:
+                    raise RuntimeError(
+                        f"No received public KV pages for request {req_id}"
+                    )
+                layer_token_count = min(
+                    int(token_count), int(page_ids.size) * page_size
+                )
+                if not is_attention:
+                    destination.fill(0)
+                    source = public_layer[kv_idx, int(page_ids[-1])].numpy()
+                    target = destination.reshape(-1)
+                    copy_bytes = min(source.size, target.size)
+                    target[:copy_bytes] = source[:copy_bytes]
+                    continue
+                layer_capacity = int(destination.shape[-2])
+                layer_token_count = min(layer_token_count, layer_capacity)
+                layer_page_count = -(-layer_token_count // page_size)
+                layer_page_ids = (
+                    page_ids[-layer_page_count:]
+                    if layer_capacity < token_count
+                    else page_ids[:layer_page_count]
+                )
+                destination.fill(0)
+                for logical_page, page_id in enumerate(layer_page_ids):
+                    start = logical_page * page_size
+                    valid = min(page_size, layer_token_count - start)
+                    if valid <= 0:
+                        break
+                    destination_page = destination[..., start : start + valid, :]
+                    source = public_layer[kv_idx, int(page_id)].numpy()
+                    destination_page[...] = source[: destination_page.size].reshape(
+                        destination_page.shape
+                    )
+        return np.asarray(slots, dtype=np.int64)
+
+    def _scatter_paged_prefill_kv(self) -> None:
+        """Pack completed private QPC KV slots into public pages."""
+        if not self._uses_paged_public_kv() or not self._paged_pending_scatter:
+            return
+        page_size = self.cache_config.block_size
+        assert self.qpc_slot_bank is not None
+        for req_id, (slot, page_ids_by_group, num_tokens) in list(
+            self._paged_pending_scatter.items()
+        ):
+            qpc_buffers = self.kv_caches[slot]
+            for (layer_idx, kv_idx, _, _, is_attention), source in zip(
+                self._qpc_view_specs, qpc_buffers, strict=True
+            ):
+                public_pages = self._paged_layer_tensors[layer_idx][kv_idx].numpy()
+                page_ids = page_ids_by_group[
+                    self._paged_layer_group_by_idx.get(layer_idx, 0)
+                ]
+                qpc_state = source[0]
+                if not is_attention:
+                    destination = public_pages[int(page_ids[-1])]
+                    source_state = np.ascontiguousarray(qpc_state).reshape(-1)
+                    np.copyto(
+                        destination[: source_state.size],
+                        source_state,
+                        casting="no",
+                    )
+                    destination[source_state.size :].fill(0)
+                    continue
+                layer_capacity = int(qpc_state.shape[-2])
+                layer_token_count = min(
+                    int(num_tokens), layer_capacity, int(page_ids.size) * page_size
+                )
+                layer_page_count = -(-layer_token_count // page_size)
+                layer_page_ids = (
+                    page_ids[-layer_page_count:]
+                    if layer_capacity < num_tokens
+                    else page_ids[:layer_page_count]
+                )
+                full_pages, partial_tokens = divmod(
+                    layer_token_count, page_size
+                )
+
+                logical_page = 0
+                while logical_page < full_pages:
+                    first_page_id = int(layer_page_ids[logical_page])
+                    run_pages = 1
+                    while (
+                        logical_page + run_pages < full_pages
+                        and int(layer_page_ids[logical_page + run_pages])
+                        == first_page_id + run_pages
+                    ):
+                        run_pages += 1
+
+                    start = logical_page * page_size
+                    stop = start + run_pages * page_size
+                    source_pages = qpc_state[:, start:stop, :].reshape(
+                        qpc_state.shape[0], run_pages, page_size, qpc_state.shape[-1]
+                    )
+                    source_pages = np.ascontiguousarray(
+                        source_pages.transpose(1, 0, 2, 3).reshape(run_pages, -1)
+                    )
+                    destination_pages = public_pages[
+                        first_page_id : first_page_id + run_pages
+                    ]
+                    if destination_pages.shape[1] != source_pages.shape[1]:
+                        destination_pages.fill(0)
+                        destination_pages[:, : source_pages.shape[1]] = source_pages
+                    else:
+                        np.copyto(destination_pages, source_pages, casting="no")
+                    logical_page += run_pages
+
+                if partial_tokens:
+                    page_id = int(layer_page_ids[logical_page])
+                    start = logical_page * page_size
+                    source_page = np.ascontiguousarray(
+                        qpc_state[:, start : start + partial_tokens, :]
+                    ).reshape(-1)
+                    destination_page = public_pages[page_id]
+                    np.copyto(
+                        destination_page[: source_page.size],
+                        source_page,
+                        casting="no",
+                    )
+                    destination_page[source_page.size :].fill(0)
+            self.qpc_slot_bank.release(req_id)
+            del self._paged_pending_scatter[req_id]
+
+    def _drain_prefill_bank(self) -> None:
+        """
+        Utility function to drain/free the prefill bankk
+        """
+        if (
+            self.prefill_bank is None
+            or not self.is_kv_producer
+            or not has_kv_transfer_group()
+        ):
+            return
+        finished_sending, _ = get_kv_transfer_group().get_finished(set())
+        if not finished_sending:
+            return
+        self.prefill_bank.mark_finished(finished_sending)
+        self._pending_finished_sending.update(finished_sending)
+
+    def _merge_pending_finished_sending(
+        self,
+        kv_connector_output: KVConnectorOutput | None,
+    ) -> None:
+        if kv_connector_output is None or not self._pending_finished_sending:
+            return
+        if kv_connector_output.finished_sending is None:
+            kv_connector_output.finished_sending = set()
+        # Let vllm scheduiler to eliminate the resources for the prefill requests
+        # which we have marked as finished out of loop
+        kv_connector_output.finished_sending.update(self._pending_finished_sending)
+        self._pending_finished_sending.clear()
+
     def create_logits_np(self, batch_size, vocab_size, num_decode_tokens: int = 1):
         # Match the QPC logits output binding dtype (float16 for mxfp6/mxint8
         # models, float32 for full-precision). The read-back hidden_states are
@@ -1072,6 +1439,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 # SpD with K>0: already garbage-masked to 2D (signal_tokens, vocab)
                 hidden_states = torch.from_numpy(hidden_states_decode)
             else:
+                assert hidden_states_decode is not None
                 hidden_states = torch.from_numpy(
                     hidden_states_decode[:num_decodes].squeeze(1)
                 )
@@ -1119,6 +1487,9 @@ class QaicModelRunnerAoT(GPUModelRunner):
         scheduler_output: SchedulerOutput,
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
+        if self.is_kv_consumer and self.qpc_slot_bank is not None:
+            self.qpc_slot_bank.release_finished(scheduler_output.finished_req_ids)
+
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         with (
             record_function_or_nullcontext("qaic_model_runner: preprocess"),
@@ -1292,6 +1663,16 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 decode_lora_ids = req_lora_mapping[: self.num_decodes].astype(np.int64)
                 prefill_lora_ids = req_lora_mapping[self.num_decodes :].astype(np.int64)
 
+            consumer_qpc_slots = None
+            if self._uses_paged_public_kv() and self.is_kv_consumer:
+                active_request_indices = np.arange(num_reqs, dtype=np.int64)
+                consumer_qpc_slots = self._gather_paged_consumer_kv(
+                    self.input_batch.req_ids[:num_reqs],
+                    active_request_indices,
+                    self.input_batch.num_prompt_tokens[:num_reqs],
+                )
+                decode_block_ids = consumer_qpc_slots[:num_scheduled_tokens]
+
             _dflash_prefill = (
                 self.speculative_config is not None
                 and self.speculative_config.use_dflash()
@@ -1299,6 +1680,73 @@ class QaicModelRunnerAoT(GPUModelRunner):
             )
 
             if prefill_input_ids.size > 0:
+                prefill_req_ids = self.input_batch.req_ids[self.num_decodes : num_reqs]
+                qaic_prefill_slot_ids = np.arange(
+                    len(prefill_req_ids),
+                    dtype=prefill_block_ids.dtype,
+                )
+                qpc_slots = self._reserve_prefill_bank(
+                    prefill_block_ids, prefill_req_ids
+                )
+                prefill_batch_indices = (
+                    qpc_slots
+                    if qpc_slots is not None
+                    else (
+                        qaic_prefill_slot_ids
+                        if self._uses_torch_view_kv_connector()
+                        else prefill_block_ids
+                    )
+                )
+                if self._uses_paged_public_kv() and self.is_kv_producer:
+                    assert qpc_slots is not None
+                    prompt_lens = self.input_batch.num_prompt_tokens[
+                        self.num_decodes : num_reqs
+                    ]
+                    for request_index, (req_id, qpc_slot, prompt_len) in enumerate(
+                        zip(
+                            prefill_req_ids,
+                            qpc_slots,
+                            prompt_lens,
+                            strict=True,
+                        )
+                    ):
+                        if prefill_is_partial[request_index]:
+                            continue
+                        request_index += self.num_decodes
+                        page_ids_by_group: dict[int, np.ndarray] = {}
+                        for group_idx, group in enumerate(
+                            self.kv_cache_config.kv_cache_groups
+                        ):
+                            table_idx = self._paged_block_table_idx_by_group.get(
+                                group_idx
+                            )
+                            if table_idx is None:
+                                continue
+                            requested_pages = -(
+                                -int(prompt_len) // group.kv_cache_spec.block_size
+                            )
+                            block_table = self.input_batch.block_table[
+                                table_idx
+                            ].get_numpy_array()
+                            page_ids = block_table[
+                                request_index, :requested_pages
+                            ].astype(np.int64, copy=True)
+                            page_ids_by_group[group_idx] = page_ids[page_ids > 0]
+                        if not any(
+                            page_ids.size > 0 for page_ids in page_ids_by_group.values()
+                        ):
+                            raise RuntimeError(
+                                f"No public KV page allocated for request {req_id}"
+                            )
+                        self._paged_pending_scatter[req_id] = (
+                            int(qpc_slot),
+                            page_ids_by_group,
+                            int(prompt_len),
+                        )
+
+                if consumer_qpc_slots is not None:
+                    prefill_batch_indices = consumer_qpc_slots[self.num_decodes :]
+
                 hidden_states_prefill = (
                     self.create_logits_np(len(prefill_cum_sum), self.model.vocab_size)
                     if not self.is_kv_consumer
@@ -1328,7 +1776,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 pending_prefill_exec_queue = self.model(
                     input_ids=prefill_input_ids,
                     positions=prefill_positions,
-                    batch_indices=prefill_block_ids,
+                    batch_indices=prefill_batch_indices,
                     is_prompt=True,
                     prefill_cum_sum=prefill_cum_sum,
                     mm_kwargs_list=mm_kwargs_list,
@@ -1832,6 +2280,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
 
         if req_ids is None:
             req_ids = self.input_batch.req_ids
+        assert req_ids is not None
 
         for req_id in req_ids:
             mm_embeds_req: list[torch.Tensor] = []
@@ -1937,6 +2386,292 @@ class QaicModelRunnerAoT(GPUModelRunner):
 
         return tuple(tasks)
 
+    def _configured_kv_connector_names(self) -> set[str]:
+        return get_qaic_kv_connector_names(self.vllm_config.kv_transfer_config)
+
+    def _uses_torch_view_kv_connector(self) -> bool:
+        return bool(
+            self._configured_kv_connector_names()
+            & {
+                "NixlConnector",
+                "MooncakeConnector",
+                "MooncakeStoreConnector",
+                "NixlPushConnector",
+                "QaicNixlPushConnector",
+            }
+        )
+
+    def _uses_paged_public_kv(self) -> bool:
+        return bool(
+            self._configured_kv_connector_names()
+            & {
+                "NixlConnector",
+                "QaicNixlPushConnector",
+                "MooncakeConnector",
+                "MooncakeStoreConnector",
+            }
+        )
+
+    def _uses_prefill_bank(self) -> bool:
+        return bool(
+            self._configured_kv_connector_names()
+            & {
+                "NixlConnector",
+                "MooncakeConnector",
+                "MooncakeStoreConnector",
+                "NixlPushConnector",
+                "QaicNixlPushConnector",
+            }
+        ) and self.is_kv_producer
+
+    @staticmethod
+    def _parse_kv_layer_idx(layer_name: str) -> int:
+        for part in layer_name.replace(".", "_").split("_"):
+            if part.isdigit():
+                return int(part)
+        raise ValueError(f"Unable to parse KV layer index from {layer_name}")
+
+    def _collect_qpc_kv_binding_info(
+        self,
+    ) -> tuple[
+        list[tuple[int, int, tuple[int, ...], int, bool]],
+        torch.dtype | None,
+        np.dtype | None,
+    ]:
+        decode_buff_map = self.model.session.decode_buff_map
+        view_specs = []
+        torch_dtype: torch.dtype | None = None
+        qpc_np_dtype: np.dtype | None = None
+        for name, _ in decode_buff_map:
+            layer_idx = self._parse_kv_layer_idx(name)
+            shape, np_dtype, _ = self.model.get_io_shape_and_dtype(name)
+            qpc_shape = tuple(shape)
+            is_attention = name.startswith(("past_key", "past_value"))
+            if is_attention and len(qpc_shape) != 4:
+                raise RuntimeError(
+                    f"Invalid attention KV binding shape: {name} {qpc_shape}"
+                )
+            if not is_attention and len(qpc_shape) not in (2, 3):
+                raise NotImplementedError(
+                    f"Unsupported QAIC recurrent KV binding {name} {qpc_shape}"
+                )
+            if torch_dtype is None:
+                torch_dtype = torch.from_numpy(np.empty(0, dtype=np_dtype)).dtype
+                qpc_np_dtype = np.dtype(np_dtype)
+            elif np.dtype(np_dtype).itemsize != qpc_np_dtype.itemsize:  # type: ignore[union-attr]
+                raise RuntimeError(
+                    "QAIC KV retained-state bindings have mixed element sizes: "
+                    f"{qpc_np_dtype} and {np.dtype(np_dtype)}"
+                )
+
+            kv_idx = 0 if not is_attention else 0 if name.startswith("past_key") else 1
+            view_specs.append(
+                (
+                    layer_idx,
+                    kv_idx,
+                    qpc_shape,
+                    int(np.prod(qpc_shape[1:])),
+                    is_attention,
+                )
+            )
+        return view_specs, torch_dtype, qpc_np_dtype
+
+    def _initialize_paged_public_kv(
+        self,
+        kv_cache_config: KVCacheConfig,
+        view_specs: list[tuple[int, int, tuple[int, ...], int, bool]],
+        torch_dtype: torch.dtype,
+        qpc_np_dtype: np.dtype,
+        layer_width_by_idx: dict[int, int],
+        public_page_payload: int,
+    ) -> dict[str, torch.Tensor | list[torch.Tensor]]:
+        """Build public pages from QPC geometry, not logical KV byte sizes.
+
+        QAIC mxint8 bindings include padding/constants that vLLM's logical
+        KVCacheTensor does not describe. Keep one shared block-major buffer,
+        while exposing per-layer views for NIXL registration.
+        """
+        element_size = torch.empty((), dtype=torch_dtype).element_size()
+        layer_indices = sorted(layer_width_by_idx)
+        layer_offsets: dict[int, int] = {}
+        block_bytes = 0
+        for layer_idx in layer_indices:
+            layer_offsets[layer_idx] = block_bytes
+            block_bytes += (
+                layer_width_by_idx[layer_idx] * public_page_payload * element_size
+            )
+        # Store every layer's public page in each physical block so views do
+        # not depend on vLLM's logical page stride or dtype packing.
+        raw_size = kv_cache_config.num_blocks * block_bytes
+        raw = torch.empty(raw_size // element_size, dtype=torch_dtype)
+        layer_tensors: dict[int, torch.Tensor] = {}
+        kv_cache_layers: dict[str, torch.Tensor | list[torch.Tensor]] = {}
+
+        for tensor in kv_cache_config.kv_cache_tensors:
+            layer_names = getattr(tensor, "layers", None) or tensor.shared_by
+            for layer_name in layer_names:
+                layer_idx = self._parse_kv_layer_idx(layer_name)
+                width = layer_width_by_idx[layer_idx]
+                view = torch.as_strided(
+                    raw,
+                    size=(kv_cache_config.num_blocks, width, public_page_payload),
+                    stride=(
+                        block_bytes // element_size,
+                        public_page_payload,
+                        1,
+                    ),
+                    storage_offset=layer_offsets[layer_idx] // element_size,
+                )
+                layer_tensors[layer_idx] = view.transpose(0, 1)
+                kv_cache_layers[layer_name] = view
+
+        from vllm.v1.kv_cache_interface import (
+            KVCacheSpecKind,
+            get_kv_cache_spec_kind,
+        )
+
+        # InputBatch omits encoder-only groups, so its block-table index can
+        # differ from the full KV-cache group index used by HMA metadata.
+        self._paged_layer_group_by_idx = {}
+        self._paged_block_table_idx_by_group = {}
+        block_table_idx = 0
+        available_block_tables = len(self.input_batch.block_table.block_tables)
+        for group_idx, group in enumerate(kv_cache_config.kv_cache_groups):
+            if (
+                get_kv_cache_spec_kind(group.kv_cache_spec)
+                == KVCacheSpecKind.ENCODER_ONLY_ATTENTION
+            ) or block_table_idx >= available_block_tables:
+                continue
+            self._paged_block_table_idx_by_group[group_idx] = block_table_idx
+            block_table_idx += 1
+            for layer_name in group.layer_names:
+                self._paged_layer_group_by_idx[self._parse_kv_layer_idx(layer_name)] = (
+                    group_idx
+                )
+        num_qpc_slots = self.scheduler_config.max_num_seqs
+        self.kv_caches = [
+            [
+                np.empty((1, *qpc_shape[1:]), dtype=qpc_np_dtype)
+                for _, _, qpc_shape, _, _ in view_specs
+            ]
+            for _ in range(num_qpc_slots)
+        ]
+        self._kv_caches_by_physical_block = []
+        self._paged_kv_storage = raw
+        self._paged_layer_tensors = layer_tensors
+        self._qpc_view_specs = view_specs
+        self.qpc_slot_bank = QaicQpcSlotBank(num_qpc_slots)
+        self.prefill_bank = None
+        return kv_cache_layers
+
+    def _build_torch_view_kv_caches(
+        self,
+        kv_cache_config: KVCacheConfig,
+    ) -> dict[str, torch.Tensor | list[torch.Tensor]]:
+        num_blocks = int(kv_cache_config.num_blocks)
+        if num_blocks <= 1:
+            raise RuntimeError(
+                "QAIC NIXL KV cache needs at least one null block and one data block."
+            )
+
+        view_specs, torch_dtype, qpc_np_dtype = self._collect_qpc_kv_binding_info()
+
+        if torch_dtype is None or qpc_np_dtype is None:
+            raise RuntimeError("QAIC NIXL KV bindings did not expose a dtype")
+
+        page_size = int(self.cache_config.block_size)
+        qpc_page_payload_by_layer: dict[int, int] = {}
+        layer_width_by_idx: dict[int, int] = {}
+        for layer_idx, kv_idx, qpc_shape, _, is_attention in view_specs:
+            if is_attention:
+                if qpc_shape[2] < page_size:
+                    raise RuntimeError(
+                        f"QPC KV context {qpc_shape[2]} is smaller than page size "
+                        f"{page_size} for layer {layer_idx}"
+                    )
+                page_payload = int(qpc_shape[1]) * page_size * int(qpc_shape[3])
+            else:
+                page_payload = int(np.prod(qpc_shape[1:])) * qpc_np_dtype.itemsize
+            previous_payload = qpc_page_payload_by_layer.setdefault(
+                layer_idx, page_payload
+            )
+            layer_width_by_idx[layer_idx] = max(
+                layer_width_by_idx.get(layer_idx, 0), kv_idx + 1
+            )
+            if previous_payload != page_payload:
+                raise RuntimeError(
+                    "QAIC K/V bindings have inconsistent page payloads for "
+                    f"layer {layer_idx}: {previous_payload} and {page_payload}"
+                )
+
+        public_page_payload = max(qpc_page_payload_by_layer.values())
+        if self._uses_paged_public_kv():
+            return self._initialize_paged_public_kv(
+                kv_cache_config,
+                view_specs,
+                torch_dtype,
+                qpc_np_dtype,
+                layer_width_by_idx,
+                public_page_payload,
+            )
+
+        layer_tensors: dict[int, torch.Tensor] = {}
+        kv_cache_layers: dict[str, torch.Tensor | list[torch.Tensor]] = {}
+
+        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+            layer_names = getattr(kv_cache_tensor, "layers", None)
+            if layer_names is None:
+                layer_names = kv_cache_tensor.shared_by
+            if not layer_names:
+                continue
+
+            for layer_name in layer_names:
+                layer_idx = self._parse_kv_layer_idx(layer_name)
+                if layer_idx not in qpc_page_payload_by_layer:
+                    raise RuntimeError(
+                        f"No QPC page payload found for KV layer {layer_name}"
+                    )
+                layer_tensors.setdefault(
+                    layer_idx,
+                    torch.empty(
+                        (
+                            layer_width_by_idx[layer_idx],
+                            num_blocks,
+                            public_page_payload,
+                        ),
+                        dtype=torch_dtype,
+                    ),
+                )
+                kv_cache_layers[layer_name] = layer_tensors[layer_idx].transpose(0, 1)
+
+        if not layer_tensors:
+            raise RuntimeError("No KV cache layers found for NIXL registration.")
+
+        self.kv_caches = [[] for _ in range(self.scheduler_config.max_num_seqs)]
+        self._kv_caches_by_physical_block = [[] for _ in range(num_blocks)]
+        for physical_block in range(num_blocks):
+            self._kv_caches_by_physical_block[physical_block] = [
+                layer_tensors[layer_idx][kv_idx, physical_block, :qpc_payload]
+                .reshape((1, *qpc_shape[1:]))
+                .numpy()
+                for layer_idx, kv_idx, qpc_shape, qpc_payload, _ in view_specs
+            ]
+
+        for qpc_slot in range(self.scheduler_config.max_num_seqs):
+            physical_block = qpc_slot + 1
+            if physical_block >= num_blocks:
+                raise RuntimeError(
+                    "Not enough vLLM KV blocks to map QAIC slot to non-null block: "
+                    f"qpc_slot={qpc_slot}, num_blocks={num_blocks}"
+                )
+            self.kv_caches[qpc_slot] = self._kv_caches_by_physical_block[physical_block]
+
+        self.prefill_bank = (
+            QaicPrefillBank(num_blocks) if self._uses_prefill_bank() else None
+        )
+
+        return kv_cache_layers
+
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Initialize KV cache based on `kv_cache_config`.
@@ -1946,7 +2681,26 @@ class QaicModelRunnerAoT(GPUModelRunner):
         """
         self.kv_cache_config = kv_cache_config
         if has_kv_transfer_group():
-            get_kv_transfer_group().register_kv_caches(self.kv_caches)
+            if self._uses_paged_public_kv():
+                from vllm.v1.kv_cache_interface import (
+                    KVCacheSpecKind,
+                    get_kv_cache_spec_kind,
+                )
+
+                kernel_block_sizes = [
+                    group.kv_cache_spec.block_size
+                    for group in kv_cache_config.kv_cache_groups
+                    if get_kv_cache_spec_kind(group.kv_cache_spec)
+                    != KVCacheSpecKind.ENCODER_ONLY_ATTENTION
+                ]
+                self.may_reinitialize_input_batch(
+                    kv_cache_config, kernel_block_sizes
+                )
+            if self._uses_torch_view_kv_connector():
+                self.kv_cache_layers = self._build_torch_view_kv_caches(kv_cache_config)
+                get_kv_transfer_group().register_kv_caches(self.kv_cache_layers)
+            else:
+                get_kv_transfer_group().register_kv_caches(self.kv_caches)
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """
@@ -1956,18 +2710,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
             KVCacheSpec: A dictionary mapping layer names to their KV cache
             format. Layers that do not need KV cache are not included.
         """
-        block_size = self.cache_config.block_size
-        kv_cache_spec: dict[str, KVCacheSpec] = {}
-        n_layers = self.model_config.get_num_layers(self.parallel_config)
-        for i in range(n_layers):
-            layer_name = f"layer_{i}"
-            kv_cache_spec[layer_name] = FullAttentionSpec(
-                block_size=block_size,
-                num_kv_heads=self.num_kv_heads,
-                head_size=self.head_size,
-                dtype=self.kv_cache_dtype,
-            )
-        return kv_cache_spec
+        return get_qaic_kv_cache_spec(self.vllm_config, self.kv_cache_dtype)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         if not self.lora_manager:
@@ -1981,16 +2724,21 @@ class QaicModelRunnerAoT(GPUModelRunner):
         finished_req_ids,
         wait_for_save: bool = True,
         clear_metadata: bool = False,
+        connector_metadata=None,
         **kwargs,
     ) -> None:
+        save_kwargs = dict(kwargs)
+        if connector_metadata is not None:
+            kv_connector.bind_connector_metadata(connector_metadata)
+            save_kwargs["connector_metadata"] = connector_metadata
         kv_connector.save_kv_layer(
             layer_name=None,
             kv_layer=None,
             attn_metadata=None,
-            **kwargs,
+            **save_kwargs,
         )
         if wait_for_save:
-            kv_connector.wait_for_save(**kwargs)
+            kv_connector.wait_for_save()
         output.finished_sending, output.finished_recving = kv_connector.get_finished(
             finished_req_ids
         )
