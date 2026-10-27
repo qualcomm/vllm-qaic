@@ -11,16 +11,16 @@ NOTE: start a supported chat completion model server with `vllm serve`, e.g.
 AOT:
 vllm serve TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
     --max-model-len 256 --max-num-seq 16 \
-    --long-prefill-token-threshold 128 \
     --quantization mxfp6 --kv-cache-dtype mxint8 \
     --no-enable-prefix-caching \
-    --additional-config '{"device_group":[0]}' \
+    --additional-config \
+    '{"device_group":[0],"override_qaic_config":{"prefill_seq_len":128}}' \
     --no-async-scheduling
 eager mode:
 export QAIC_VISIBLE_DEVICES=0
 vllm serve TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
     --max-model-len 256 --max-num-seq 1 \
-    --long-prefill-token-threshold 128 \
+    --max-num-batched-tokens 128 \
     --no-enable-prefix-caching --enforce-eager \
     --no-async-scheduling
 """

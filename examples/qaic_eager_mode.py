@@ -47,7 +47,7 @@ def main():
         gpu_memory_utilization=0.9,
         enforce_eager=True,
         async_scheduling=False,
-        long_prefill_token_threshold=seq_len,
+        max_num_batched_tokens=seq_len,  # max tokens scheduled per step
         tensor_parallel_size=1,
         # buffers
     )
