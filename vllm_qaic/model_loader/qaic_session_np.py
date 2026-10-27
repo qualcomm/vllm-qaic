@@ -100,6 +100,7 @@ VLLM_QAIC_ASYNC_SCHEDULING_EXEC_TIMEOUT_ENV = "VLLM_QAIC_ASYNC_SCHEDULING_EXEC_T
 VLLM_KV_CACHE_PREFIX = "vllmKvCache"
 VLLM_QAIC_USE_LEGACY_SLICING_SPEC_ENV = "VLLM_QAIC_USE_LEGACY_SLICING_SPEC"
 VLLM_QAIC_ENABLE_LRT_DEBUG_ENV = "VLLM_QAIC_ENABLE_LRT_DEBUG"
+VLLM_QAIC_DATA_PATH_TIMEOUT_MS_ENV = "VLLM_QAIC_DATA_PATH_TIMEOUT_MS"
 
 
 class QAICInferenceSession:
@@ -193,8 +194,9 @@ class QAICInferenceSession:
 
         # Create and load Program
         prog_properties = qaicrt.QAicProgramProperties()
-        prog_properties.dataPathTimeoutMs = (
-            300_000  # MoE models needs high timeout due to expert parallelism
+        # MoE models needs high timeout due to expert parallelism
+        prog_properties.dataPathTimeoutMs = int(
+            os.getenv(VLLM_QAIC_DATA_PATH_TIMEOUT_MS_ENV, 60_000)
         )
         queueProperties = qaicrt.QAicQueueProperties()
         queueProperties.numThreadsPerQueue = 1
