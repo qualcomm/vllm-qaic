@@ -406,10 +406,13 @@ class QaicQwen2VLImageProcessorFast(Qwen2VLImageProcessorFast):
                     resized_height, resized_width = select_best_resolution(
                         (resized_height, resized_width), self.resolutions
                     )
-                stacked_images = self.resize(
+                # Call the backend resize directly: transformers >=5.15
+                # Qwen2VLImageProcessor.resize() re-runs smart_resize and would
+                # discard the QPC-compiled resolution selected above.
+                stacked_images = super(Qwen2VLImageProcessorFast, self).resize(
                     image=stacked_images,
                     size=SizeDict(height=resized_height, width=resized_width),
-                    interpolation=interpolation,
+                    resample=interpolation,
                 )
             resized_images_grouped[shape] = stacked_images
         resized_images = reorder_images(resized_images_grouped, grouped_images_index)
