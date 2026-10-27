@@ -98,7 +98,7 @@ Same fields as `override_qaic_config`, applied to the draft model in speculative
 |----------|-----------|
 | `--max-num-seqs` | Decode batch size. Directly affects device memory and throughput. |
 | `--max-model-len` | Maximum context length (prompt + generated tokens). |
-| `--long-prefill-token-threshold` | Sequence length threshold for static shape padding. |
+| `--max-num-batched-tokens` | Per-step token budget. For PD/E-PD, set to the instance's `prefill_seq_len` so prefill chunks fit the QPC. |
 | `--quantization` | Use `mxfp6` for optimal QAIC performance. |
 | `--kv-cache-dtype` | Use `mxint8` for KV cache compression. |
 | `--gpu-memory-utilization` | Fraction of device memory for KV cache (default: 0.9). **PYT mode only** — AOT mode allocates based on QPC memory requirements. |
@@ -116,10 +116,9 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
   --port 8000 \
   --max-num-seqs 4 \
   --max-model-len 2048 \
-  --long-prefill-token-threshold 128 \
   --quantization mxfp6 \
   --kv-cache-dtype mxint8 \
-  --additional-config '{"override_qaic_config":{"device_group":[0],"num_cores":16}}'
+  --additional-config '{"override_qaic_config":{"device_group":[0],"num_cores":16,"prefill_seq_len":128}}'
 ```
 
 !!! info "QEfficient Reference"

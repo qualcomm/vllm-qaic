@@ -1574,7 +1574,11 @@ class QaicModelRunnerAoT(GPUModelRunner):
         )
 
         if getattr(self.model, "dflash_requires_replay", False):
-            self.model.commit_dflash_prefix(valid_sampled_token_ids[: self.num_decodes])
+            self.model.commit_dflash_prefix(
+                valid_sampled_token_ids
+                if self.is_kv_consumer
+                else valid_sampled_token_ids[: self.num_decodes]
+            )
 
         # DFlash: advance DLM KV cache for prefilled requests every step, even when
         # decode drafting is skipped (e.g. sequence too long for the drafter).
@@ -1691,7 +1695,9 @@ class QaicModelRunnerAoT(GPUModelRunner):
                     "DFlash requires prompt hidden states from the prefill worker."
                 )
             start = (
-                (prompt_length - 1) // self.drafter.block_size * self.drafter.block_size
+                (prompt_length - 1)
+                // self.drafter.target_seq_len
+                * self.drafter.target_seq_len
                 if streaming
                 else 0
             )
@@ -1707,20 +1713,23 @@ class QaicModelRunnerAoT(GPUModelRunner):
             )
             # Own this data before the connector releases the shared-memory buffers.
             hidden[0, :remaining] = received
+            if getattr(self.model, "dflash_requires_replay", False):
+                hidden[0, remaining - 1] = self._tlm_hidden_buf[row, 0]
             chunks.extend(
                 hidden[:, start : start + chunk_size]
                 for start in range(0, padded_length, chunk_size)
             )
             positions.append(np.arange(start, prompt_length, dtype=np.int64))
             remaining_lengths.append(remaining)
+            row += 1
         self.drafter.build_prefill_pending(
             np.cumsum(remaining_lengths, dtype=np.int64),
             np.concatenate(positions),
             slots,
             np.zeros(len(slots), dtype=bool),
-            logits[row:num_reqs, :1],
+            logits[self.num_decodes : num_reqs, :1],
             chunks,
-            self.input_batch.req_ids[row:num_reqs],
+            self.input_batch.req_ids[self.num_decodes : num_reqs],
         )
 
     def _setup_dflash_hidden_capture(self) -> None:
@@ -2070,6 +2079,9 @@ class QaicModelRunnerAoT(GPUModelRunner):
                     self.kv_cache_info,
                     self.drafter.stream_prefill_block if self.drafter else None,
                     self.drafter.cancel_stream_prefill if self.drafter else None,
+                    target_seq_len=self.drafter.target_seq_len
+                    if self.drafter
+                    else None,
                 )
                 if self.is_kv_producer:
                     self.model.publish_dflash_chunk = connector.publish_dflash_chunk

@@ -380,6 +380,14 @@ class QaicConnector(KVConnectorBase_V1):
         self.use_async_scheduling = vllm_config.scheduler_config.async_scheduling
         self.is_async_kv_producer: bool = self.use_async_scheduling and self.is_producer
         spec = vllm_config.speculative_config
+        self.dflash_requires_replay = bool(
+            spec
+            and spec.use_dflash()
+            and vllm_config.model_config.hf_config.model_type
+            in {"qwen3_5", "qwen3_5_moe"}
+        )
+        if self.dflash_requires_replay:
+            self.mem_bank.use_full_kv_transfer = True
         self.dflash_stream_prefill = bool(
             spec
             and spec.use_dflash()
@@ -393,7 +401,7 @@ class QaicConnector(KVConnectorBase_V1):
         self._dflash_cache_info = None
         self._dflash_consume = None
         self._dflash_cancel = None
-        self._dflash_block_size = (
+        self._dflash_target_seq_len = (
             spec.num_speculative_tokens + 1 if self.dflash_stream_prefill else 0
         )
 
@@ -550,10 +558,14 @@ class QaicConnector(KVConnectorBase_V1):
         assert len(self.kv_caches) == 0 and len(kv_caches) > 0
         self.kv_caches = kv_caches
 
-    def register_dflash_stream(self, kv_cache_info, consume=None, cancel=None):
+    def register_dflash_stream(
+        self, kv_cache_info, consume=None, cancel=None, target_seq_len=None
+    ):
         self._dflash_cache_info = kv_cache_info
         self._dflash_consume = consume
         self._dflash_cancel = cancel
+        if target_seq_len is not None:
+            self._dflash_target_seq_len = target_seq_len
 
     def publish_dflash_chunk(self, slot, positions, hidden):
         request = self._dflash_producers[slot]
@@ -576,6 +588,12 @@ class QaicConnector(KVConnectorBase_V1):
         for request in metadata.requests:
             slot = request.block_id - 1
             if self.is_producer:
+                # A cancelled slot can be reassigned before get_finished runs.
+                if (
+                    slot in self._dflash_producers
+                    and self._dflash_producers[slot].req_id != request.req_id
+                ):
+                    self.get_finished({self._dflash_producers[slot].req_id})
                 if slot not in self._dflash_producers:
                     name, buffers = self.mem_bank.get_Storage(
                         self._dflash_cache_info, len(request.token_ids)
@@ -643,7 +661,7 @@ class QaicConnector(KVConnectorBase_V1):
             if kv_ready < 0:
                 # The proxy cancels the corresponding consumer request as well.
                 continue
-            block = self._dflash_block_size
+            block = self._dflash_target_seq_len
             final_start = (len(request.token_ids) - 1) // block * block
             if (
                 not ran_dlm
@@ -670,7 +688,7 @@ class QaicConnector(KVConnectorBase_V1):
                 self._dflash_pending[req_id] = self._dflash_pending.pop(req_id)
             if (
                 kv_ready
-                and ready == len(request.token_ids)
+                and ready == len(request.token_ids) - int(self.dflash_requires_replay)
                 and load.position == final_start
             ):
                 self.kv_caches[request.block_id - 1] = shm.list_of_np_buff
@@ -844,7 +862,8 @@ class QaicConnector(KVConnectorBase_V1):
                     continue
                 shm = self.mem_bank.MemBank[request.kv_handoff_metadata[0]]
                 with shm.publication_lock():
-                    if shm.list_of_np_buff[-1][0, 0] != len(request.token_ids):
+                    expected = len(request.token_ids) - int(self.dflash_requires_replay)
+                    if shm.list_of_np_buff[-1][0, 0] != expected:
                         raise RuntimeError(
                             "DFlash KV completed before prompt features were published."
                         )

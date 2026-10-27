@@ -14,7 +14,7 @@
 # (default: <repo_root>/dist), same layout as before.
 #
 # Usage:
-#   ./scripts/build_wheels.sh [aot|pyt|both] [--pyver 3.10|3.11|3.12]
+#   ./scripts/build_wheels.sh [aot|pyt|both] [--pyver 3.11|3.12|3.13]
 #                              [--outdir <dir>] [--device-arch v68|v81]
 #                              [--base-image <image:tag>]
 #                              [--rust-image <image:tag>]
@@ -27,14 +27,14 @@ DEFAULT_DEVICE_ARCH="v68"
 
 usage() {
   cat << EOM
-Usage: build_wheels.sh [aot|pyt|both] [--pyver 3.10|3.11|3.12]
+Usage: build_wheels.sh [aot|pyt|both] [--pyver 3.11|3.12|3.13]
                         [--outdir <dir>] [--device-arch v68|v81]
                         [--base-image <image:tag>]
                         [--rust-image <image:tag>]
                         [--wheel-name <name.whl>] [--dry-run]
 
 aot|pyt|both   Wheel(s) to build (default: both).
---pyver        Python version to build with: 3.10, 3.11, or 3.12
+--pyver        Python version to build with: 3.11, 3.12, or 3.13
                (default: ${DEFAULT_PYTHON_VERSION}).
 --outdir       Wheel output directory (default: <repo_root>/dist).
 --device-arch  QAIC device arch for PYT kernel builds: v68 (AI100) or v81 (AI200).
@@ -100,8 +100,8 @@ if [[ "${BUILD_TARGET}" != "aot" && "${BUILD_TARGET}" != "pyt" && "${BUILD_TARGE
     exit 1
 fi
 
-if [[ "${PYTHON_VERSION}" != "3.10" && "${PYTHON_VERSION}" != "3.11" && "${PYTHON_VERSION}" != "3.12" ]]; then
-    echo "ERROR: --pyver must be 3.10, 3.11, or 3.12" >&2
+if [[ "${PYTHON_VERSION}" != "3.11" && "${PYTHON_VERSION}" != "3.12" && "${PYTHON_VERSION}" != "3.13" ]]; then
+    echo "ERROR: --pyver must be 3.11, 3.12, or 3.13" >&2
     exit 1
 fi
 

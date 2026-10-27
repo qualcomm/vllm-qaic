@@ -33,9 +33,9 @@ llm = LLM(
     model="meta-llama/Llama-3.1-8B-Instruct",
     max_num_seqs=8,
     max_model_len=2048,
-    long_prefill_token_threshold=128,
     quantization="mxfp6",
     kv_cache_dtype="mxint8",
+    additional_config={"override_qaic_config": {"prefill_seq_len": 128}},
     speculative_config={
         "method": "ngram",
         "num_speculative_tokens": 5,
@@ -69,13 +69,13 @@ llm = LLM(
     model="meta-llama/Llama-3.1-8B-Instruct",
     max_num_seqs=4,
     max_model_len=2048,
-    long_prefill_token_threshold=128,
     quantization="mxfp6",
     kv_cache_dtype="mxint8",
     additional_config={
         "override_qaic_config": {
             "device_group": [0, 1, 2, 3],
             "num_cores": 10,       # 10 cores for target model
+            "prefill_seq_len": 128,
         },
         "draft_override_qaic_config": {
             "device_group": [0, 1, 2, 3],   # Same device
@@ -126,14 +126,13 @@ llm = LLM(
     model="Qwen/Qwen3-4B",
     max_num_seqs=4,
     max_model_len=4096,
-    long_prefill_token_threshold=128,  # TLM prefill_seq_len (multiple of block_size)
     quantization="mxfp6",
     kv_cache_dtype="mxint8",
     additional_config={
         "override_qaic_config": {
             "device_group": device_group,
             "num_cores": 8,
-            "prefill_seq_len": 128,
+            "prefill_seq_len": 128,  # TLM prefill_seq_len (multiple of block_size)
             "mxfp6_matmul": True,
             "mxint8_kv_cache": True,
             "mos": 1,
@@ -182,91 +181,9 @@ docker run --rm -it --network host \
     for details.
 
 !!! note "TLM `prefill_seq_len` must be a multiple of `block_size`"
-    The target model's `prefill_seq_len` (`long_prefill_token_threshold`) must be
+    The target model's `prefill_seq_len` must be
     an exact multiple of the DLM's `block_size`, since prefill chunks are fanned
     out into `block_size`-sized sub-blocks for the DLM.
-
-### Disaggregated Serving
-
-`examples/qaic_spd_dflash_disagg.py` launches the existing `qaic_disagg` proxy
-and prefill/decode workers. It requires a `qaic_disagg` package compatible with
-this vLLM version and QEfficient with DFlash support. The launcher must forward
-DFlash configuration to both target workers and compile the decode-side draft.
-Streaming prefill also requires the companion proxy to start both workers
-concurrently with a shared handoff ID and set `VLLM_QAIC_DFLASH_STREAM_PREFILL=1`.
-These `qaic_disagg` launcher/proxy changes are maintained separately from this
-repository; an older package does not provide the complete integration.
-The prefill worker publishes projected hidden states after each completed chunk
-through `QaicConnector`. DLM runs on the decode side and consumes available
-DFlash blocks while target prefill continues. Target KV uses the existing handoff.
-
-This path supports GPT-OSS, Qwen3, and Llama text models with synchronous
-scheduling and no prefix caching or CCL.
-Each target QPC has one specialization; the DLM uses a separate, unsplit QPC.
-
-```bash
-python examples/qaic_spd_dflash_disagg.py \
-  --model Qwen/Qwen3-4B --ctx-len 4096 --prefill-seq-len 128 \
-  --prefill-devices 0,1,2,3 --decode-devices 4,5,6,7 --dlm-devices 8,9,10,11 \
-  --cores 8 --host 127.0.0.1 --port 8000 --prefill-port 8001 --decode-port 8002
-```
-
-Send requests to the proxy's `/v1/chat/completions` or `/v1/completions` endpoint.
-Omit QPC paths for automatic compilation/cache reuse, or provide
-`--prefill-qpc`, `--decode-qpc`, and `--dlm-qpc` for compatible existing artifacts.
-Pass `--draft-model` for a checkpoint without a default mapping.
-Prefill and decode concurrency default to one request. Set
-`--prefill-max-num-seqs 4 --decode-max-num-seqs 4` to allow four requests on each
-worker, or choose different limits for the two workers. DLM uses the decode
-worker's batch size. Supplied QPCs must match these limits; omit their paths to
-compile matching artifacts. DLM prefill processes one request block at a time;
-decoding uses the configured batch size. Each request retains a prompt-sized
-host feature buffer until cleanup, so memory usage grows with prompt length
-and concurrency. A slower DLM does not introduce backpressure into target prefill.
-The mapped Llama-3.1-8B-Instruct draft has block size 10; use a prefill length
-that is a multiple of 10, such as `--prefill-seq-len 160`.
-
-The same example supports single-stage and multi-stage prefill. It defaults to
-one stage; pass `--prefill-pipeline-parallel-size 2` for two stages, or select
-another stage count that divides the number of prefill devices.
-For multiple stages, the example selects QEfficient's existing
-`mdp_strategy="intersection"` to generate a compact compiler-derived partition
-configuration. Each in-flight chunk has separate output buffers, bounded by the
-execution queue size. Changing the stage count requires a matching prefill QPC;
-the decode and draft QPCs can be reused. The final DFlash block waits for the
-normal decode-side target seed token before producing the first draft.
-The latest streaming path has been hardware-validated with Qwen3-4B, two
-prefill stages, and four request slots. Llama and GPT-OSS are enabled but need
-equivalent streaming and higher-batch hardware validation.
-
-### Vision-Language Models
-
-The DFlash examples use MXFP6 matmul and MXINT8 KV caches. Depth-first compilation
-is disabled by default for DFlash; pass `--aic-enable-depth-first` to either
-`qaic_spd_dflash.py` or `qaic_spd_dflash_vlm.py` to enable it. Existing QAIC
-environment overrides still take precedence. Supplied QPCs retain their compiled
-settings and are not recompiled by this flag.
-
-DFlash supports Qwen3.5, Qwen3.5-MoE, Qwen3-VL, and Gemma4 VLMs in AOT mode
-with `max_num_seqs=1`, synchronous scheduling, and separate vision and language
-engines. Disaggregated serving and other speculative methods are not supported
-for VLMs in this path. Use QEfficient with the DFlash VLM changes from
-[PR #1389](https://github.com/qualcomm/efficient-transformers/pull/1389).
-
-```bash
-python examples/qaic_spd_dflash_vlm.py \
-  --model Qwen/Qwen3.5-4B --image /path/to/image.png \
-  --prompt "Describe this image in detail." --prefill-seq-len 128 \
-  --tlm-devices 0,1,2,3 --dlm-devices 4,5,6,7 --vision-devices 8,9,10,11
-```
-
-Omit `--image` for text-only input. Pass `--draft-model` for a target without
-a default draft mapping, including a local Qwen3-VL draft checkpoint.
-Existing vLLM-compatible QPCs can be supplied with `--tlm-qpc`, `--dlm-qpc`,
-and `--vision-qpc`; text-only requests do not need a vision QPC.
-Target QPCs must return vocabulary logits and projected target hidden states.
-Qwen3.5 targets also require accepted-prefix cache replay, and Gemma4 targets
-require sliding-cache capacity for block verification.
 
 ## Core Allocation
 

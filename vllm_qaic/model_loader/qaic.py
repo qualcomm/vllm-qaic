@@ -136,7 +136,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
 
         self.config = config
         self.vocab_size = config.get_text_config().vocab_size
-        # `long_prefill_token_threshold` will define prefill chunk length
+        # `override_qaic_config["prefill_seq_len"]` defines the prefill chunk length
         if self.config.model_type == "whisper":
             # Encoder-decoder models have chunked prefill disabled by vllm,
             # but QAIC still requires a prefill sequence length.
@@ -665,6 +665,9 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     }
                     for _ in range(self.session.prefill_num_execObj)
                 ]
+                if "image_idx_output" in self.session.output_names:
+                    for outputs in self._dflash_pipeline_buffers:
+                        outputs["image_idx_output"] = np.empty((1, 1), dtype=np.int64)
             free_dflash_buffers = list(range(len(self._dflash_pipeline_buffers)))
 
         def complete_chunk(exec_obj_idx):
@@ -673,9 +676,16 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 return
             inputs, row, last_chunk, buffer_index = dflash_pending.pop(exec_obj_idx)
             slot = int(inputs["batch_index"].item())
-            chunk_positions = inputs["position_ids"][0]
+            chunk_positions = (
+                inputs["position_ids"][0, 0]
+                if self.uses_mrope
+                else inputs["position_ids"][0]
+            )
             valid = chunk_positions >= 0
             logits[row : row + 1] = inputs["logits"]
+            if not valid.any():
+                free_dflash_buffers.append(buffer_index)
+                return
             if self.dflash_stream_prefill:
                 self.publish_dflash_chunk(
                     slot, chunk_positions, inputs[self.dflash_hidden_name]
@@ -691,7 +701,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             prompt_hidden[chunk_positions[valid]] = inputs[self.dflash_hidden_name][
                 0, valid
             ]
-            logits[row : row + 1] = inputs["logits"]
             if last_chunk:
                 prompt_length = int(chunk_positions[valid][-1]) + 1
                 kv_caches[slot][-1][0, 0, :prompt_length] = prompt_hidden[
@@ -749,6 +758,14 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 chunk_inputs.update(mm_kwargs)
 
             # chunk the request
+            image_offsets = None
+            if self.is_dflash_target and "image_idx" in chunk_inputs:
+                image_token_id = getattr(self.config, "image_token_id", None)
+                if image_token_id is None:
+                    raise ValueError("DFlash image cursors require image_token_id.")
+                image_offsets = np.concatenate(
+                    ([0], np.cumsum(iids == image_token_id, dtype=np.int64))
+                )
             n_chunks: int = iids.shape[-1] // self.prefill_seq_len
             assert n_chunks > 0
             for chunk in range(n_chunks):
@@ -758,6 +775,11 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 last_chunk = False
                 lower_idx = int(chunk * self.prefill_seq_len)
                 upper_idx = int((chunk + 1) * self.prefill_seq_len)
+                if image_offsets is not None:
+                    # Derive the cursor without waiting for the previous chunk.
+                    chunk_inputs["image_idx"] = np.array(
+                        [[image_offsets[lower_idx]]], dtype=np.int64
+                    )
                 if chunk + 1 == n_chunks and not prefill_is_partial[index]:
                     last_chunk = True
                 chunk_inputs["input_ids"] = iids[lower_idx:upper_idx].reshape(
@@ -785,6 +807,12 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     chunk_inputs["position_ids"] = pids[lower_idx:upper_idx].reshape(
                         1, self.prefill_seq_len
                     )
+
+                if last_chunk and getattr(self, "dflash_requires_replay", False):
+                    # The consumer processes the final prompt token once.
+                    chunk_inputs["position_ids"] = chunk_inputs["position_ids"].copy()
+                    last_valid = n_prompt_tokens - lower_idx - 1
+                    chunk_inputs["position_ids"][..., last_valid] = -1
 
                 if self.comp_ctx_lengths_prefill is not None:
                     # Single batch-wide bucket chosen before the loop; held constant.
@@ -1371,6 +1399,19 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             # added to decode_batch_inputs before this dict was replaced.
             if getattr(self, "default_mm_kwargs", None):
                 self.decode_batch_inputs.update(self.default_mm_kwargs)
+            if self.is_dflash_target:
+                if self.uses_mrope:
+                    self.decode_batch_inputs["position_ids"] = np.tile(
+                        self.decode_batch_inputs["position_ids"], (4, 1, 1)
+                    )
+                if "mm_token_type_ids" in self.decode_batch_inputs:
+                    self.decode_batch_inputs["mm_token_type_ids"] = np.zeros_like(
+                        self.decode_batch_inputs["input_ids"]
+                    )
+                if getattr(self, "dflash_requires_replay", False):
+                    self.decode_batch_inputs["cache_commit"] = np.zeros(
+                        (1,), dtype=np.int64
+                    )
             # Keep decode_batch_inputs_by_k in sync: _run_decode reads from this
             # map, so it must point at the rebuilt dict that carries the correct
             # (MRoPE-aware) position_ids / batch_index / mm-kwargs shapes.
@@ -1428,6 +1469,13 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                         ).reshape(-1, 1)
                     if self.is_multimodal_model and self.default_mm_kwargs:
                         prefill_inputs.update(self.default_mm_kwargs)
+                        if (
+                            self.is_dflash_target
+                            and "mm_token_type_ids" in prefill_inputs
+                        ):
+                            prefill_inputs["mm_token_type_ids"] = np.zeros_like(
+                                prefill_inputs["input_ids"]
+                            )
                     KvCache_buff = []
                     for kv_shape, kv_type, _ in self.kv_cache_info:
                         _kv_shape = (1,) + kv_shape[1:]
@@ -1780,6 +1828,25 @@ def load_qaic_model(
                     "Transforming and compiling model[%s] using QEfficient library",
                     speculative_model_type,
                 )
+            if vllm_config.kv_transfer_config and (
+                getattr(model, "dflash_requires_replay", False)
+                or (
+                    getattr(model, "is_dflash_vlm", False)
+                    and model.config.model_type == "gemma4"
+                )
+            ):
+                # Keep the prefill-derived sliding capacity on both target QPCs.
+                specializations, _ = qeff_model.model.get_specializations(
+                    kv_offload=True,
+                    continuous_batching=qeff_model.continuous_batching,
+                    **qaic_compile_config.cfg,
+                )
+                phase = (
+                    0 if vllm_config.kv_transfer_config.kv_role == "kv_producer" else 1
+                )
+                qaic_compile_config.cfg["specializations"] = [
+                    specializations["lang"][phase]
+                ]
             logger.info("QEFF Compile called with %s", qaic_compile_config.cfg)
             qpc_path = qeff_model.compile(**qaic_compile_config.cfg)
             if isinstance(qpc_path, dict):
@@ -2036,7 +2103,6 @@ def get_hf_model(
             and qaic_config.get("target_layer_ids")
             and hf_config.model_type in {"qwen3_5", "qwen3_5_moe", "qwen3_vl", "gemma4"}
         ):
-            # Match the validated single-request QEfficient DFlash VLM graphs.
             args["continuous_batching"] = False
             args["dtype"] = "float32"
         # On-device sampling is supported with multimodality
@@ -2158,6 +2224,12 @@ def _get_qaic_compile_config(
     kv_cache_batch_size = vllm_config.cache_config.num_cpu_blocks
     additional_config = vllm_config.additional_config or {}
     dflash_cfg = additional_config.get("dflash_cfg")
+    is_dflash_vlm = dflash_cfg is not None and dflash_cfg.get("tlm_model_type") in {
+        "gemma4",
+        "qwen3_vl",
+        "qwen3_5",
+        "qwen3_5_moe",
+    }
     prefill_only = None
     # prefill_only options
     if vllm_config.kv_transfer_config:
@@ -2189,7 +2261,7 @@ def _get_qaic_compile_config(
         "mxfp6_matmul": mxfp6_en,
         "mxint8_kv_cache": mxint8_en,
         "num_speculative_tokens": None,
-        "aic_enable_depth_first": dflash_cfg is None,
+        "aic_enable_depth_first": not is_dflash_vlm,
         "mos": -1,
         "prefill_only": prefill_only,
         "compile_only": False,
@@ -2353,18 +2425,11 @@ def _get_qaic_compile_config(
                 qaic_config = {}
             qaic_config["dflash_dlm"] = True
             qaic_config["dflash_tlm_repo"] = dflash_cfg["tlm_repo"]
-            if dflash_cfg.get("tlm_model_type") in {
-                "qwen3_5",
-                "qwen3_5_moe",
-                "qwen3_vl",
-                "gemma4",
-            }:
+            if is_dflash_vlm:
                 qaic_config["dflash_tlm_embedding_key"] = (
                     "model.language_model.embed_tokens.weight"
                 )
         elif speculative_model_type in ("target", "turbo"):
-            if qaic_config is None:
-                qaic_config = {}
             qaic_config["target_layer_ids"] = dflash_cfg["target_layer_ids"]
             qaic_config["dflash_dlm_repo"] = dflash_cfg["dlm_repo"]
             model_type = vllm_config.model_config.hf_config.model_type
@@ -2402,14 +2467,22 @@ def _get_qaic_compile_config(
                     cfg.pop("split_model_io", None)
                 if kv_role == "kv_producer":
                     num_logits_to_keep = 1
-            if model_type in {"qwen3_5", "qwen3_5_moe", "qwen3_vl", "gemma4"}:
+            if is_dflash_vlm:
                 cfg["use_onnx_subfunctions"] = False
-                cfg["split_model_io"] = True
+                if not vllm_config.kv_transfer_config:
+                    cfg["split_model_io"] = True
                 cfg.pop("full_batch_size", None)
                 cfg.pop("kv_cache_batch_size", None)
                 cfg.pop("num_speculative_tokens", None)
                 # Image features remain resident while language chunks advance.
                 cfg.pop("vision_size", None)
+                if (
+                    vllm_config.kv_transfer_config
+                    and kv_role == "kv_consumer"
+                    and model_type == "qwen3_vl"
+                ):
+                    # QEfficient selects its decode language specialization here.
+                    cfg["prefill_seq_len"] = 1
             if model_type == "gemma4":
                 cfg["node_precision_info"] = True
             if model_type in {"qwen3_5", "qwen3_5_moe"}:
@@ -2530,7 +2603,8 @@ def _get_qaic_compile_config(
             or (
                 kv_role == "kv_consumer"
                 and dflash_cfg is not None
-                and vllm_config.model_config.hf_config.model_type == "gpt_oss"
+                and vllm_config.model_config.hf_config.model_type
+                in {"gpt_oss", "qwen3_5", "qwen3_5_moe"}
                 and cfg["prefill_only"]
             )
             or (kv_role == "kv_both" and cfg["prefill_only"] is None)

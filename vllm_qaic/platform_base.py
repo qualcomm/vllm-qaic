@@ -264,11 +264,8 @@ class QaicPlatform(Platform):
                     "QAIC multimodal speculative decoding currently supports "
                     "DFlash with Qwen3.5, Qwen3.5-MoE, Qwen3-VL, and Gemma4 only."
                 )
-            if scheduler_config.max_num_seqs != 1 or vllm_config.kv_transfer_config:
-                raise ValueError(
-                    "Multimodal DFlash currently requires max_num_seqs=1 "
-                    "without disaggregated serving."
-                )
+            if scheduler_config.max_num_seqs != 1:
+                raise ValueError("Multimodal DFlash currently requires max_num_seqs=1.")
             if scheduler_config.async_scheduling:
                 raise ValueError("Multimodal DFlash requires async_scheduling=False.")
 
@@ -278,9 +275,15 @@ class QaicPlatform(Platform):
             and not model_config.is_multimodal_model
         ):
             # QAIC pooling QPCs are compiled with seq_len == max_model_len.
-            # Set both explicitly here (AOT and eager) so prefill_seq_len is correct.
+            # Disable chunked prefill and pin prefill_seq_len to max_model_len via
+            # override_qaic_config (the single source of truth for prefill chunking).
             scheduler_config.enable_chunked_prefill = False
-            scheduler_config.long_prefill_token_threshold = model_config.max_model_len
+            if additional_config is None:
+                additional_config = vllm_config.additional_config = {}
+            additional_config.setdefault("override_qaic_config", {})
+            additional_config["override_qaic_config"]["prefill_seq_len"] = (
+                model_config.max_model_len
+            )
 
         if not cls.is_aot:
             assert vllm_config.kv_transfer_config is None, (
@@ -327,22 +330,18 @@ class QaicPlatform(Platform):
                     model_config.hf_config, "max_source_positions", 1500
                 )
             else:
+                # Prefill chunk length comes solely from
+                # override_qaic_config["prefill_seq_len"]; when unset, default to
+                # min(128, max_model_len). The prior long_prefill_token_threshold
+                # input has been removed.
                 __prefill_seq_len = override_qaic_config.get("prefill_seq_len", 0)
                 if not __prefill_seq_len:
-                    if scheduler_config.long_prefill_token_threshold == 0:
-                        __prefill_seq_len = min(128, model_config.max_model_len)
-                    else:
-                        __prefill_seq_len = min(
-                            scheduler_config.long_prefill_token_threshold,
-                            model_config.max_model_len,
-                        )
+                    __prefill_seq_len = min(128, model_config.max_model_len)
                 if not scheduler_config.enable_chunked_prefill:
-                    # TODO: long_prefill_token_threshold should not be set when
-                    # chunked prefill is disabled
-                    logger.warning_once(
-                        "Chunked prefill is disabled; chunk size=%s will be used"
-                        " as prefill_seq_len.",
-                        str(__prefill_seq_len),
+                    # Each prefill step feeds at most prefill_seq_len multimodal
+                    # embeddings into the QPC; a whole prompt would be cropped.
+                    assert not model_config.is_multimodal_model, (
+                        "QAIC multimodal models require chunked prefill."
                     )
                 if "override_qaic_config" not in additional_config:
                     additional_config["override_qaic_config"] = {}
@@ -355,25 +354,31 @@ class QaicPlatform(Platform):
                 # budget.  Setting max_num_batched_tokens to this value simultaneously
                 # gives the scheduler the correct per-step budget AND sizes the buffers
                 # large enough to never overflow after decode expansion.
+                max_num_batched_tokens = scheduler_config.max_num_seqs * (
+                    max(__prefill_seq_len)
+                    if isinstance(__prefill_seq_len, (list, tuple))
+                    else __prefill_seq_len
+                )
+                if (
+                    vllm_config.speculative_config
+                    and vllm_config.speculative_config.method == "dflash"
+                ):
+                    max_num_batched_tokens += (
+                        vllm_config.speculative_config.max_num_new_slots_for_drafting
+                        * scheduler_config.max_num_seqs
+                    )
+                # Include drafting slots in the cap, not in the previous budget.
                 scheduler_config.max_num_batched_tokens = min(
-                    scheduler_config.max_num_seqs
-                    * (
-                        max(__prefill_seq_len)
-                        if isinstance(__prefill_seq_len, (list, tuple))
-                        else __prefill_seq_len
-                    ),
+                    max_num_batched_tokens,
                     scheduler_config.max_num_batched_tokens,
                 )
-            if (
-                vllm_config.speculative_config
-                and vllm_config.speculative_config.method == "dflash"
-                and model_config.is_multimodal_model
-            ):
-                # vLLM reserves extra drafting slots outside the scheduled budget.
-                scheduler_config.max_num_batched_tokens += (
-                    vllm_config.speculative_config.max_num_new_slots_for_drafting
-                    * scheduler_config.max_num_seqs
-                )
+                # Without chunked prefill a prompt is scheduled whole, so the
+                # budget must fit max_model_len; QAIC still chunks on device.
+                if not scheduler_config.enable_chunked_prefill:
+                    scheduler_config.max_num_batched_tokens = max(
+                        scheduler_config.max_num_batched_tokens,
+                        model_config.max_model_len,
+                    )
             # Reset max_num_scheduled_tokens so that
             # _set_max_num_scheduled_tokens() recalculates it from the
             # (now-overridden) max_num_batched_tokens when __post_init__
@@ -447,14 +452,23 @@ class QaicPlatform(Platform):
             ):
                 if (
                     model_config.hf_config.model_type
-                    not in {"gpt_oss", "qwen3", "llama"}
+                    not in {
+                        "gpt_oss",
+                        "qwen3",
+                        "llama",
+                        "qwen3_vl",
+                        "qwen3_5",
+                        "qwen3_5_moe",
+                        "gemma4",
+                    }
                     or scheduler_config.async_scheduling
                     or vllm_config.kv_transfer_config.kv_connector != "QaicConnector"
                     or vllm_config.kv_transfer_config.kv_role
                     not in {"kv_producer", "kv_consumer"}
                 ):
                     raise ValueError(
-                        "DFlash disaggregation requires GPT-OSS, Qwen3, or Llama, "
+                        "DFlash disaggregation requires GPT-OSS, Qwen3, Llama, "
+                        "Qwen3.5 dense/MoE, Qwen3-VL, or Gemma4, "
                         "synchronous scheduling, and QaicConnector."
                     )
                 if vllm_config.cache_config.enable_prefix_caching:
@@ -624,6 +638,13 @@ class QaicPlatform(Platform):
             scheduler_config.max_num_batched_tokens = (
                 scheduler_config.max_num_seqs
                 * scheduler_config.long_prefill_token_threshold
+            )
+            # Pin encoder cache/compute budget so all vision frames encode in one step.
+            scheduler_config.max_num_encoder_input_tokens = (
+                scheduler_config.max_num_batched_tokens
+            )
+            scheduler_config.encoder_cache_size = (
+                scheduler_config.max_num_batched_tokens
             )
             if "override_qaic_config" not in vllm_config.additional_config:
                 additional_config["override_qaic_config"] = {}

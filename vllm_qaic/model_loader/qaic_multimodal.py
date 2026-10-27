@@ -75,10 +75,7 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
         )  # used by iter_mm_grid_hw / iter_mm_grid_thw
         self.mm_input_info: dict[str, tuple[list[int], np.dtype]] = {}
         self.mm_output_info: dict[str, tuple[list[int], np.dtype]] = {}
-        self.is_dflash_vlm = bool(
-            vllm_config.speculative_config
-            and vllm_config.speculative_config.method == "dflash"
-        )
+        self.is_dflash_vlm = self.is_dflash_target
         self.dflash_requires_replay = self.is_dflash_vlm and self.config.model_type in {
             "qwen3_5",
             "qwen3_5_moe",
@@ -100,6 +97,11 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
         )
 
     def _load_multimodal(self) -> None:
+        if self.is_dflash_vlm and isinstance(self.prefill_seq_len, list | tuple):
+            raise ValueError(
+                "DFlash VLM requires a single integer prefill_seq_len; "
+                "list/tuple prefill lengths are not supported."
+            )
         mm_input_names = [
             "pixel_values",
             "input_features",
@@ -140,23 +142,41 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
             input_shapes = self.session.get_bindings_shapes(["input_ids"]).get(
                 "input_ids", []
             )
+            if not input_shapes and (
+                binding := self.get_io_shape_and_dtype("input_ids")
+            ):
+                input_shapes = [binding[0]]
+            input_batch_size = (
+                self.prefill_bsz if self.disagg_producer_en else self.decode_bsz
+            )
             sequence_lengths = {
                 shape[1]
                 for shape in input_shapes
-                if len(shape) == 2 and shape[0] == self.decode_bsz
+                if len(shape) == 2 and shape[0] == input_batch_size
             }
             required_lengths = {self.prefill_seq_len, self.num_spec_tokens + 1}
+            if self.disagg_serving_en:
+                required_lengths = {
+                    self.prefill_seq_len
+                    if self.disagg_producer_en
+                    else self.num_spec_tokens + 1
+                }
             if not required_lengths.issubset(sequence_lengths):
                 raise ValueError(
                     "DFlash VLM target QPC input lengths do not match this run: "
                     f"prefill_seq_len={self.prefill_seq_len}, "
                     f"block_size={self.num_spec_tokens + 1}, "
-                    f"compiled sequence lengths={sorted(sequence_lengths)}. "
+                    f"batch_size={input_batch_size}, "
+                    f"compiled input shapes={input_shapes}. "
                     "Select a matching target QPC or recompile it."
                 )
             logits_shapes = self.session.get_bindings_shapes(["logits"]).get(
                 "logits", []
             )
+            if not logits_shapes and (
+                binding := self.get_io_shape_and_dtype("logits", is_input=False)
+            ):
+                logits_shapes = [binding[0]]
             if not logits_shapes or any(
                 len(shape) != 3 or shape[-1] != self.vocab_size
                 for shape in logits_shapes
@@ -182,7 +202,17 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
                     if kind != "sliding_attention":
                         continue
                     name = f"past_key.{index}"
+                    name = next(
+                        (
+                            candidate
+                            for candidate in self.session.input_names
+                            if candidate == name or candidate.startswith(f"{name}_")
+                        ),
+                        name,
+                    )
                     shapes = self.session.get_bindings_shapes([name]).get(name, [])
+                    if not shapes and (binding := self.get_io_shape_and_dtype(name)):
+                        shapes = [binding[0]]
                     if not shapes or any(
                         len(shape) != 4 or shape[2] < capacity for shape in shapes
                     ):
@@ -195,8 +225,17 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
         if self.dflash_requires_replay:
             if "cache_commit" not in self.session.input_names:
                 raise ValueError("Qwen3.5 DFlash target QPC must expose cache_commit.")
-            assert self.default_mm_kwargs is not None
-            assert self._dflash_prefill_hidden_scratch is not None
+            if self.default_mm_kwargs is None:
+                raise ValueError(
+                    "Qwen3.5 DFlash target QPC must expose image_idx "
+                    "to initialize multimodal replay inputs."
+                )
+            if self._dflash_prefill_hidden_scratch is None:
+                raise ValueError(
+                    "Qwen3.5 DFlash replay requires a prefill hidden-state buffer. "
+                    "Use a target QPC exposing DFlash hidden states and a single "
+                    "integer prefill_seq_len."
+                )
             self.default_mm_kwargs["cache_commit"] = np.ones((1,), dtype=np.int64)
             for inputs in self.decode_batch_inputs_by_k.values():
                 inputs["cache_commit"] = np.zeros((1,), dtype=np.int64)
