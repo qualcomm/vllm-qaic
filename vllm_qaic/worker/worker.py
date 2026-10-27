@@ -28,7 +28,7 @@ from vllm.distributed.kv_transfer import (
     get_kv_transfer_group,
     has_kv_transfer_group,
 )
-from vllm.distributed.parallel_state import get_pp_group, get_tp_group
+from vllm.distributed.parallel_state import get_pcp_group, get_pp_group, get_tp_group
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.platforms import current_platform
@@ -128,8 +128,10 @@ class QaicWorker(WorkerBase):
     def update_config(self, overrides: dict[str, Any]) -> None:
         self.model_runner.update_config(overrides)
 
-    def get_kv_connector_handshake_metadata(self) -> dict | None:
-        """Get KV connector metadata from this worker if available."""
+    def get_kv_connector_handshake_metadata(
+        self,
+    ) -> dict[tuple[int, int], Any] | None:
+        """Get KV connector metadata keyed by pipeline and tensor-parallel rank."""
 
         if not has_kv_transfer_group():
             return None
@@ -140,8 +142,17 @@ class QaicWorker(WorkerBase):
         if (metadata := connector.get_handshake_metadata()) is None:
             return None
 
+        pp_rank = get_pp_group().rank_in_group
         tp_rank = get_tp_group().rank_in_group
-        return {tp_rank: metadata}
+        parallel_config = self.vllm_config.parallel_config
+        if (
+            parallel_config.prefill_context_parallel_size > 1
+            and parallel_config.decode_context_parallel_size > 1
+        ):
+            tp_rank += (
+                get_pcp_group().rank_in_group * parallel_config.tensor_parallel_size
+            )
+        return {(pp_rank, tp_rank): metadata}
 
     @torch.inference_mode()
     def sample_tokens(

@@ -2724,16 +2724,21 @@ class QaicModelRunnerAoT(GPUModelRunner):
         finished_req_ids,
         wait_for_save: bool = True,
         clear_metadata: bool = False,
+        connector_metadata=None,
         **kwargs,
     ) -> None:
+        save_kwargs = dict(kwargs)
+        if connector_metadata is not None:
+            kv_connector.bind_connector_metadata(connector_metadata)
+            save_kwargs["connector_metadata"] = connector_metadata
         kv_connector.save_kv_layer(
             layer_name=None,
             kv_layer=None,
             attn_metadata=None,
-            **kwargs,
+            **save_kwargs,
         )
         if wait_for_save:
-            kv_connector.wait_for_save(**kwargs)
+            kv_connector.wait_for_save()
         output.finished_sending, output.finished_recving = kv_connector.get_finished(
             finished_req_ids
         )

@@ -158,10 +158,11 @@ class QaicPlatform(Platform):
 
     @classmethod
     def set_device(cls, device: torch.device):
-        # Not Implemented for aot
+        if cls.is_aot:
+            torch.cpu.set_device(torch.device("cpu"))
+            return
         if isinstance(qaic, PlaceholderModule):
             raise NotImplementedError
-        # for eager mode
         qaic.set_device(device)
 
     @classmethod
@@ -342,7 +343,7 @@ class QaicPlatform(Platform):
                     "MooncakeStoreConnector",
                 }
                 if connector_names & paged_kv_connectors:
-                    cache_config.block_size = 256
+                    cache_config.block_size = 128
                 else:
                     cache_config.block_size = model_config.max_model_len  # ctx_len
 

@@ -151,6 +151,19 @@ def _get_legacy_qaic_kv_cache_spec(
     }
 
 
+def _normalize_paged_kv_specs(
+    specs: dict[str, KVCacheSpec],
+) -> dict[str, KVCacheSpec]:
+    """Keep one 128-token block size while padding physical page payloads."""
+    common_page_size = max(spec.page_size_bytes for spec in specs.values())
+    return {
+        name: replace(spec, page_size_padded=common_page_size)
+        if isinstance(spec, (AttentionSpec, MambaSpec))
+        else spec
+        for name, spec in specs.items()
+    }
+
+
 def get_qaic_kv_cache_spec(
     vllm_config: "VllmConfig", kv_cache_dtype: torch.dtype
 ) -> dict[str, KVCacheSpec]:
@@ -178,11 +191,11 @@ def get_qaic_kv_cache_spec(
                 spec, block_size=vllm_config.cache_config.block_size
             )
         if specs:
-            return specs
+            return _normalize_paged_kv_specs(specs)
     specs = _get_config_kv_cache_spec(vllm_config, kv_cache_dtype)
     if not specs:
         raise RuntimeError("QAIC model has no transferable KV cache layers")
-    return specs
+    return _normalize_paged_kv_specs(specs)
 
 
 def compute_max_decode_tokens(
