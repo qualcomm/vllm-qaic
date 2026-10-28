@@ -75,9 +75,6 @@ class QAicUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         if triton_en and _supports_triton_fused_moe_without_alignment(
             layer, x, topk_ids
         ):
-            from vllm.model_executor.layers.fused_moe.activation import (
-                MoEActivation,
-            )
             from vllm.model_executor.layers.fused_moe.config import (
                 biased_moe_quant_config,
             )
@@ -96,7 +93,7 @@ class QAicUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 w2=layer.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                activation=MoEActivation.from_str(layer.activation),
+                activation=layer.activation,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 global_num_experts=layer.global_num_experts,
                 expert_map=layer.expert_map,
