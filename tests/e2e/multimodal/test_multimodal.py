@@ -88,7 +88,7 @@ class _DualQpcTestBase:
                 runner="pooling",
                 quantization=None,
                 kv_cache_dtype="auto",
-                override_qaic_config=override_cfg,
+                override_qaic_config=dict(override_cfg),
                 trust_remote_code=is_internvl(model_name),
                 enable_mm_embeds=True,
                 limit_mm_per_prompt={"image": 1},
