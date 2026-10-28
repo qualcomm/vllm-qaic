@@ -14,6 +14,16 @@ from vllm_qaic.ops._triton_flags import triton_op_enabled
 triton_en = triton_op_enabled("SILU_AND_MUL")
 
 
+def triton_silu_and_mul_out(output: torch.Tensor, x: torch.Tensor) -> None:
+    """Write plain SiLU-and-mul into a caller-provided output using Triton."""
+    from vllm.model_executor.layers.activation import swiglustep_and_mul_triton
+
+    d = x.shape[-1] // 2
+    x2d = x.reshape(-1, x.shape[-1])
+    output2d = output.reshape(-1, d)
+    swiglustep_and_mul_triton(output2d, x2d, limit=float("inf"))
+
+
 class QAicSiluAndMul(SiluAndMul):
     """
     QAIC-specific SwiGLU (SiluAndMul) implementation with torch.compile support.
@@ -57,14 +67,9 @@ class QAicSiluAndMul(SiluAndMul):
         # dims to be safe and restore the original shape afterwards. Flag off ->
         # the QAIC NSP swiglu op below, bit-for-bit.
         if triton_en:
-            from vllm.model_executor.layers.activation import (
-                swiglustep_and_mul_triton,
-            )
-
             d = x.shape[-1] // 2
-            x2d = x.reshape(-1, x.shape[-1])
-            out2d = torch.empty((x2d.shape[0], d), dtype=x.dtype, device=x.device)
-            swiglustep_and_mul_triton(out2d, x2d, limit=float("inf"))
-            return out2d.reshape(*x.shape[:-1], d)
+            output = torch.empty((*x.shape[:-1], d), dtype=x.dtype, device=x.device)
+            triton_silu_and_mul_out(output, x)
+            return output
 
         return torch.ops.qaic.swiglu(x)
