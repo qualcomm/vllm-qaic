@@ -1377,11 +1377,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
 
             # mm_kwargs_list is only needed for prefill requests; skip preprocessing
             # entirely when there are no prefills or the model has no mm inputs.
-            if (
-                self.supports_mm_inputs
-                and prefill_input_ids.size > 0
-                and not (self.is_kv_consumer and self.model.include_sampler)
-            ):
+            if self.supports_mm_inputs and prefill_input_ids.size > 0:
                 mm_kwargs_list = self._mm_preprocess(scheduler_output)
                 num_prefill_reqs = len(self.input_batch.req_ids) - self.num_decodes
                 assert len(mm_kwargs_list) == num_prefill_reqs

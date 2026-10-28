@@ -467,7 +467,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             cluster_id=cluster_id,
             use_async_scheduling=self.use_async_scheduling,
         )
-        # Config flags alone cannot validate a user-supplied QPC's sampled IO.
+        # QAIC runtime only warns on missing bindings; validate that the supplied
+        # QPC actually exports ODS IO rather than silently dropping outputs.
         self._validate_ods_qpc_bindings()
 
         # ODS QPCs do not expose logits; use a dummy 3D shape for bookkeeping.
@@ -608,6 +609,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             self.decode_bsz = 0
 
     def _validate_ods_qpc_bindings(self) -> None:
+        """Validate QPC bindings for ODS; QAIC runtime warns instead of failing."""
         if not self.include_sampler:
             return
         required_inputs = {
