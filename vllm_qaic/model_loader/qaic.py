@@ -162,6 +162,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self.lora_mode = bool(vllm_config.lora_config)
         self.last_decode = False
         self.num_spec_tokens = 0
+        self._ods_handoff_buffers: list[np.ndarray] = []
         self.include_sampler = override_qaic_config.get("aic_include_sampler", False)
         self.return_pdfs = bool(
             self.include_sampler and override_qaic_config.get("aic_return_pdfs", False)
@@ -174,8 +175,11 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             )
             if vllm_config.speculative_config:
                 raise ValueError("ODS does not support speculative decoding.")
-            if vllm_config.kv_transfer_config:
-                raise ValueError("ODS does not support disaggregated serving.")
+            if (
+                vllm_config.kv_transfer_config
+                and vllm_config.kv_transfer_config.kv_role != "kv_consumer"
+            ):
+                raise ValueError("ODS disaggregated serving requires kv_consumer role.")
         if vllm_config.speculative_config:
             self.num_spec_tokens = vllm_config.speculative_config.num_speculative_tokens
         self.max_decode_tokens = compute_max_decode_tokens(
@@ -252,6 +256,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         tlm_prefill_hidden_chunks: list[np.ndarray] | None = None,
         dflash_decode_hidden_buf: np.ndarray | None = None,
         prefill_output_offset: int = 0,
+        penalty_token_ids: list[tuple[list[int], list[int]]] | None = None,
     ) -> Queue | None:
         if self.is_pooling_model and not self.is_multimodal_model:
             output = self._run_encode(prefill_cum_sum, input_ids, positions)
@@ -277,7 +282,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 )
                 return pending_prefill_exec_queue
             else:
-                self._kv_handoff(batch_indices, kv_caches)
+                self._kv_handoff(batch_indices, kv_caches, penalty_token_ids)
         else:
             with lock:  # TODO: Re-evaluate if needed for MultiProcExecutor
                 if is_prompt:
@@ -302,7 +307,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                         positions,
                         batch_indices,
                         logits,
-                        lora_ids=lora_ids,
                         sampling_params=sampling_params,
                         callback=callback,
                         dflash_decode_hidden_buf=dflash_decode_hidden_buf,
@@ -327,21 +331,18 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-        next_token: np.ndarray | dict[str, Any] | None = None,
+        next_token: dict[str, Any] | None = None,
     ) -> SamplerOutput | None:
         if self.include_sampler:
-            if isinstance(next_token, dict):
-                tokens = next_token["next_tokens"]
-                for row, source in next_token.pop("_prefill_sources", []):
-                    tokens[row, : source.shape[1], :] = source
-                if self.return_pdfs:
-                    probs = next_token["probs"]
-                    for row, source in next_token.pop("_prefill_probs_sources", []):
-                        probs[row, : source.shape[1], :] = source
-                else:
-                    probs = None
+            assert isinstance(next_token, dict), "ODS sampling requires decode tokens"
+            tokens = next_token["next_tokens"]
+            for row, source in next_token.pop("_prefill_sources", []):
+                tokens[row, : source.shape[1], :] = source
+            if self.return_pdfs:
+                probs = next_token["probs"]
+                for row, source in next_token.pop("_prefill_probs_sources", []):
+                    probs[row, : source.shape[1], :] = source
             else:
-                tokens = next_token
                 probs = None
             tokens_tensor = torch.as_tensor(tokens, dtype=torch.int64)
             if tokens_tensor.ndim == 3:
@@ -563,7 +564,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 self.decode_logits_by_k[_k] = dict(
                     logits=np.random.randn(
                         self.decode_bsz, _mdt, self.vocab_size
-                    ).astype(self.logits_dtype)
+                    ).astype(np.float32)
                 )
                 self.decode_num_logits_buffer_by_k[_k] = dict(
                     num_logits_to_keep=np.zeros((_mdt, 1), np.int64)
@@ -580,7 +581,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         else:
             self.decode_logits = dict(
                 logits=np.random.randn(self.decode_bsz, 1, self.vocab_size).astype(
-                    self.logits_dtype
+                    np.float32
                 )
             )
         # CCL state for prefill: dict keyed by prefill exec-object slot id, value
@@ -617,6 +618,10 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             "min_ps",
             "random_numbers",
         }
+        if self.disagg_serving_en:
+            required_inputs.update(
+                {"past_repetition_penalty_buffer", "past_presence_penalty_buffer"}
+            )
         required_outputs = {"next_tokens"}
         if self.return_pdfs:
             required_outputs.add("probs")
@@ -662,8 +667,19 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self,
         batch_indices: list[int],
         kv_caches: list[list[np.ndarray]],
+        penalty_token_ids: list[tuple[list[int], list[int]]] | None = None,
     ):
-        for _, bidx in enumerate(batch_indices):
+        decode_index = self.decode_execObj_idx
+        assert decode_index is not None
+        if self.include_sampler:
+            if penalty_token_ids is None or len(penalty_token_ids) != len(
+                batch_indices
+            ):
+                raise ValueError(
+                    "ODS KV handoff requires token history for each request."
+                )
+            self._ods_handoff_buffers.clear()
+        for row, bidx in enumerate(batch_indices):
             if kv_caches[bidx] is not None and len(kv_caches[bidx]) > 0:
                 assert len(self.kv_cache_info) == len(kv_caches[bidx]), (
                     f"KV buffer count mismatch: "
@@ -684,14 +700,38 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                         )
 
                 # Update kv cache setDataWith
-                decode_index = self.decode_execObj_idx
-                assert decode_index is not None
                 _ = self.session.set_data_for_kv_handoff(
                     kv_caches[bidx],
                     [("batch_index", bidx), ("ctx_start", 0)],
                     decode_index,
                     self.session.decode_buff_map,
                 )
+            if self.include_sampler and penalty_token_ids is not None:
+                prompt_ids, output_ids = penalty_token_ids[row]
+                for name, token_ids in (
+                    ("past_repetition_penalty_buffer", prompt_ids + output_ids),
+                    ("past_presence_penalty_buffer", output_ids),
+                ):
+                    info = self.get_io_shape_and_dtype(name)
+                    if info is None:
+                        raise ValueError(f"ODS decode QPC is missing {name}.")
+                    dims, dtype, _ = info
+                    if len(dims) != 2 or not 0 <= bidx < dims[0]:
+                        raise ValueError(f"Invalid ODS penalty slot {bidx} for {name}.")
+                    if any(t < 0 or t >= dims[1] for t in token_ids):
+                        raise ValueError(
+                            "ODS penalty history contains an invalid token ID."
+                        )
+                    buffer = np.zeros((1, dims[1]), dtype=dtype)
+                    buffer[0, token_ids] = 1
+                    # setDataWithSlices borrows these buffers until decode completes.
+                    self._ods_handoff_buffers.append(buffer)
+                    self.session.set_data_for_repetition_penalty(
+                        [buffer],
+                        [("batch_index", int(bidx))],
+                        decode_index,
+                        buffer_name=name,
+                    )
         return
 
     def _run_pipeline_prefill(
@@ -1098,7 +1138,9 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             batch_inputs["next_tokens"] = self.decode_next_tokens["next_tokens"]
             if self.return_pdfs:
                 batch_inputs["probs"] = self.decode_next_tokens["probs"]
-            batch_inputs["last_accepted_output_tokens"] = batch_inputs["input_ids"]
+            batch_inputs["last_accepted_output_tokens"] = sampling_params.get(
+                "last_accepted_output_tokens", batch_inputs["input_ids"]
+            )
 
         if self.comp_ctx_lengths_decode is not None:
             assert self.list_of_comp_ctx_lengths is not None
@@ -2426,6 +2468,11 @@ def _get_qaic_compile_config(
         if include_sampler is not None:
             return_pdfs = qaic_config.get("return_pdfs")
             max_top_k_ids = qaic_config.get("max_top_k_ids", 512)
+    if include_sampler:
+        if vllm_config.speculative_config:
+            raise ValueError("ODS does not support speculative decoding.")
+        if kv_role not in (None, "kv_consumer"):
+            raise ValueError("ODS disaggregated serving requires kv_consumer role.")
     # QEfficient generates and validates CCL buckets; an explicit False disables it.
     ccl_flag = cfg.pop("ccl_enabled", None)
     ccl_lists = bool(

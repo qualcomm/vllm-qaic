@@ -279,19 +279,13 @@ class QAICInferenceSession:
             self.kv_slicing_spec_handle = self.get_slicing_spec_handle(
                 buffer_spec_json=buffer_spec_json
             )
-        self.repetition_penalty_spec_handle = None
-        past_repetition_penalty_buffer = "past_repetition_penalty_buffer"
-        if past_repetition_penalty_buffer in self.input_names:
-            self.repetition_penalty_map = [
-                (
-                    past_repetition_penalty_buffer,
-                    self.binding_index_map[past_repetition_penalty_buffer],
+        self.penalty_spec_handles = {}
+        for name in ("past_repetition_penalty_buffer", "past_presence_penalty_buffer"):
+            if name in self.input_names:
+                buffer_spec_json = self.get_json_for_repetition_penalty_slicing(name)
+                self.penalty_spec_handles[name] = self.get_slicing_spec_handle(
+                    buffer_spec_json=buffer_spec_json
                 )
-            ]
-            buffer_spec_json = self.get_json_for_repetition_penalty_slicing()
-            self.repetition_penalty_spec_handle = self.get_slicing_spec_handle(
-                buffer_spec_json=buffer_spec_json
-            )
 
         for name in self.output_names:
             if name.startswith("log"):
@@ -382,14 +376,16 @@ class QAICInferenceSession:
             }
         return json.dumps(json_spec)
 
-    def get_json_for_repetition_penalty_slicing(self):
+    def get_json_for_repetition_penalty_slicing(
+        self, buffer_name="past_repetition_penalty_buffer"
+    ):
         size = aic_to_np_dtype_mapping[
-            self.bindings[self.binding_index_map["past_repetition_penalty_buffer"]].type
+            self.bindings[self.binding_index_map[buffer_name]].type
         ]
         json_spec = {
             "BufferSpecs": [
                 {
-                    "Name": "past_repetition_penalty_buffer",
+                    "Name": buffer_name,
                     "ElemSize": size.itemsize,
                     "DimSpecs": [
                         {"start": "batch_index"},
@@ -583,14 +579,18 @@ class QAICInferenceSession:
         )
 
     def set_data_for_repetition_penalty(
-        self, repetition_penalty_buffers, slicing_parameters, index=0
+        self,
+        repetition_penalty_buffers,
+        slicing_parameters,
+        index=0,
+        buffer_name="past_repetition_penalty_buffer",
     ):
         return self._set_data_with_slices(
             repetition_penalty_buffers,
             slicing_parameters,
-            self.repetition_penalty_spec_handle,
+            self.penalty_spec_handles[buffer_name],
             index,
-            self.repetition_penalty_map,
+            [(buffer_name, self.binding_index_map[buffer_name])],
         )
 
     def _set_data_with_slices(

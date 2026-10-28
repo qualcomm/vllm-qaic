@@ -1146,7 +1146,8 @@ class QaicModelRunnerAoT(GPUModelRunner):
 
         num_reqs = self.input_batch.num_reqs
         request_params = [
-            self.requests[req_id].sampling_params for req_id in self.input_batch.req_ids
+            self.requests[req_id].sampling_params
+            for req_id in self.input_batch.req_ids[:num_reqs]
         ]
 
         def request_values(name: str, dtype) -> np.ndarray:
@@ -1194,10 +1195,11 @@ class QaicModelRunnerAoT(GPUModelRunner):
             ).astype(np.float32, copy=False),
         }
         decode_params = None
-        if self.num_decodes:
+        num_decode_reqs = num_reqs if self.is_kv_consumer else self.num_decodes
+        if num_decode_reqs:
             decode_params = {
                 key: np.resize(
-                    values[: self.num_decodes],
+                    values[:num_decode_reqs],
                     (
                         self.model.decode_bsz,
                         self.model.max_top_k_ids if key == "random_numbers" else 1,
@@ -1205,6 +1207,17 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 )
                 for key, values in params.items()
             }
+            if self.is_kv_consumer and self.model.include_sampler:
+                sentinel = np.iinfo(np.int32).max
+                accepted = np.full((self.model.decode_bsz, 1), sentinel, dtype=np.int64)
+                accepted[:num_reqs, 0] = self.input_ids.cpu.numpy()[:num_reqs]
+                # Replaying the last prompt token must not count as generated text.
+                first_step = (
+                    self.input_batch.num_computed_tokens_cpu[:num_reqs]
+                    < self.input_batch.num_prompt_tokens[:num_reqs]
+                )
+                accepted[np.flatnonzero(first_step), 0] = sentinel
+                decode_params["last_accepted_output_tokens"] = accepted
         prefill_params = {
             key: values[self.num_decodes : num_reqs] for key, values in params.items()
         }
@@ -1365,7 +1378,11 @@ class QaicModelRunnerAoT(GPUModelRunner):
 
             # mm_kwargs_list is only needed for prefill requests; skip preprocessing
             # entirely when there are no prefills or the model has no mm inputs.
-            if self.supports_mm_inputs and prefill_input_ids.size > 0:
+            if (
+                self.supports_mm_inputs
+                and prefill_input_ids.size > 0
+                and not self.is_kv_consumer
+            ):
                 mm_kwargs_list = self._mm_preprocess(scheduler_output)
                 num_prefill_reqs = len(self.input_batch.req_ids) - self.num_decodes
                 assert len(mm_kwargs_list) == num_prefill_reqs
@@ -1427,6 +1444,17 @@ class QaicModelRunnerAoT(GPUModelRunner):
                     ods_next_token["_prefill_probs_sources"] = []
 
             if prefill_input_ids.size > 0:
+                penalty_token_ids = None
+                if self.is_kv_consumer and self.model.include_sampler:
+                    penalty_token_ids = [
+                        (
+                            self.requests[req_id].prompt_token_ids or [],
+                            self.requests[req_id].output_token_ids,
+                        )
+                        for req_id in self.input_batch.req_ids[
+                            self.num_decodes : num_reqs
+                        ]
+                    ]
                 hidden_states_prefill = (
                     self.create_logits_np(len(prefill_cum_sum), self.model.vocab_size)
                     if not self.is_kv_consumer and not self.model.include_sampler
@@ -1469,6 +1497,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
                     tlm_prefill_hidden_chunks=tlm_prefill_hidden_chunks,
                     sampling_params=sampling_params_prefill,
                     prefill_output_offset=self.num_decodes,
+                    penalty_token_ids=penalty_token_ids,
                 )
                 if _dflash_prefill:
                     # Prefill is sync for DFlash; per-chunk hidden buffers are
@@ -1665,14 +1694,11 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 torch.zeros((len(self.batch_indices), 1), dtype=torch.int64)
             )
         else:
-            sampling_metadata = None
-            if self.model.include_sampler:
-                sampling_metadata = self.input_batch.sampling_metadata
             if self.model.include_sampler:
                 self.input_batch.update_async_output_token_ids()
                 sampler_output = self.model.sample(
                     logits,
-                    sampling_metadata,
+                    self.input_batch.sampling_metadata,
                     ods_next_token,
                 )
             else:
