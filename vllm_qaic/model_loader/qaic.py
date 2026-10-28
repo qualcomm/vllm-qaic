@@ -395,7 +395,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         comp_ctx_lengths_decode.sort()
         if comp_ctx_lengths_prefill or comp_ctx_lengths_decode:
             self.list_of_comp_ctx_lengths = {
-                comp_ctx_len: np.empty(comp_ctx_len, dtype=np.int64)
+                comp_ctx_len: np.zeros(comp_ctx_len, dtype=np.int64)
                 for comp_ctx_len in comp_ctx_lengths_prefill + comp_ctx_lengths_decode
             }
         return comp_ctx_lengths_prefill or None, comp_ctx_lengths_decode or None
@@ -962,7 +962,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     )
                 if self.comp_ctx_lengths_prefill is not None:
                     assert self.list_of_comp_ctx_lengths is not None
-                    prefill_ccl = self.comp_ctx_lengths_prefill[0]
+                    # Largest bucket when none fits, matching the decode path.
+                    prefill_ccl = self.comp_ctx_lengths_prefill[-1]
                     for j in range(prefill_ccl_id, len(self.comp_ctx_lengths_prefill)):
                         if (
                             chunk_inputs["position_ids"].max()
@@ -2406,26 +2407,28 @@ def _get_qaic_compile_config(
         if include_sampler is not None:
             return_pdfs = qaic_config.get("return_pdfs")
             max_top_k_ids = qaic_config.get("max_top_k_ids", 512)
-    # Check CCL is enabled
-    if (
-        "ccl_enabled" in cfg
-        or len(cfg.get("comp_ctx_lengths_prefill", [])) > 0
-        or len(cfg.get("comp_ctx_lengths_decode", [])) > 0
-    ):
+    # Check CCL is enabled. ccl_enabled is popped unconditionally, so an explicit
+    # False turns CCL off instead of enabling it.
+    ccl_flag = cfg.pop("ccl_enabled", None)
+    ccl_lists = bool(
+        cfg.get("comp_ctx_lengths_prefill") or cfg.get("comp_ctx_lengths_decode")
+    )
+    if ccl_flag is False and ccl_lists:
+        raise ValueError(
+            "ccl_enabled=False conflicts with comp_ctx_lengths_prefill/decode."
+        )
+    if ccl_flag or ccl_lists:
         if qaic_config is None:
             qaic_config = dict()
         qaic_config["ccl_enabled"] = True
-        if not cfg.pop("ccl_enabled", False):
-            cfg["comp_ctx_lengths_prefill"] = (
-                [vllm_config.model_config.max_model_len]
-                if (len(cfg.get("comp_ctx_lengths_prefill", [])) == 0)
-                else cfg.get("comp_ctx_lengths_prefill")
-            )
-            cfg["comp_ctx_lengths_decode"] = (
-                [vllm_config.model_config.max_model_len]
-                if (len(cfg.get("comp_ctx_lengths_decode", [])) == 0)
-                else cfg.get("comp_ctx_lengths_decode")
-            )
+        max_len = vllm_config.model_config.max_model_len
+        for key in ("comp_ctx_lengths_prefill", "comp_ctx_lengths_decode"):
+            lens = list(cfg.get(key) or [max_len])
+            # The largest bucket must cover max_model_len, or late positions
+            # would bind a bucket smaller than themselves.
+            if max(lens) < max_len:
+                lens.append(max_len)
+            cfg[key] = lens
     qpc_path = cfg.pop("qpc_path")
     if qpc_path and kv_offload and len(qpc_path.split(":")) > 1:
         assert qpc_idx is not None
