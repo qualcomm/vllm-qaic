@@ -132,7 +132,7 @@ class _DualQpcTestBase:
                 inputs_proc = qeff_model.model.prepare_inputs_for_generation(
                     inputs=inputs_proc,
                     prefill_seq_len=seq_len,
-                    batch_size=decode_bsz,
+                    batch_size=1,
                 )
             output = qeff_model.generate(
                 inputs=inputs_proc,
