@@ -684,10 +684,12 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                         )
 
                 # Update kv cache setDataWith
+                decode_index = self.decode_execObj_idx
+                assert decode_index is not None
                 _ = self.session.set_data_for_kv_handoff(
                     kv_caches[bidx],
                     [("batch_index", bidx), ("ctx_start", 0)],
-                    self.decode_execObj_idx,
+                    decode_index,
                     self.session.decode_buff_map,
                 )
         return
@@ -1007,20 +1009,32 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                         # prefill_output_offset + i after its exec object completes.
                         self.decode_next_tokens.setdefault(
                             "_prefill_sources", []
-                        ).append((prefill_output_offset + i, next_tokens.copy()))
+                        ).append(
+                            (
+                                prefill_output_offset + i,
+                                chunk_inputs["next_tokens"].copy(),
+                            )
+                        )
                         if self.return_pdfs:
                             self.decode_next_tokens.setdefault(
                                 "_prefill_probs_sources", []
-                            ).append((prefill_output_offset + i, probs.copy()))
+                            ).append(
+                                (
+                                    prefill_output_offset + i,
+                                    chunk_inputs["probs"].copy(),
+                                )
+                            )
                 else:
                     if self.include_sampler and self.decode_next_tokens is not None:
                         self.decode_next_tokens.setdefault(
                             "_prefill_sources", []
-                        ).append((prefill_output_offset + i, next_tokens))
+                        ).append(
+                            (prefill_output_offset + i, chunk_inputs["next_tokens"])
+                        )
                         if self.return_pdfs:
                             self.decode_next_tokens.setdefault(
                                 "_prefill_probs_sources", []
-                            ).append((prefill_output_offset + i, probs))
+                            ).append((prefill_output_offset + i, chunk_inputs["probs"]))
                     time.sleep(0.01)
                     pending_exec_queue.put(exec_obj_idx)
 
@@ -1515,10 +1529,12 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     self.decode_batch_inputs["comp_ctx_lengths"] = np.zeros(
                         self.comp_ctx_lengths_decode[-1], dtype=np.int64
                     )
+                decode_index = self.decode_execObj_idx
+                assert decode_index is not None
                 _ = self.session.set_data_for_kv_handoff(
                     KvCache_buff,
                     [("batch_index", bidx), ("ctx_start", 0)],
-                    self.decode_execObj_idx,
+                    decode_index,
                     self.session.decode_buff_map,
                 )
                 bidx += 1
@@ -1627,10 +1643,6 @@ def load_qaic_model(
 
     qaic_compile_config = _get_qaic_compile_config(vllm_config, speculative_model_type)
     qpc_path: str | None = qaic_compile_config.qpc_path
-
-    # set lora max adapters
-    if vllm_config.lora_config:
-        qaic_max_adapters = int(os.environ.get("VLLM_QAIC_LORA_MAX_ID_SUPPORTED", 128))
 
     if (
         vllm_config.model_config.runner_type == "pooling"
@@ -1745,6 +1757,9 @@ def load_qaic_model(
                 qaic_compile_config.cfg.pop("prefill_only", None)
 
             if vllm_config.lora_config:
+                qaic_max_adapters = int(
+                    os.environ.get("VLLM_QAIC_LORA_MAX_ID_SUPPORTED", 128)
+                )
                 logger.info(
                     "Transforming and compiling lora model using QEfficient library"
                 )
@@ -1824,6 +1839,9 @@ def load_qaic_model(
         except Exception as e:
             logger.error("Failed to transform and compile the model! %s", e)
             raise e
+
+    if qpc_path is None:
+        raise ValueError("QEfficient compilation did not return a QPC path.")
 
     # dump adaptername_to_id to folder for the first compilation
     if vllm_config.lora_config and not os.path.exists(
@@ -1984,11 +2002,14 @@ def get_hf_model(
         "seq_classify": QEFFAutoModelForSequenceClassification,
     }
     hf_config = model_config.hf_config
+    if hf_config is None:
+        raise ValueError("A Hugging Face model configuration is required.")
     # DFlash DLM: unwrap vLLM's EAGLEConfig wrapper so QEfficient sees the
     # native checkpoint config.
     _eagle_inner = getattr(hf_config, "model", None)
     if (
         hf_config.model_type == "eagle"
+        and _eagle_inner is not None
         and isinstance(_eagle_inner, PretrainedConfig)
         and getattr(_eagle_inner, "model_type", None) != "eagle"
     ):
@@ -2088,10 +2109,9 @@ def get_hf_model(
     )
     while retry_count < max_retries:
         try:
-            model_hf = QEff_class_mapping[model_type].from_pretrained(
+            return QEff_class_mapping[model_type].from_pretrained(
                 model_config.model, **args
             )
-            break
         except requests.ReadTimeout as e:
             logger.info("HF hub read timeout: %s", e)
             retry_count += 1
@@ -2108,11 +2128,9 @@ def get_hf_model(
         except Exception as e:
             logger.warning("Unable to access HF hub due to an exception: %s", e)
             retry_count += 1
-    if retry_count >= max_retries:
-        raise ValueError(
-            f"Unable to download model {model_config.model} from Hugging face!"
-        )
-    return model_hf
+    raise ValueError(
+        f"Unable to download model {model_config.model} from Hugging face!"
+    )
 
 
 def search_adapters_in_cache(base_model_name: str) -> list[LoRAModulePath]:
@@ -2175,6 +2193,7 @@ def _get_qaic_compile_config(
     kv_cache_batch_size = vllm_config.cache_config.num_cpu_blocks
     additional_config = vllm_config.additional_config or {}
     prefill_only = None
+    kv_role = None
     # prefill_only options
     if vllm_config.kv_transfer_config:
         kv_role = vllm_config.kv_transfer_config.kv_role
@@ -2407,8 +2426,7 @@ def _get_qaic_compile_config(
         if include_sampler is not None:
             return_pdfs = qaic_config.get("return_pdfs")
             max_top_k_ids = qaic_config.get("max_top_k_ids", 512)
-    # Check CCL is enabled. ccl_enabled is popped unconditionally, so an explicit
-    # False turns CCL off instead of enabling it.
+    # QEfficient generates and validates CCL buckets; an explicit False disables it.
     ccl_flag = cfg.pop("ccl_enabled", None)
     ccl_lists = bool(
         cfg.get("comp_ctx_lengths_prefill") or cfg.get("comp_ctx_lengths_decode")
@@ -2417,18 +2435,10 @@ def _get_qaic_compile_config(
         raise ValueError(
             "ccl_enabled=False conflicts with comp_ctx_lengths_prefill/decode."
         )
-    if ccl_flag or ccl_lists:
+    if ccl_flag is not None or ccl_lists:
         if qaic_config is None:
             qaic_config = dict()
-        qaic_config["ccl_enabled"] = True
-        max_len = vllm_config.model_config.max_model_len
-        for key in ("comp_ctx_lengths_prefill", "comp_ctx_lengths_decode"):
-            lens = list(cfg.get(key) or [max_len])
-            # The largest bucket must cover max_model_len, or late positions
-            # would bind a bucket smaller than themselves.
-            if max(lens) < max_len:
-                lens.append(max_len)
-            cfg[key] = lens
+        qaic_config["ccl_enabled"] = bool(ccl_flag or ccl_lists)
     qpc_path = cfg.pop("qpc_path")
     if qpc_path and kv_offload and len(qpc_path.split(":")) > 1:
         assert qpc_idx is not None
