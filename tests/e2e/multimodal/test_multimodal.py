@@ -162,23 +162,21 @@ class _DualQpcTestBase:
         make_runner,
         decode_bsz,
     ):
-        """Exercise ODS with a dual-QPC image request end to end.
+        """Reuse dual-QPC helpers with sampling only on the language QPC.
 
-        The vision encoder QPC must remain host-sampled; the language QPC is
-        compiled with the sampler and receives its image embeddings from the
-        encoder. This ensures ODS preserves the multimodal handoff while the
-        generation QPC returns next-token IDs instead of logits.
+        The vision encoder produces embeddings, not sampled tokens.
         """
         tokenizer = _tokenizer_for(model_name)
         sampling_params = _sampling_params_for(model_name, tokenizer)
         updated_input = build_model_input(model_name, mm_input, tokenizer)
-        encoder_override_cfg = update_qaic_config(model_name, None)
+        encoder_override_cfg = update_qaic_config(model_name, None, kv_offload=True)
         ods_override_cfg = update_qaic_config(
             model_name,
             None,
             aic_include_sampler=True,
             aic_return_pdfs=False,
             max_top_k_ids=512,
+            kv_offload=True,
         )
         mm_kwargs = _mm_processor_kwargs(model_name)
         inputs = [

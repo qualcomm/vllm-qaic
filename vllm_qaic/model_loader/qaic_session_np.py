@@ -279,6 +279,7 @@ class QAICInferenceSession:
             self.kv_slicing_spec_handle = self.get_slicing_spec_handle(
                 buffer_spec_json=buffer_spec_json
             )
+        # Only the two ODS [slots, vocab] histories need slot-slicing handles.
         self.penalty_spec_handles = {}
         for name in ("past_repetition_penalty_buffer", "past_presence_penalty_buffer"):
             if name in self.input_names:
@@ -379,9 +380,12 @@ class QAICInferenceSession:
     def get_json_for_repetition_penalty_slicing(
         self, buffer_name="past_repetition_penalty_buffer"
     ):
-        size = aic_to_np_dtype_mapping[
-            self.bindings[self.binding_index_map[buffer_name]].type
-        ]
+        binding = self.bindings[self.binding_index_map[buffer_name]]
+        if len(binding.dims) != 2:
+            raise ValueError(
+                f"ODS penalty buffer {buffer_name} must have shape [slots, vocab]."
+            )
+        size = aic_to_np_dtype_mapping[binding.type]
         json_spec = {
             "BufferSpecs": [
                 {

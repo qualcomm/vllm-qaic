@@ -271,7 +271,6 @@ class QaicAsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
                 state.num_decodes_executed,
                 spec_decode_metadata=state.spec_decode_metadata,
             )
-
             # Apply structured output bitmasks if present.
             if self._grammar_output is not None:
                 apply_grammar_bitmask(
@@ -475,7 +474,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
             and vllm_config.kv_transfer_config.kv_role == "kv_consumer"
         )
         self.is_async_kv_producer: bool = (
-            self.is_kv_producer and self.use_async_scheduling  # type: ignore[has-type]
+            self.is_kv_producer and self.use_async_scheduling
         )
         # KV producer (prefill node) must never run the drafter; clear
         # anything the parent __init__ installed for ngram/suffix SpD.
@@ -774,7 +773,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
             # async scheduling for pooling is handled at a higher level by
             # QaicAsyncPoolingModelRunnerOutput, so _pool() itself must always
             # be synchronous.
-            orig_async = self.use_async_scheduling  # type: ignore[has-type]
+            orig_async = self.use_async_scheduling
             self.use_async_scheduling = False
             try:
                 result = super()._pool(
@@ -1381,7 +1380,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
             if (
                 self.supports_mm_inputs
                 and prefill_input_ids.size > 0
-                and not self.is_kv_consumer
+                and not (self.is_kv_consumer and self.model.include_sampler)
             ):
                 mm_kwargs_list = self._mm_preprocess(scheduler_output)
                 num_prefill_reqs = len(self.input_batch.req_ids) - self.num_decodes
@@ -1435,7 +1434,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
 
             ods_next_token = None
             if self.model.include_sampler:
-                # Decode writes this shared buffer; prefill sources merge later.
+                # Keep ordered prefill chunks alive; merge their final token per row.
                 ods_next_token = self.model.decode_next_tokens
                 ods_next_token["next_tokens"].fill(-1)
                 ods_next_token["_prefill_sources"] = []
@@ -1668,11 +1667,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
             ec_connector_output,
             cudagraph_stats,
             slot_mappings,
-            hidden_states_decode,
-            hidden_states_prefill,
-            pending_prefill_exec_queue,
-            num_decodes_executed,
-            discard_request_mask_np,
+            *_,
             ods_next_token,
         ) = self.execute_model_state
         # Clear ephemeral state.

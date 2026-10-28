@@ -2,9 +2,8 @@
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 # ------------------------------------------------------------------
-# QAIC on-device sampling example.
-#
-# Serve equivalent:
+
+# QAIC on-device sampling example. Serve equivalent:
 #   vllm serve TinyLlama/TinyLlama-1.1B-Chat-v1.0 --max-model-len 256 \
 #     --max-num-seqs 2 --long-prefill-token-threshold 128 \
 #     --quantization mxfp6 --kv-cache-dtype mxint8 --additional-config \

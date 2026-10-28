@@ -162,6 +162,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self.lora_mode = bool(vllm_config.lora_config)
         self.last_decode = False
         self.num_spec_tokens = 0
+        # Keep borrowed [1, vocab] penalty rows alive until decode completes.
         self._ods_handoff_buffers: list[np.ndarray] = []
         self.include_sampler = override_qaic_config.get("aic_include_sampler", False)
         self.return_pdfs = bool(
@@ -255,7 +256,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         num_prompt_tokens_prefill: np.ndarray | None = None,
         tlm_prefill_hidden_chunks: list[np.ndarray] | None = None,
         dflash_decode_hidden_buf: np.ndarray | None = None,
-        prefill_output_offset: int = 0,
+        prefill_output_offset: int = 0,  # First prefill row after decode rows.
         penalty_token_ids: list[tuple[list[int], list[int]]] | None = None,
     ) -> Queue | None:
         if self.is_pooling_model and not self.is_multimodal_model:
@@ -307,6 +308,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                         positions,
                         batch_indices,
                         logits,
+                        lora_ids,
                         sampling_params=sampling_params,
                         callback=callback,
                         dflash_decode_hidden_buf=dflash_decode_hidden_buf,
@@ -334,21 +336,19 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         next_token: dict[str, Any] | None = None,
     ) -> SamplerOutput | None:
         if self.include_sampler:
-            assert isinstance(next_token, dict), "ODS sampling requires decode tokens"
+            assert isinstance(next_token, dict), "ODS sampling requires token outputs"
             tokens = next_token["next_tokens"]
+            # Retain ordered chunk buffers; the final chunk wins for each row.
             for row, source in next_token.pop("_prefill_sources", []):
                 tokens[row, : source.shape[1], :] = source
+
             if self.return_pdfs:
                 probs = next_token["probs"]
                 for row, source in next_token.pop("_prefill_probs_sources", []):
                     probs[row, : source.shape[1], :] = source
             else:
                 probs = None
-            tokens_tensor = torch.as_tensor(tokens, dtype=torch.int64)
-            if tokens_tensor.ndim == 3:
-                tokens_tensor = tokens_tensor[:, :, 0]
-            elif tokens_tensor.ndim == 1:
-                tokens_tensor = tokens_tensor[:, None]
+            tokens_tensor = torch.as_tensor(tokens[:, :, 0], dtype=torch.int64)
             logprobs_tensors = None
             if sampling_metadata.max_num_logprobs is not None and probs is not None:
                 probs_tensor = torch.as_tensor(
@@ -396,7 +396,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         comp_ctx_lengths_decode.sort()
         if comp_ctx_lengths_prefill or comp_ctx_lengths_decode:
             self.list_of_comp_ctx_lengths = {
-                comp_ctx_len: np.zeros(comp_ctx_len, dtype=np.int64)
+                comp_ctx_len: np.empty(comp_ctx_len)
                 for comp_ctx_len in comp_ctx_lengths_prefill + comp_ctx_lengths_decode
             }
         return comp_ctx_lengths_prefill or None, comp_ctx_lengths_decode or None
@@ -467,6 +467,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             cluster_id=cluster_id,
             use_async_scheduling=self.use_async_scheduling,
         )
+        # Config flags alone cannot validate a user-supplied QPC's sampled IO.
         self._validate_ods_qpc_bindings()
 
         # ODS QPCs do not expose logits; use a dummy 3D shape for bookkeeping.
@@ -508,6 +509,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 return
         self.prefill_num_logits_buffer = None
         if self.include_sampler:
+            # Shared outputs for decode and completed non-disagg prefill rows.
             self.decode_next_tokens: dict[str, np.ndarray] | None = {
                 "next_tokens": np.zeros((self.decode_bsz, 1, 1), dtype=np.int64)
             }
@@ -707,6 +709,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     self.session.decode_buff_map,
                 )
             if self.include_sampler and penalty_token_ids is not None:
+                # Rebuild this consumer slot's [full_batch_size, vocab] history:
+                # repetition includes prompt IDs; presence includes outputs only.
                 prompt_ids, output_ids = penalty_token_ids[row]
                 for name, token_ids in (
                     ("past_repetition_penalty_buffer", prompt_ids + output_ids),
@@ -1004,8 +1008,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     )
                 if self.comp_ctx_lengths_prefill is not None:
                     assert self.list_of_comp_ctx_lengths is not None
-                    # Largest bucket when none fits, matching the decode path.
-                    prefill_ccl = self.comp_ctx_lengths_prefill[-1]
+                    prefill_ccl = self.comp_ctx_lengths_prefill[0]
                     for j in range(prefill_ccl_id, len(self.comp_ctx_lengths_prefill)):
                         if (
                             chunk_inputs["position_ids"].max()
@@ -1045,8 +1048,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 if not self.use_async_scheduling:
                     self.session.complete_inf(exec_obj_idx, True)
                     if self.include_sampler and self.decode_next_tokens is not None:
-                        # Decode fills leading rows; merge this prefill result at
-                        # prefill_output_offset + i after its exec object completes.
+                        # Merge after completion so decode cannot overwrite prefill.
                         self.decode_next_tokens.setdefault(
                             "_prefill_sources", []
                         ).append(
@@ -1099,7 +1101,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         num_decodes = num_tokens // mdt  # number of decode requests
         batch_inputs = self.decode_batch_inputs_by_k[current_k]
         batch_inputs["input_ids"][:num_decodes] = input_ids.reshape(num_decodes, mdt)
-
         if self.uses_mrope:
             # positions shape: (4, num_decodes * mdt) -> (4, num_decodes, mdt)
             batch_inputs["position_ids"][:, :num_decodes] = positions.reshape(
@@ -1122,6 +1123,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             batch_inputs["batch_index"][:num_decodes, 0] = batch_indices
             if num_decodes < self.decode_bsz:
                 batch_inputs["batch_index"][num_decodes:] = -1
+
         if lora_ids is not None:
             batch_inputs["lora_ids"][:num_decodes] = lora_ids.reshape(num_decodes, 1)
             if num_decodes < self.decode_bsz:
@@ -1882,9 +1884,6 @@ def load_qaic_model(
             logger.error("Failed to transform and compile the model! %s", e)
             raise e
 
-    if qpc_path is None:
-        raise ValueError("QEfficient compilation did not return a QPC path.")
-
     # dump adaptername_to_id to folder for the first compilation
     if vllm_config.lora_config and not os.path.exists(
         f"{qpc_path}/adaptername_to_id.json"
@@ -1990,6 +1989,7 @@ class QaicCompileConfig:
     num_logits_to_keep: int | None
     kv_offload: bool
     include_sampler: bool | None
+    include_guided_decoding: bool | None
     return_pdfs: bool | None
     max_top_k_ids: int | None
     qaic_config: dict[str, Any] | None = None
@@ -2044,14 +2044,11 @@ def get_hf_model(
         "seq_classify": QEFFAutoModelForSequenceClassification,
     }
     hf_config = model_config.hf_config
-    if hf_config is None:
-        raise ValueError("A Hugging Face model configuration is required.")
     # DFlash DLM: unwrap vLLM's EAGLEConfig wrapper so QEfficient sees the
     # native checkpoint config.
     _eagle_inner = getattr(hf_config, "model", None)
     if (
         hf_config.model_type == "eagle"
-        and _eagle_inner is not None
         and isinstance(_eagle_inner, PretrainedConfig)
         and getattr(_eagle_inner, "model_type", None) != "eagle"
     ):
@@ -2151,9 +2148,10 @@ def get_hf_model(
     )
     while retry_count < max_retries:
         try:
-            return QEff_class_mapping[model_type].from_pretrained(
+            model_hf = QEff_class_mapping[model_type].from_pretrained(
                 model_config.model, **args
             )
+            break
         except requests.ReadTimeout as e:
             logger.info("HF hub read timeout: %s", e)
             retry_count += 1
@@ -2170,9 +2168,11 @@ def get_hf_model(
         except Exception as e:
             logger.warning("Unable to access HF hub due to an exception: %s", e)
             retry_count += 1
-    raise ValueError(
-        f"Unable to download model {model_config.model} from Hugging face!"
-    )
+    if retry_count >= max_retries:
+        raise ValueError(
+            f"Unable to download model {model_config.model} from Hugging face!"
+        )
+    return model_hf
 
 
 def search_adapters_in_cache(base_model_name: str) -> list[LoRAModulePath]:
@@ -2436,14 +2436,11 @@ def _get_qaic_compile_config(
                 qaic_config = {}
             qaic_config["target_layer_ids"] = dflash_cfg["target_layer_ids"]
             qaic_config["dflash_dlm_repo"] = dflash_cfg["dlm_repo"]
-    # Guided decoding needs its own QPC bindings and is intentionally deferred
-    # to a dedicated ODS follow-up. Do not silently pass this unsupported option
-    # through to QEfficient compilation.
-    if cfg.pop("aic_include_guided_decoding", None) is not None:
-        raise ValueError(
-            "aic_include_guided_decoding is not supported with QAIC on-device "
-            "sampling yet; use host-side guided decoding or a dedicated follow-up."
-        )
+    guided_decoding = cfg.pop("aic_include_guided_decoding", None)
+    if guided_decoding is not None:
+        if qaic_config is None:
+            qaic_config = {}
+        qaic_config["include_guided_decoding"] = guided_decoding
 
     # On Device Sampling
     if cfg.get("aic_include_sampler") is not None:
@@ -2463,29 +2460,40 @@ def _get_qaic_compile_config(
     include_sampler: bool | None = None
     return_pdfs: bool | None = None
     max_top_k_ids: int | None = None
+    include_guided_decoding: bool | None = None
     if qaic_config is not None:
+        include_guided_decoding = qaic_config.get("include_guided_decoding")
         include_sampler = qaic_config.get("include_sampler")
         if include_sampler is not None:
             return_pdfs = qaic_config.get("return_pdfs")
             max_top_k_ids = qaic_config.get("max_top_k_ids", 512)
     if include_sampler:
+        if include_guided_decoding:
+            raise ValueError("Guided decoding is not supported with ODS.")
         if vllm_config.speculative_config:
             raise ValueError("ODS does not support speculative decoding.")
         if kv_role not in (None, "kv_consumer"):
             raise ValueError("ODS disaggregated serving requires kv_consumer role.")
-    # QEfficient generates and validates CCL buckets; an explicit False disables it.
-    ccl_flag = cfg.pop("ccl_enabled", None)
-    ccl_lists = bool(
-        cfg.get("comp_ctx_lengths_prefill") or cfg.get("comp_ctx_lengths_decode")
-    )
-    if ccl_flag is False and ccl_lists:
-        raise ValueError(
-            "ccl_enabled=False conflicts with comp_ctx_lengths_prefill/decode."
-        )
-    if ccl_flag is not None or ccl_lists:
+    # Check CCL is enabled
+    if (
+        "ccl_enabled" in cfg
+        or len(cfg.get("comp_ctx_lengths_prefill", [])) > 0
+        or len(cfg.get("comp_ctx_lengths_decode", [])) > 0
+    ):
         if qaic_config is None:
             qaic_config = dict()
-        qaic_config["ccl_enabled"] = bool(ccl_flag or ccl_lists)
+        qaic_config["ccl_enabled"] = True
+        if not cfg.pop("ccl_enabled", False):
+            cfg["comp_ctx_lengths_prefill"] = (
+                [vllm_config.model_config.max_model_len]
+                if (len(cfg.get("comp_ctx_lengths_prefill", [])) == 0)
+                else cfg.get("comp_ctx_lengths_prefill")
+            )
+            cfg["comp_ctx_lengths_decode"] = (
+                [vllm_config.model_config.max_model_len]
+                if (len(cfg.get("comp_ctx_lengths_decode", [])) == 0)
+                else cfg.get("comp_ctx_lengths_decode")
+            )
     qpc_path = cfg.pop("qpc_path")
     if qpc_path and kv_offload and len(qpc_path.split(":")) > 1:
         assert qpc_idx is not None
@@ -2550,6 +2558,7 @@ def _get_qaic_compile_config(
         num_logits_to_keep=num_logits_to_keep,
         kv_offload=kv_offload,
         include_sampler=include_sampler,
+        include_guided_decoding=include_guided_decoding,
         return_pdfs=return_pdfs,
         max_top_k_ids=max_top_k_ids,
         qaic_config=qaic_config,
