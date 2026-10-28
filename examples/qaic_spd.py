@@ -44,7 +44,6 @@ def main() -> None:
         model="meta-llama/Llama-3.1-8B-Instruct",
         max_num_seqs=decode_bsz,  # determines decode batch size
         max_model_len=ctx_len,  # ctx_len (prompt + generated tokens, no padding)
-        long_prefill_token_threshold=seq_len,  # seq_len
         quantization="mxfp6",  # Preferred quantization
         kv_cache_dtype="mxint8",  # Preferred option to save KV cache performance
         disable_log_stats=False,
@@ -54,6 +53,7 @@ def main() -> None:
             "override_qaic_config": {
                 "device_group": [qid],
                 "num_cores": tlm_cores,
+                "prefill_seq_len": seq_len,
             },
             "draft_override_qaic_config": {
                 "device_group": [qid],  # same device as TLM

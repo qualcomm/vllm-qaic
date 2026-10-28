@@ -88,8 +88,6 @@ def test_offline_throughput(
         "vllm",
         "--max-num-seqs",
         str(decode_bsz),
-        "--long-prefill-token-threshold",
-        str(seq_len),
         "--no-async-scheduling",
     ]
     if quantization is not None:
@@ -97,8 +95,10 @@ def test_offline_throughput(
     if os.environ.get("DISABLE_PREFIX_CACHING") == "1":
         cmd.append("--no-enable-prefix-caching")
     _additional_config: dict = {"device_group": device_group}
-    if override_qaic_config is not None:
-        _additional_config["override_qaic_config"] = override_qaic_config
+    _additional_config["override_qaic_config"] = {
+        **(override_qaic_config or {}),
+        "prefill_seq_len": seq_len,
+    }
     cmd += ["--additional-config", json.dumps(_additional_config)]
     # Run offline throughput
     result = _run_streaming(cmd)
@@ -159,8 +159,6 @@ def test_offline_latency(
         kv_dtype,
         "--max-num-seqs",
         str(decode_bsz),
-        "--long-prefill-token-threshold",
-        str(seq_len),
         "--no-async-scheduling",
     ]
     if quantization is not None:
@@ -168,8 +166,10 @@ def test_offline_latency(
     if os.environ.get("DISABLE_PREFIX_CACHING") == "1":
         cmd.append("--no-enable-prefix-caching")
     _additional_config_lat: dict = {"device_group": device_group}
-    if override_qaic_config is not None:
-        _additional_config_lat["override_qaic_config"] = override_qaic_config
+    _additional_config_lat["override_qaic_config"] = {
+        **(override_qaic_config or {}),
+        "prefill_seq_len": seq_len,
+    }
     cmd += ["--additional-config", json.dumps(_additional_config_lat)]
     # Run offline latency
     result = _run_streaming(cmd)
