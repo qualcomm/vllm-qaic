@@ -114,9 +114,8 @@ class QaicPlatform(Platform):
     @classmethod
     def pre_register_and_update(cls, parser=None) -> None:
         cls.device_type = "qaic"
-        # Adapt the patch here.
-        from vllm_qaic import patch  # noqa: F401
-
+        # Rebind vllm.triton_utils before general patches import upstream
+        # modules that may copy its Triton symbols into their own namespace.
         if not cls.is_aot:
             import vllm_qaic.patch.patch_qaic_triton_import  # noqa
 
@@ -127,6 +126,8 @@ class QaicPlatform(Platform):
             and QAIC_GPT_OSS_MXFP4_METHOD not in cls.supported_quantization
         ):
             cls.supported_quantization.append(QAIC_GPT_OSS_MXFP4_METHOD)
+        # Adapt the remaining patches after the eager Triton bindings exist.
+        from vllm_qaic import patch  # noqa: F401
 
         if parser is not None:  # For synchronous vLLM engine
             # disable prefix caching as QAIC backend plugin does not support it
