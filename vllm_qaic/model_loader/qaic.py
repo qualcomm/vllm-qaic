@@ -122,9 +122,14 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         additional_config = vllm_config.additional_config or {}
         override_qaic_config = additional_config.get("override_qaic_config") or {}
         qeff_qaic_config = override_qaic_config.get("qaic_config") or {}
+        gdn_full_state_update = qeff_qaic_config.get("gdn_full_state_update")
         self.requires_physical_batch_permutation = (
             qeff_qaic_config.get("blocking_mode") == "kv_batch_fold"
-            or qeff_qaic_config.get("gdn_full_state_update") is True
+            or (
+                isinstance(gdn_full_state_update, str)
+                and gdn_full_state_update.lower() in ("true", "1")
+            )
+            or gdn_full_state_update is True
         )
 
         pooler_config = vllm_config.model_config.pooler_config
