@@ -1,256 +1,218 @@
 ---
 name: vllm-qaic-code-review
-description: Repo-specific code review for vllm-qaic. Auto-detects PyT/AoT mode from the diff, spawns the matching rule overlays, anchors every finding to a real diff line. Use when asked to review vllm-qaic changes — the working tree, a PR number, a path, or a fork branch URL. Accepts `--runs=2` to review twice and vote.
+description: Review changes to the vllm-qaic plugin (qualcomm/vllm-qaic) as this repo's own reviewers would. Use whenever the user asks to review, audit, or sanity-check a vllm-qaic change — phrases like "review PR 212", "review my working tree", "look at this fork branch", "is this ready to merge", "check this diff for leaks", or "does this break eager mode". Accepts the working tree, a PR number, a commit or range, a path, or a fork branch URL, plus `--runs=2` to review twice and vote. Routes the diff to AoT / PyT / shared rule overlays, runs a mechanical grep pre-pass, anchors every finding to a literal diff line, and surfaces public-repo leaks and cross-mode hazards first. NOT for upstream vLLM PRs, QEfficient, or generic Python review — the rules encode contracts specific to this plugin.
 ---
 
-# vllm-qaic-code-review — vllm-qaic code review
+# vllm-qaic code review
 
-Rules were mined from roughly a thousand human reviewer comments on this
-project's own review history — they encode what reviewers here actually ask for,
-not generic Python or vLLM advice. The worker contract lives in the
-`vllm-qaic-code-review` agent (`skills_studio/agents/vllm-qaic-code-review.md`;
-activate it with `make claude` or `make codex` from the repo root).
+You review changes against `qualcomm/vllm-qaic` for the hazards this repo's
+reviewers actually raise: upstream edits instead of patches, a change made for
+one mode that breaks the other, config handling that misreads CLI/env strings,
+version pins that drift between files, and — because the repo is public —
+machine-specific paths and internal references that would stay in git history
+forever.
 
 Args: `$ARGUMENTS`
 
----
+## Path conventions
 
-## Step 1 — Collect the diff
+- `references/...` and `scripts/...` are relative to **this skill's own
+  directory**. Where a path must go into a subagent prompt (subagents don't
+  inherit this skill's cwd), substitute `<SKILL_DIR>` with this skill's
+  absolute directory first.
+- `<REPO_ROOT>` is the checkout the diff came from: `git rev-parse
+  --show-toplevel` for a local or PR diff, or the Phase 1a clone path for a
+  fork-branch review.
 
-Pick the first that applies:
+References (role agents load the ones their prompt names):
+
+- `references/repo_conventions.md` — the contract: plugin-not-fork, the two
+  modes and the import guard idiom, where each kind of change belongs, the
+  patch-module conventions, headers, what pre-commit already enforces, version
+  pin sources, test layout.
+- `references/rules_shared.md` — 39 rules, every diff.
+- `references/rules_aot.md` — 8 rules, AoT overlay.
+- `references/rules_pyt.md` — 13 rules, PyT (eager) overlay.
+- `scripts/run_review_greps.sh` — mechanical pre-pass, run in Phase 3.
+
+The worker contract — anchoring gate, carve-outs, YAML schema — lives in the
+`vllm-qaic-code-review` agent (`skills_studio/agents/vllm-qaic-code-review.md`;
+activate it with `make claude` or `make codex` from the repo root). Rules 1–34
+of the shared set and all AoT/PyT rules were mined from this repo's human
+review history; shared rules 35–39 restate ground rules from
+`skills_studio/AGENTS.md`.
+
+## Workflow (6 phases)
+
+### Phase 1 — Capture the diff
+
+Pick the first form that applies:
 
 | Arg form | Command |
 |---|---|
 | empty | `git --no-pager diff --no-color HEAD` |
-| `<N>` (digits) | `gh pr diff <N> --repo qualcomm/vllm-qaic` |
-| a GitHub branch link — `https://github.com/<owner>/<repo>/tree/<branch>`, or a repo URL (`git@github.com:<owner>/<repo>.git` / `https://github.com/<owner>/<repo>`) plus a branch name given in prose | Clone-and-checkout workflow — see **Step 1a** |
-| a commit or revision range (`<sha>`, `<base>..<head>`) | `git --no-pager diff --no-color <range>` |
+| `<N>` (digits) | `gh pr diff <N> --repo qualcomm/vllm-qaic`, plus `gh pr view <N> --repo qualcomm/vllm-qaic --json title,body,baseRefName,headRefName,isDraft` |
+| a GitHub branch link — `https://github.com/<owner>/<repo>/tree/<branch>`, or a repo URL plus a branch name given in prose | Phase 1a |
+| a commit or range (`<sha>`, `<base>..<head>`) | `git --no-pager diff --no-color <range>` |
 | a path | `git --no-pager diff --no-color HEAD -- <path>` |
 
-Also note `--runs=2` if present (see Step 3).
+Note `--runs=2` if present (Phase 4). Don't pass `-w`: a whitespace-only rewrite
+of upstream-derived code is itself an `upstream.minimize_diff` signal. Never
+`gh pr checkout` — it mutates the user's checkout. If `gh` is missing or not
+authenticated, fall back to `git fetch origin pull/<N>/head:pr<N>` and
+`git diff origin/main...pr<N>`, and say the PR title/body were not available.
 
 If the diff is empty, say so and stop.
 
-**Transport.** If the diff is ≤ ~50 KB, inline it in each agent prompt. If
-larger, pass each agent the exact command to re-run instead. Never write a
-diff file *inside* a repo checkout — CI checkouts are read-only and a stray
-tracked-looking file would dirty `git status`. A scratch file for transport
-(e.g. handing an inline-sized diff to several subagent prompts at once) belongs
-in a temporary directory, never inside any clone.
+**Where the diff goes.** Save it to a temporary file such as
+`${TMPDIR:-/tmp}/vqreview/<tag>.diff` — the grep pass reads it, and agents
+read it instead of a re-pasted copy. Never write a diff or review file
+*inside* a checkout: CI checkouts are read-only, and a stray file dirties
+`git status`. If the diff is ≤ ~50 KB, also inline it in each agent prompt;
+if larger, give agents the file path.
 
-## Step 1a — Cloning a fork + branch
+#### Phase 1a — Cloning a fork + branch
 
-Triggered whenever Step 1's arg is a GitHub branch link, or a repo URL paired
-with a branch name. Fixed procedure, run it the same way every time:
+A fixed procedure, run the same way every time:
 
-1. **Parse** `<owner>`, `<repo>`, `<branch>` from the input. A `/tree/<branch>`
-   URL segment can itself contain `/` (branch names like `dev/v0.30.0`) — take
-   everything after `/tree/` as the branch, not just the first segment.
-2. **Location.** Clone into a scratch directory **outside** any existing
-   checkout: `${TMPDIR:-/tmp}/vllm-qaic-review/<owner>-<repo>`. **Never** clone
-   into the user's own working clone of `vllm-qaic`, and never nest the clone
-   inside it — a review must not touch the checkout the user is working in.
-   State the path you chose before cloning.
-3. **Reuse, don't re-clone.** If that directory already exists as a git repo,
-   `cd` into it and `git fetch origin` instead of cloning fresh.
-4. **Clone.** `git clone --no-single-branch git@github.com:<owner>/<repo>.git <path>`.
-   If SSH isn't set up, fall back to `https://github.com/<owner>/<repo>.git`.
-5. **Checkout.** `git fetch origin <branch>` then `git checkout <branch>`
-   (use `git switch -c <branch> origin/<branch>` if no local branch exists yet).
-6. **Determine the diff.** Default to everything unique to the branch: find
-   the fork's default branch (`git symbolic-ref refs/remotes/origin/HEAD`,
-   normally `main`) and diff against their merge-base with three-dot syntax:
-   `git --no-pager diff --no-color origin/<default>...<branch>`
-   This is "what this branch would show as a PR against `origin/<default>`".
-7. **Sanity-check the range before reviewing.** Run
-   `git log --oneline origin/<default>...<branch>` first. If the commit list
-   visibly bundles more than one independent concern — e.g. two separate
-   version bumps, or a rebase plus an unrelated feature — don't silently pick
-   one; print the commit list and ask which range to review, per Step 2's
-   existing ambiguity policy. Otherwise proceed with the full range.
-8. Continue at **Step 2** with the resulting diff.
+1. **Parse** `<owner>`, `<repo>`, `<branch>`. A `/tree/<branch>` segment can
+   contain `/` (`dev/v0.30.0`) — take everything after `/tree/`.
+2. **Location.** `${TMPDIR:-/tmp}/vllm-qaic-review/<owner>-<repo>`, **outside**
+   any existing checkout. Never clone into or under the user's own working
+   clone. State the path before cloning.
+3. **Reuse, don't re-clone.** If that directory is already a git repo, `git
+   fetch origin` there instead.
+4. **Clone.** `git clone --no-single-branch git@github.com:<owner>/<repo>.git
+   <path>`; fall back to `https://github.com/<owner>/<repo>.git` if SSH isn't
+   set up.
+5. **Checkout.** `git fetch origin <branch>`, then `git checkout <branch>`
+   (`git switch -c <branch> origin/<branch>` if no local branch exists).
+6. **Diff** against the fork's default branch (`git symbolic-ref
+   refs/remotes/origin/HEAD`, normally `main`) with three-dot syntax:
+   `git --no-pager diff --no-color origin/<default>...<branch>`.
+7. **Sanity-check the range.** Run `git log --oneline origin/<default>...<branch>`.
+   If it visibly bundles independent concerns (two version bumps, a rebase
+   plus a feature), print the commits and ask which range to review instead of
+   picking one.
 
-## Step 2 — Route: detect mode from changed paths
+### Phase 2 — Shape verdict (before reading code)
 
-Classify every changed file:
+```bash
+awk '/^diff --git /{f=$4; sub(/^b\//,"",f)} /^[+-]/ && !/^(\+\+\+|---) /{c[f]++} END{for (k in c) print c[k], k}' <diff> | sort -rn | head -40
+```
+
+One line for the report. These are signals for where to look, not findings —
+anything that matters becomes a finding only through a rule in Phase 4.
+
+- Any `vllm/` path → `patch.no_direct_upstream_edit` will fire; say so up front.
+- Generated or runtime artifacts in the file list (`*.onnx`, QPCs,
+  `scheduler_output/`, `*.log`, `__pycache__/`) → `hygiene.no_committed_artifacts`.
+- A version bump bundled with feature work, or a rebase bundled with anything
+  → say "split this". A bump diff that also deletes upstream code is
+  `upstream.no_deletion_on_bump` territory.
+- A new `vllm_qaic/patch/patch_*.py` → the patch rules (2–8) carry the review;
+  read the escalation order in `repo_conventions.md` before accepting it.
+- A change described as single-mode that lands in `platform_base.py`,
+  `worker/worker.py`, or `worker/model_runner.py` outside the mode-specific
+  classes → expect a cross-mode hazard.
+- A PR whose title or draft state says WIP / do-not-merge → state it; the
+  verdict can't be better than `CHANGES REQUIRED` while the author says it isn't
+  ready.
+
+### Phase 3 — Mechanical grep pass
+
+```bash
+bash <SKILL_DIR>/scripts/run_review_greps.sh <diff> <REPO_ROOT> > ${TMPDIR:-/tmp}/vqreview/<tag>.greps
+```
+
+The script prints `path:line: <added line>` hits under headers that name the
+candidate rule IDs, plus the changed-file list, the version-pin values from
+every source (with `MISMATCH` / `consistent`), and added lines per file.
+Capture the output verbatim; Phase 4 agents get it. A hit is a **lead**, not a
+finding — the agent still applies the rule, its carve-outs, and the anchoring
+gate. An empty section is evidence the trigger is absent, not proof: rules
+like `state.parallel_paths_updated` have no grep and are judged from the diff.
+
+### Phase 4 — Route, then fan out role agents in parallel
+
+**Route.** Classify every changed file:
 
 | Path pattern | Bucket |
 |---|---|
-| `vllm_qaic/worker/worker.py` → `QaicWorkerAoT` hunks, `vllm_qaic/worker/model_runner.py` → `QaicModelRunnerAoT` hunks | **aot** |
-| `vllm_qaic/model_loader/qaic.py`, `qaic_session_np.py`, `spec_decode/**`, `distributed/kv_transfer/**`, `patch/patch_graph_pickler.py`, `patch/patch_rejection_sampler.py` | **aot** |
-| `QaicWorkerPyt` / `QaicModelRunnerPyt` hunks, `vllm_qaic/ops/**`, `vllm_qaic/_custom_ops.py` | **pyt** |
-| `vllm_qaic/platform_base.py`, `platform.py`, `envs.py`, `patch/**` (other), `utils/**`, `attention/**`, `executor/**`, `quantization/**`, base `QaicWorker`/`GPUModelRunner` hunks | **shared** |
-| `vllm/**` (upstream) | **shared** — fires `patch.no_direct_upstream_edit` |
-| `tests/**`, `examples/**`, `docs/**`, `ci_scripts/**`, `setup.py`, `requirements/**` | **shared** (plus **pyt** if under an `eager/` test path) |
-| `scripts/utility.sh`, `docker/Dockerfile.aot`, `docker/Dockerfile.pyt`, `docs/installation.md` (version tables) | **shared** — build/version-pin files; fires `build.qaic_sdk_version_sync` / `build.torch_version_sync` |
-| `skills_studio/**`, `*.md`, `Makefile`, dotfiles | **shared** — no mode signal, but still publicly visible: fires `leak.no_machine_specific_path` / `leak.no_internal_reference` |
+| `QaicWorkerAoT` / `QaicModelRunnerAoT` hunks; `vllm_qaic/model_loader/qaic.py`, `qaic_session_np.py`, `spec_decode/**`, `distributed/kv_transfer/**`, `patch/patch_graph_pickler.py`, `patch/patch_rejection_sampler.py` | **aot** |
+| `QaicWorkerPyt` / `QaicModelRunnerPyt` hunks; `vllm_qaic/ops/**`, `vllm_qaic/_custom_ops.py` | **pyt** |
+| `vllm_qaic/platform_base.py`, `platform.py`, `envs.py`, other `patch/**`, `utils/**`, `attention/**`, `executor/**`, `quantization/**`, base `QaicWorker` hunks | **shared** |
+| `vllm/**` (upstream) | **shared** |
+| `tests/**`, `examples/**`, `docs/**`, `ci_scripts/**`, `setup.py`, `requirements/**`, `scripts/**`, `docker/**` | **shared** (plus **pyt** under an `eager/` test path) |
+| `skills_studio/**`, `*.md`, `Makefile`, dotfiles | **shared** — no mode signal, but publicly visible |
 
-Rules 33–34 (`leak.*`) are **not** routed — they apply to every changed file in
-every bucket, including files whose only change is prose.
+Then pick roles:
 
-Then decide which roles to spawn:
+- Only **aot** paths → `shared` + `aot`.
+- Only **pyt** paths → `shared` + `pyt`.
+- Both, **or** the grep pass shows a mode branch (`is_aot`, `enforce_eager`)
+  added in shared code → `shared` + `aot` + `pyt`, and say *"Diff straddles
+  shared code; reviewing both modes."*
+- Only docs, assistant assets, or other no-mode-signal files → `shared` alone.
+  There is no mode question to ask; the `leak.*` rules still run.
 
-- Only **aot** paths → spawn `shared` + `aot`.
-- Only **pyt** paths → spawn `shared` + `pyt`.
-- Both, **or any `shared` path that contains an `is_aot` / `enforce_eager`
-  branch in the diff** → spawn `shared` + `aot` + `pyt`, and say so:
-  *"Diff straddles shared code; reviewing both modes."*
-- Only **documentation, assistant assets, or other no-mode-signal files** →
-  spawn `shared` alone. Don't ask which mode to review; there is no mode
-  question, and the `leak.*` rules still have to run.
+If routing is genuinely ambiguous — a new code file whose mode you can't infer,
+or a shared hunk where you can't tell which mode the changed branch serves —
+don't guess: ask the user, listing the files, with the options review as AoT /
+review as PyT / review both. Print the routing decision before fanning out.
 
-**When to stop and ask.** If routing is genuinely ambiguous — a new *code* file
-whose mode you cannot infer, or a `shared` file where you cannot tell which mode
-the changed branch serves — **do not guess**. Use `AskUserQuestion` with the
-specific files listed, offering: review as AoT / review as PyT / review both.
-Ambiguity here is exactly what the user asked to be consulted on.
+**Fan out.** Spawn every selected role in **one** message so they run
+concurrently, `subagent_type: "vllm-qaic-code-review"`. Each prompt:
 
-Print the routing decision before Step 3.
+```text
+[ROLE] <shared|aot|pyt>
+[RULE CHECKLIST] <SKILL_DIR>/references/rules_<role>.md — read it; attest every row in order.
+[CONVENTIONS] <SKILL_DIR>/references/repo_conventions.md — read it before judging.
+[REPO CHECKOUT PATH] <REPO_ROOT>
+[GREP LEADS]
+<the Phase 3 output, verbatim>
+[DIFF TO REVIEW]
+<the diff inline, or its file path>
+```
 
-## Step 3 — Fan out (parallel)
+`[REPO CHECKOUT PATH]` lets the build rules read version-pin files the diff
+didn't touch, and lets every role check a claimed convention against the tree.
 
-Spawn every selected role in **one** assistant message so they run concurrently.
-`subagent_type: "vllm-qaic-code-review"`. Each prompt =
-`[ROLE] <name>` + the role's `RULE CHECKLIST` from Step 3a + `[REPO CHECKOUT PATH]`
-(the absolute path of the checkout the diff came from — the primary working
-clone for a local/PR diff, or the Step 1a clone path for a branch review) +
-`[DIFF TO REVIEW]`. `[REPO CHECKOUT PATH]` exists so `build.qaic_sdk_version_sync`
-and `build.torch_version_sync` can read sibling files the diff didn't touch.
+Default is one run per role. Under `--runs=2`, spawn each role twice on the
+identical diff.
 
-Default is **one run per role**. If `--runs=2` was passed, spawn each role twice
-on the identical diff; the merger unions results and attaches `votes: k/2`.
+**Precision contract** (the agent contract enforces it; restate it if you
+review in the main thread). A review is judged on finding every real issue
+*and* never shipping a junk comment — a false positive teaches the author to
+ignore the rest. A `fail` ships only when it has a `quoted_line` that is a
+literal substring of the diff **and** a concrete consequence: the mode where
+the plugin crashes on import, the config string that is misread, the upstream
+symbol that is silently replaced, the file that disagrees on a pin, the path
+that won't exist on another machine. Never fail on: a rule outside the role's
+file; style that ruff or the other pre-commit hooks already enforce
+(`repo_conventions.md#what-pre-commit-already-enforces-dont-re-review`); the
+plugin's deliberate mirroring of upstream names and structure; the intended
+AoT/PyT capability asymmetry; or a convention you haven't confirmed in the
+tree. One root cause, one finding.
 
-### Step 3a — Role rule checklists
+### Phase 5 — Merge
 
-Paste the matching block verbatim into that role's prompt.
+One more agent, `subagent_type: "vllm-qaic-code-review"`, `[ROLE] merger`, with
+every role's YAML plus `[FULL DIFF]`, and these six steps pasted into its
+prompt. The merger:
 
----
-
-#### ROLE: shared — 34 rules
-
-| # | Rule | Severity | Trigger |
-|---|---|---|---|
-| 1 | `patch.no_direct_upstream_edit` | BLOCKING | Diff contains a `+++ b/vllm/...` hunk (upstream file modified). Upstream files must NEVER be edited. Escalation order: extend `vllm_qaic/**` → override a Platform hook → `CustomOp.register_oot` → monkey-patch in `vllm_qaic/patch/` → never edit upstream |
-| 2 | `patch.last_resort_justified` | non-blocking | A **new** `patch_*.py` module with no comment/commit text saying why extending the plugin, overriding a Platform hook, or `register_oot` was insufficient |
-| 3 | `patch.replace_not_append` | BLOCKING | Patch module *adds* a new name to an upstream module instead of rebinding the existing symbol (`vllm.x.y.fn = _patched_fn`) |
-| 4 | `patch.mode_gated` | BLOCKING | A patch valid in only one mode applied unconditionally — no `is_aot` / `is_aot_inference()` / `enforce_eager` guard |
-| 5 | `patch.documented_why` | non-blocking | New import added to `vllm_qaic/patch/__init__.py` without an explanatory comment, unlike its neighbours |
-| 6 | `patch.mark_qaic_blocks` | non-blocking | Patch file vendoring upstream code doesn't delimit the QAIC-specific edits with comments |
-| 7 | `patch.file_named_for_target` | non-blocking | `patch_*.py` filename doesn't name what it patches |
-| 8 | `patch.prefer_platform_override` | non-blocking | Patching where a `Platform`/base-class override in `platform.py` would work |
-| 9 | `ops.forward_oot_only` | BLOCKING | A `CustomOp` subclass defines `forward_static` (or another hook) when `forward_oot` alone suffices |
-| 10 | `ops.register_oot` | BLOCKING | Op override not registered via `CustomOp.register_oot(...)`, or a stray `@CustomOp.register_oot` decorator left on a class after registration moved to `ops/__init__.py` |
-| 11 | `upstream.minimize_diff` | BLOCKING | Upstream-derived code rewritten with no algorithmic change (reformat, rename, restructure) |
-| 12 | `upstream.no_deletion_on_bump` | BLOCKING | Version-bump diff deletes upstream code rather than merging plugin changes on top of it |
-| 13 | `upstream.comment_for_upstreaming` | non-blocking | Non-obvious QAIC-specific edit with no explanatory comment — either in a file destined for upstreaming, or in logic a later reader cannot reconstruct |
-| 14 | `upstream.reuse_existing_arg` | non-blocking | New CLI arg duplicates an existing upstream argument |
-| 15 | `config.validate_keys` | BLOCKING | `override_qaic_config` / compile-config dict indexed as `cfg["k"]` with no membership check or `.get` default |
-| 16 | `config.str_and_bool_forms` | BLOCKING | Config value treated as bool when it can arrive as a string from CLI/env (`'false'`, `'0'`, `'true'`) |
-| 17 | `config.explicit_arg_errors` | non-blocking | Missing/empty required arg group raises a generic error, or none |
-| 18 | `config.localize_to_check_and_update_config` | BLOCKING | A `vllm_config` field (or an alias — `self.parallel_config`, `self.model_config`, etc.) is mutated somewhere other than `Platform.check_and_update_config` (`platform_base.py:173`) — e.g. inside a worker/runner `__init__`, or in a patch module |
-| 19 | `error.no_silent_except` | BLOCKING | Bare or broad `except` that neither logs nor re-raises |
-| 20 | `error.mode_capability_guard` | BLOCKING | New feature reachable in a mode that cannot support it, with no `is_aot` guard. Anchor: `platform_base.py:283-297` rejects disagg serving, spec decode, async scheduling in eager |
-| 21 | `error.no_none_for_empty` | non-blocking | Returns `[]` where callers test `None`, or vice versa |
-| 22 | `concurrency.unbounded_queue_get` | BLOCKING | `queue.get()` with no `timeout=` on a step-to-step handoff |
-| 23 | `state.no_shared_mutation` | BLOCKING | In-place mutation of an object held by reference from shared state (use `dataclasses.replace`) |
-| 24 | `state.parallel_paths_updated` | BLOCKING | Fast path updates a field that its sibling scatter/reorder path does not |
-| 25 | `concurrency.startup_timeout` | non-blocking | Work added to an import/startup path already near a supervisor timeout (uvicorn's 5 s heartbeat) |
-| 26 | `hygiene.no_nonblocking_cpu_copy` | non-blocking | `non_blocking=True` on a CPU→CPU `copy_()` |
-| 27 | `hygiene.confirm_init` | non-blocking | Attribute used whose initialization isn't visible; risks silently defaulting a feature off |
-| 28 | `hygiene.dead_code` | non-blocking | Commented-out code, unused helper, leftover debug print |
-| 29 | `change.justify_new_knob` | non-blocking | New env var, CLI arg, config key, constructor param, or per-iteration initialization with no comment or commit text saying why it is needed. Asks for rationale, not a change — never BLOCKING |
-| 30 | `change.derive_dont_duplicate` | non-blocking | Value taken as a new arg/env/param when already reachable from an object in scope (`vllm_config`, `cache_config`, `self.*`), or two parameters introduced for one quantity |
-| 31 | `build.qaic_sdk_version_sync` | BLOCKING | Diff changes `get_qaic_sdk_version()` in `setup.py`, `VLLM_QAIC_VERSION` in `scripts/utility.sh`, any `ARG VLLM_QAIC_VERSION` in `docker/Dockerfile.aot` / `docker/Dockerfile.pyt`, or a `VLLM_QAIC_VERSION` row in a `docs/installation.md` reference table — read the other sources directly from `[REPO CHECKOUT PATH]`; fail if they don't all agree with the value the diff introduces, and fail if a docs table row shows a value copy-pasted from a different constant (e.g. a `VLLM_QAIC_VERSION` row showing `VLLM_VERSION`'s value) |
-| 32 | `build.torch_version_sync` | BLOCKING | Diff changes a `TORCH_VERSION_AOT` / `TORCHVISION_VERSION_AOT` pin in `scripts/utility.sh` or `docker/Dockerfile.aot`, a `TORCH_VERSION_PYT` / `TORCHVISION_VERSION_PYT` / `TORCHAUDIO_VERSION_PYT` pin in `scripts/utility.sh` or `docker/Dockerfile.pyt`, or the matching row in a `docs/installation.md` reference table — read the sibling files directly from `[REPO CHECKOUT PATH]`; fail if the AOT trio, PYT trio, or a docs table row disagree (check every `ARG` occurrence across build stages, not just the first) |
-| 33 | `leak.no_machine_specific_path` | BLOCKING | Added line hard-codes an absolute path that exists only on one machine or one person's account — a user home, a personal or team workspace tree, a network/scratch mount, a nightly-build or artifact drop directory, or a specific developer checkout — instead of deriving it from a CLI arg, env var, config value, or repo-relative path. Applies to docs, tests, CI scripts, Dockerfiles, and assistant assets exactly as to library code. See the carve-out for paths that are legitimately absolute |
-| 34 | `leak.no_internal_reference` | BLOCKING | Added line names something a reader outside the company cannot resolve, in what is a **public** repository: an internal code-review or Git server URL, an internal package index or artifact host, an internal-only project or mirror name, a lab/host/device identifier, an individual's username or email address, or any credential, token, or key. Quote the minimal substring needed to anchor, and describe the class of leak in `message` — never reproduce a secret's value in the finding |
-
-**Note on rules 33–34.** This repository is public. These two rules are the last
-gate before a local convenience becomes a permanent part of public history —
-and unlike most rules here, a miss cannot be fixed by a follow-up commit,
-because the value stays in the git history. Apply them to **every** changed
-file, including Markdown, CI scripts, and the assistant assets under
-`skills_studio/`, which are as publicly visible as the plugin source. They are
-the one place where the review is looking at what the text *says*, not at what
-the code *does*, so a path or URL inside a comment, docstring, or prose
-paragraph counts exactly as much as one in a string literal. Both have
-carve-outs in the agent contract — read them before firing, since legitimate
-absolute paths (the documented SDK install tree, container-internal paths,
-temporary directories) are common in this repo and must not be flagged.
-
-**Note on rules 31–32.** These are the only shared rules needing more than the
-diff: detecting drift against an untouched sibling file requires reading
-`scripts/utility.sh`, both Dockerfiles, and `docs/installation.md`'s reference
-tables directly from `[REPO CHECKOUT PATH]`. `docs/installation.md` carries
-multiple independent tables (one per Dockerfile's ARGs, plus a
-`scripts/utility.sh` constant table) that have drifted silently before,
-including a row whose value was copy-pasted from a different constant
-entirely (`VLLM_QAIC_VERSION` shown as `VLLM_VERSION`'s value) — treat a docs
-table row that matches neither the diff's new value nor its old value as
-equally suspicious as one that just looks stale. The anchoring hard gate still
-applies — `quoted_line` must be the diff's own `+` line introducing the new
-value; the mismatch is explained in `message`, never quoted from a file the
-diff left untouched. If none of these locations was touched by this diff,
-both rules are `na`.
-
----
-
-#### ROLE: aot — 8 rules
-
-| # | Rule | Severity | Trigger |
-|---|---|---|---|
-| 1 | `aot.ccl_defaults` | BLOCKING | `comp_ctx_lengths_prefill` / `_decode` left empty instead of defaulting to `[max_model_len]` when CCL is disabled (`ccl_enabled` false/absent) |
-| 2 | `aot.mdp_stages_consistency` | BLOCKING | `mdp_num_partitions` and `cfg['stages']` set independently with no assert that they agree |
-| 3 | `aot.qpc_dict_keys` | BLOCKING | QPC path extracted from the compile-result dict without validating the expected keys exist |
-| 4 | `aot.specialization_covers_shapes` | BLOCKING | New runtime shape/seq-len path with no matching compile specialization (`prefill_seq_len`, `vision_size`) |
-| 5 | `aot.session_input_guard` | BLOCKING | Feeding a session input without checking `in self.session.input_names` |
-| 6 | `disagg.device_group_validation` | BLOCKING | Prefill/decode/encode device groups unvalidated — empty group, or duplicate QIDs across groups |
-| 7 | `disagg.proc_lifecycle` | non-blocking | New subprocess/resource-tracker with no account of the P/D process fan-out (6P4D → 10 vllm processes, each spawning trackers) |
-| 8 | `spd.aot_only` | BLOCKING | Spec-decode path reachable without the AoT guard (`platform_base.py:288-291`) |
-
----
-
-#### ROLE: pyt — 13 rules
-
-**Framing.** Eager mode has little direct review history; the team develops
-against AoT and treats PyT as something that must not regress. Rules 1–3 are the
-core job: catching eager-mode breakage from changes made for AoT.
-
-| # | Rule | Severity | Trigger |
-|---|---|---|---|
-| 1 | `pyt.cross_mode_regression` | BLOCKING | Diff changes shared code (`platform_base.py`, `worker.py`, `model_runner.py`, `patch/**`) on a path eager mode also takes, with no evidence the eager impact was considered. Set `affects_other_mode: true` |
-| 2 | `pyt.per_device_seed` | BLOCKING | Global seed set where eager needs per-device (`torch.manual_seed` per device) |
-| 3 | `pyt.eager_only_accessor` | BLOCKING | `get_num_cores()` / `get_num_hvx_threads()` called on a path reachable in AoT — they raise there (`platform_base.py:124-136`) |
-| 4 | `pyt.test_location` | non-blocking | Eager custom-op test or kernel benchmark not under the eager test tree (`tests/**/eager/...`) |
-| 5 | `pyt.torch_qaic_install` | non-blocking | Code assumes a `torch_qaic` wheel path (e.g. `/opt/qti-aic/integrations/`) instead of deferring to the installer script |
-| 6 | `pyt.register_fake_meta` | BLOCKING | New `qaic::*` custom op registered without a matching `@register_fake("qaic::<op>")` meta kernel — `torch.compile` traces with FakeTensors and fails without it. Fake kernels belong in torch-qaic's `_meta_registrations.py`, NOT in vllm_qaic |
-| 7 | `pyt.forbidden_import` | BLOCKING | Bare `import torch_qaic` / `from torch_qaic import ...` in changed Python |
-| 8 | `pyt.no_scalar_hot_path` | non-blocking | Bulk per-element scalar work in a hot path that belongs on HVX/HMX |
-| 9 | `pyt.contiguous_operands` | non-blocking | Non-contiguous operand handed to a device kernel without canonicalizing or falling back to CPU |
-| 10 | `pyt.avoid_format_conversion` | non-blocking | Flat ↔ Crouton layout conversion inserted in a hot path |
-| 11 | `pyt.bare_except` | non-blocking | `except:` with no exception type |
-| 12 | `pyt.type_hints` | non-blocking | New public function missing type hints |
-| 13 | `pyt.snake_case` | non-blocking | Non-snake_case function or file name |
-
----
-
-## Step 4 — Merge
-
-One `Agent()` call, `subagent_type: "vllm-qaic-code-review"`, `[ROLE] merger`, with
-every role's YAML plus `[FULL DIFF]`. The merger must:
-
-1. **Re-verify every anchor** — re-grep the diff for each `quoted_line`. Drop
-   any `fail` whose quote is not a literal substring. This is a hard gate.
-2. **Surface `leak.*` findings first, then cross-mode findings.** A `leak.*`
-   finding leads the report: it is the only class here that a follow-up commit
-   cannot fix, because the value survives in git history. Next, any finding with
-   `affects_other_mode: true` — the bug class the single-mode reviewer misses and
-   the whole reason both overlays run.
-3. **Dedupe** across roles by `(file, line, rule)`.
-4. **Under `--runs=2` only**: union runs A and B by `(file, line, rule)`, attach
-   `votes: k/2`. Votes annotate confidence; they do not gate the verdict.
-5. **Tally coverage** per role from `pass`/`fail`/`na` counts.
-6. **Aggregate the verdict:**
+1. **Re-verifies every anchor** — drops any `fail` whose `quoted_line` is not
+   a literal substring of the diff. Hard gate.
+2. **Orders `leak.*` first, then `affects_other_mode: true`.** A leak is the
+   one class a follow-up commit can't fix, because the value stays in history.
+   Cross-mode findings are the bug class a single-mode reviewer misses and the
+   reason both overlays exist.
+3. **Dedupes** across roles by `(file, line, rule)`, and keeps one finding
+   when `mode.lazy_package_import` and `pyt.forbidden_import` hit the same line.
+4. **Under `--runs=2` only**, unions the runs by `(file, line, rule)` and
+   attaches `votes: k/2`. Votes annotate confidence; they don't gate the verdict.
+5. **Tallies coverage** per role from the `pass` / `fail` / `na` counts.
+6. **Aggregates the verdict:**
 
 | Findings | Verdict |
 |---|---|
@@ -258,11 +220,15 @@ every role's YAML plus `[FULL DIFF]`. The merger must:
 | Only `non-blocking` | `APPROVED WITH COMMENTS` |
 | None | `APPROVED` |
 
-## Step 5 — Output
+### Phase 6 — Output
+
+Use exactly this. Keep the Leaks and Cross-mode sections even when empty
+(write `none`); omit an empty BLOCKING or Non-blocking section.
 
 ```text
+Shape: N files, +A / -D. <one-line shape verdict>
 Routing: <files> → roles <shared, aot, pyt>
-Coverage: shared 34/34 (2 failed, 9 n/a) · aot 8/8 (1 failed, 5 n/a)
+Coverage: shared 39/39 (2 failed, 30 n/a) · aot 8/8 (1 failed, 5 n/a)
 
 ## Leaks (machine-specific paths, internal references)
 <leak.* findings, or "none">
@@ -279,13 +245,56 @@ Coverage: shared 34/34 (2 failed, 9 n/a) · aot 8/8 (1 failed, 5 n/a)
 <same shape>
 
 ## Verdict
-<CHANGES REQUIRED | APPROVED WITH COMMENTS | APPROVED>
+<CHANGES REQUIRED | APPROVED WITH COMMENTS | APPROVED>. <one-line reason>
 ```
 
-Print the coverage line always — a silently skipped rule must be visible.
+Always print the coverage line — a silently skipped rule has to be visible.
 
-## Step 6 — Fix offer
+## Finding form (the bar)
 
-Ask whether to apply fixes. On yes, apply one precise edit per finding, printing
-one confirmation line each. Never fix and report in the same breath — the user
-sees the review before anything changes.
+Every finding names the file and patched-file line, the rule ID, one sentence
+on what goes wrong, the quoted diff line, and a one-sentence fix. A leak
+finding names the *class* of leak and where it is — never the value — so the
+review is itself safe to paste into the public PR.
+
+Example:
+
+```text
+- `vllm_qaic/worker/model_runner.py:41` **mode.lazy_package_import** — module-scope QEfficient import in a file both modes load; plugin import fails in an eager-only environment.
+  > from QEfficient import QEFFAutoModelForCausalLM
+  Fix: move the import into the `QaicModelRunnerAoT` path, or wrap it in `try/except ImportError` like `platform_base.py`.
+```
+
+"This could be cleaner" with no rule and no consequence is not a finding.
+
+## Pitfalls
+
+- **The diff is ground truth, not the description.** A PR body that says
+  "AoT only" doesn't make a shared-code hunk AoT only.
+- **Read both sides of the diff.** Removing an `is_aot` guard, a `timeout=`, or
+  a patch's mode gate is as dangerous as adding the wrong one.
+- **Check the tree before citing it.** Symbols move; `repo_conventions.md`
+  anchors to symbols, not line numbers, and the tree wins on disagreement.
+- **Push back on bundled scope.** A version bump plus a feature, or a rebase
+  plus a refactor, is unreviewable as one diff — say "split this".
+- **Don't re-review pre-commit.** Ruff, typos, markdownlint, shellcheck, mypy,
+  the Python license header, and the forbidden-import hooks fail CI by
+  themselves.
+- **Don't redo agent work in the main thread.** Cite the merger's findings;
+  don't re-derive them.
+
+## Iteration
+
+If the user disputes a finding, re-read the cited line and the rule before
+retracting or standing by it. If new commits land, re-run Phases 1–5 on the new
+diff and say which findings were resolved, which remain, and which are new.
+
+## When you're done
+
+Print the review to chat. Saving it to a file needs the user's go-ahead (a
+temporary directory is fine; the repo is not). Posting it to the PR — `gh pr
+review`, `gh pr comment` — is a public action and needs explicit confirmation.
+
+Then offer to apply fixes. On yes, make one precise edit per finding and print
+one confirmation line each, leaving the changes uncommitted. Never fix and
+report in the same breath — the user sees the review before anything changes.
