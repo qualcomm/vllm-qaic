@@ -109,14 +109,22 @@ class QaicTritonGptOssMxfp4MoEMethod(GptOssMxfp4MoEMethod):
             QaicOAITritonExperts,
         )
 
-        super().__init__(moe)
+        # GptOssMxfp4MoEMethod.__init__ invokes the upstream backend oracle
+        # before a subclass can replace its result. The oracle rejects OOT
+        # platforms, so scope the QAIC-approved selection to this constructor
+        # call and immediately restore the global selector afterwards.
+        import vllm.model_executor.layers.quantization.mxfp4 as upstream_mxfp4
 
-        # Upstream auto-selection returns (NONE, None) for an OOT platform
-        # when none of its built-in platform branches match. QAIC has already
-        # validated this Triton backend separately, so explicitly select the
-        # modular OAI implementation here.
-        self.mxfp4_backend = Mxfp4MoeBackend.TRITON
-        self.experts_cls = QaicOAITritonExperts
+        original_selector = upstream_mxfp4.select_mxfp4_moe_backend
+        upstream_mxfp4.select_mxfp4_moe_backend = lambda _moe: (
+            Mxfp4MoeBackend.TRITON,
+            QaicOAITritonExperts,
+        )
+        try:
+            super().__init__(moe)
+        finally:
+            upstream_mxfp4.select_mxfp4_moe_backend = original_selector
+
         logger.info_once(
             "QAIC GPT-OSS MXFP4: forcing backend=%s, experts=%s",
             self.mxfp4_backend.value,
