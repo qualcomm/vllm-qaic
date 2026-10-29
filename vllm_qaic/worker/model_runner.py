@@ -1573,8 +1573,8 @@ class QaicModelRunnerAoT(GPUModelRunner):
             scheduler_output.total_num_scheduled_tokens,
         )
 
-        if getattr(self.model, "dflash_requires_replay", False):
-            self.model.commit_dflash_prefix(
+        if getattr(self.model, "dflash_hybrid", False):
+            self.model.queue_dflash_prefix(
                 valid_sampled_token_ids
                 if self.is_kv_consumer
                 else valid_sampled_token_ids[: self.num_decodes]
@@ -1713,7 +1713,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
             )
             # Own this data before the connector releases the shared-memory buffers.
             hidden[0, :remaining] = received
-            if getattr(self.model, "dflash_requires_replay", False):
+            if getattr(self.model, "dflash_hybrid", False):
                 hidden[0, remaining - 1] = self._tlm_hidden_buf[row, 0]
             chunks.extend(
                 hidden[:, start : start + chunk_size]

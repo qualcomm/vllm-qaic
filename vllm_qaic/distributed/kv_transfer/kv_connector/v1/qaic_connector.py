@@ -380,13 +380,13 @@ class QaicConnector(KVConnectorBase_V1):
         self.use_async_scheduling = vllm_config.scheduler_config.async_scheduling
         self.is_async_kv_producer: bool = self.use_async_scheduling and self.is_producer
         spec = vllm_config.speculative_config
-        self.dflash_requires_replay = bool(
+        self.dflash_hybrid = bool(
             spec
             and spec.use_dflash()
             and vllm_config.model_config.hf_config.model_type
             in {"qwen3_5", "qwen3_5_moe"}
         )
-        if self.dflash_requires_replay:
+        if self.dflash_hybrid:
             self.mem_bank.use_full_kv_transfer = True
         self.dflash_stream_prefill = bool(
             spec
@@ -688,7 +688,7 @@ class QaicConnector(KVConnectorBase_V1):
                 self._dflash_pending[req_id] = self._dflash_pending.pop(req_id)
             if (
                 kv_ready
-                and ready == len(request.token_ids) - int(self.dflash_requires_replay)
+                and ready == len(request.token_ids) - int(self.dflash_hybrid)
                 and load.position == final_start
             ):
                 self.kv_caches[request.block_id - 1] = shm.list_of_np_buff
@@ -862,7 +862,7 @@ class QaicConnector(KVConnectorBase_V1):
                     continue
                 shm = self.mem_bank.MemBank[request.kv_handoff_metadata[0]]
                 with shm.publication_lock():
-                    expected = len(request.token_ids) - int(self.dflash_requires_replay)
+                    expected = len(request.token_ids) - int(self.dflash_hybrid)
                     if shm.list_of_np_buff[-1][0, 0] != expected:
                         raise RuntimeError(
                             "DFlash KV completed before prompt features were published."

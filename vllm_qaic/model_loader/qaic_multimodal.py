@@ -6,7 +6,7 @@
 import importlib
 import inspect
 import math
-from collections.abc import Iterator, Set
+from collections.abc import Callable, Iterator, Set
 
 import numpy as np
 import torch
@@ -76,11 +76,11 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
         self.mm_input_info: dict[str, tuple[list[int], np.dtype]] = {}
         self.mm_output_info: dict[str, tuple[list[int], np.dtype]] = {}
         self.is_dflash_vlm = self.is_dflash_target
-        self.dflash_requires_replay = self.is_dflash_vlm and self.config.model_type in {
+        self.dflash_hybrid = self.is_dflash_vlm and self.config.model_type in {
             "qwen3_5",
             "qwen3_5_moe",
         }
-        self._dflash_verification_inputs: dict[str, np.ndarray] | None = None
+        self._dflash_decode_slots: np.ndarray | None = None
 
         if self.uses_mrope:
             # QEfficient requires position ids to be (4, batch_size, seq_len)
@@ -154,12 +154,11 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
                 for shape in input_shapes
                 if len(shape) == 2 and shape[0] == input_batch_size
             }
-            required_lengths = {self.prefill_seq_len, self.num_spec_tokens + 1}
+            decode_width = (self.num_spec_tokens + 1) * (2 if self.dflash_hybrid else 1)
+            required_lengths = {self.prefill_seq_len, decode_width}
             if self.disagg_serving_en:
                 required_lengths = {
-                    self.prefill_seq_len
-                    if self.disagg_producer_en
-                    else self.num_spec_tokens + 1
+                    self.prefill_seq_len if self.disagg_producer_en else decode_width
                 }
             if not required_lengths.issubset(sequence_lengths):
                 raise ValueError(
@@ -168,7 +167,8 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
                     f"block_size={self.num_spec_tokens + 1}, "
                     f"batch_size={input_batch_size}, "
                     f"compiled input shapes={input_shapes}. "
-                    "Select a matching target QPC or recompile it."
+                    "Select a matching target QPC or recompile it. "
+                    "Qwen3.5 dense/MoE requires 2 * block_size decode inputs."
                 )
             logits_shapes = self.session.get_bindings_shapes(["logits"]).get(
                 "logits", []
@@ -222,38 +222,47 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
                             "needed history."
                         )
 
-        if self.dflash_requires_replay:
+        if self.dflash_hybrid:
+            if not self.disagg_producer_en:
+                from QEfficient.generation.dflash_generation import (
+                    get_qwen35_target_seq_len,
+                )
+
+                get_qwen35_target_seq_len(self.session, self.num_spec_tokens + 1)
             if "cache_commit" not in self.session.input_names:
                 raise ValueError("Qwen3.5 DFlash target QPC must expose cache_commit.")
             if self.default_mm_kwargs is None:
                 raise ValueError(
                     "Qwen3.5 DFlash target QPC must expose image_idx "
-                    "to initialize multimodal replay inputs."
+                    "to initialize multimodal inputs."
                 )
             if self._dflash_prefill_hidden_scratch is None:
                 raise ValueError(
-                    "Qwen3.5 DFlash replay requires a prefill hidden-state buffer. "
+                    "Qwen3.5 DFlash requires a prefill hidden-state buffer. "
                     "Use a target QPC exposing DFlash hidden states and a single "
                     "integer prefill_seq_len."
                 )
             self.default_mm_kwargs["cache_commit"] = np.ones((1,), dtype=np.int64)
             for inputs in self.decode_batch_inputs_by_k.values():
                 inputs["cache_commit"] = np.zeros((1,), dtype=np.int64)
-            # Replay uses the verification specialization, not the prefill shape.
-            self._dflash_replay_outputs = {
-                "logits": np.empty(
-                    (self.decode_bsz, self.num_spec_tokens + 1, self.vocab_size),
-                    dtype=self.logits_dtype,
-                ),
-                self.dflash_hidden_name: np.empty(
-                    (
-                        self.decode_bsz,
-                        self.num_spec_tokens + 1,
-                        self.dflash_hidden_size,
-                    ),
-                    dtype=self._dflash_prefill_hidden_scratch.dtype,
-                ),
-            }
+                inputs["input_ids"] = np.zeros(
+                    (self.decode_bsz, decode_width), dtype=np.int64
+                )
+                inputs["position_ids"] = np.full(
+                    (4, self.decode_bsz, decode_width), -1, dtype=np.int64
+                )
+                if "mm_token_type_ids" in inputs:
+                    inputs["mm_token_type_ids"] = np.zeros_like(inputs["input_ids"])
+            self._dflash_prefix_ids = np.zeros(
+                (self.full_batch_size, self.num_spec_tokens + 1), dtype=np.int64
+            )
+            self._dflash_prefix_positions = np.full(
+                (4, self.full_batch_size, self.num_spec_tokens + 1), -1, dtype=np.int64
+            )
+            self._dflash_decode_hidden = np.empty(
+                (self.decode_bsz, decode_width, self.dflash_hidden_size),
+                dtype=self._dflash_prefill_hidden_scratch.dtype,
+            )
 
         if self.config.model_type == "whisper":
             self.default_mm_kwargs = {}
@@ -266,33 +275,81 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
                     )
             self.decode_batch_inputs.update(self.default_mm_kwargs)
 
-    def _run_decode(self, *args, **kwargs) -> None:
-        super()._run_decode(*args, **kwargs)
-        if self.dflash_requires_replay:
-            inputs = self.decode_batch_inputs_by_k[self.active_k]
-            self._dflash_verification_inputs = dict(inputs)
-            for name in ("input_ids", "position_ids"):
-                self._dflash_verification_inputs[name] = inputs[name].copy()
+    def _run_decode(
+        self,
+        input_ids: np.ndarray,
+        positions: np.ndarray,
+        batch_indices: np.ndarray,
+        logits: np.ndarray,
+        lora_ids: np.ndarray | None = None,
+        callback: Callable | None = None,
+        dflash_decode_hidden_buf: np.ndarray | None = None,
+    ) -> None:
+        if not self.dflash_hybrid:
+            return super()._run_decode(
+                input_ids,
+                positions,
+                batch_indices,
+                logits,
+                lora_ids,
+                callback,
+                dflash_decode_hidden_buf,
+            )
+        block_size = self.num_spec_tokens + 1
+        rows = input_ids.size // block_size
+        slots = np.asarray(batch_indices[:rows], dtype=np.int64)
+        self._dflash_decode_slots = slots.copy()
+        input_ids = np.concatenate(
+            [self._dflash_prefix_ids[slots], input_ids.reshape(rows, block_size)],
+            axis=-1,
+        ).reshape(-1)
+        positions = np.concatenate(
+            [
+                self._dflash_prefix_positions[:, slots],
+                positions.reshape(4, rows, block_size),
+            ],
+            axis=-1,
+        ).reshape(4, -1)
+        super()._run_decode(
+            input_ids,
+            positions,
+            slots,
+            logits,
+            lora_ids,
+            callback,
+            self._dflash_decode_hidden,
+        )
+        # The QEfficient logit window ends at the last valid input. A partial
+        # verification suffix (including disagg's final prompt token) is right-aligned.
+        valid_counts = (
+            positions[0].reshape(rows, 2 * block_size)[:, block_size:] >= 0
+        ).sum(axis=1)
+        for row, count in enumerate(valid_counts):
+            if 0 < count < block_size:
+                logits[row, :count] = logits[row, -count:].copy()
+        if dflash_decode_hidden_buf is not None:
+            dflash_decode_hidden_buf[:] = self._dflash_decode_hidden[:, -block_size:]
 
-    def commit_dflash_prefix(self, sampled_token_ids: list[list[int]]) -> bool:
-        inputs = self._dflash_verification_inputs
-        self._dflash_verification_inputs = None
-        if inputs is None or not sampled_token_ids or not sampled_token_ids[0]:
-            return False
-        if len(sampled_token_ids) != 1:
-            raise ValueError("Qwen3.5 DFlash replay currently supports one request.")
-        # N sampled outputs mean N-1 accepted drafts plus the target's new token.
-        # Commit the seed and accepted drafts, not that unverified new token.
-        count = len(sampled_token_ids[0])
-        if count > inputs["input_ids"].shape[-1]:
-            raise ValueError("Accepted prefix exceeds the verified block.")
-        inputs["input_ids"][:, count:] = 0
-        inputs["position_ids"][..., count:] = -1
-        inputs["cache_commit"] = np.ones((1,), dtype=np.int64)
-        inputs.update(self._dflash_replay_outputs)
-        exec_id = self.session.np_run(inputs, is_prefill=False)
-        self.session.complete_inf(exec_id, is_prefill=False)
-        return True
+    def queue_dflash_prefix(self, sampled_token_ids: list[list[int]]) -> None:
+        slots = self._dflash_decode_slots
+        self._dflash_decode_slots = None
+        if slots is None:
+            return
+        if len(sampled_token_ids) > len(slots):
+            raise ValueError("Accepted prefixes exceed the verification batch size.")
+        inputs = self.decode_batch_inputs_by_k[self.active_k]
+        block_size = self.num_spec_tokens + 1
+        # N sampled outputs commit the previous seed and N-1 accepted drafts.
+        # The sampled replacement/bonus token belongs to the next verification.
+        for row, slot in enumerate(slots):
+            count = len(sampled_token_ids[row]) if row < len(sampled_token_ids) else 0
+            if count > block_size:
+                raise ValueError("Accepted prefix exceeds the verified block.")
+            self._dflash_prefix_ids[slot] = inputs["input_ids"][row, -block_size:]
+            self._dflash_prefix_positions[:, slot] = inputs["position_ids"][
+                :, row, -block_size:
+            ]
+            self._dflash_prefix_positions[:, slot, count:] = -1
 
     def _to_np(self, t, dtype: np.dtype | None = None) -> np.ndarray | list[np.ndarray]:
         """

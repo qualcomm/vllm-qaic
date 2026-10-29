@@ -236,6 +236,9 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         tlm_prefill_hidden_chunks: list[np.ndarray] | None = None,
         dflash_decode_hidden_buf: np.ndarray | None = None,
     ) -> Queue | None:
+        if is_prompt and getattr(self, "dflash_hybrid", False):
+            self._dflash_prefix_positions[:, batch_indices] = -1
+            self._dflash_decode_slots = None
         if self.is_pooling_model and not self.is_multimodal_model:
             output = self._run_encode(prefill_cum_sum, input_ids, positions)
             return output
@@ -356,6 +359,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         transparent: old QPCs compiled without a K=0 spec continue to work
         unchanged because ``decode_ks`` stays at ``[max_k]``.
         """
+        if self.is_dflash_target:
+            return list(self.decode_ks)
         try:
             input_idx = self.session.binding_index_map["input_ids"]
             ks: list[int] = []
@@ -808,7 +813,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                         1, self.prefill_seq_len
                     )
 
-                if last_chunk and getattr(self, "dflash_requires_replay", False):
+                if last_chunk and getattr(self, "dflash_hybrid", False):
                     # The consumer processes the final prompt token once.
                     chunk_inputs["position_ids"] = chunk_inputs["position_ids"].copy()
                     last_valid = n_prompt_tokens - lower_idx - 1
@@ -1041,7 +1046,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         # Use the per-step K set by QaicModelRunner.  Falls back to max K so
         # the method is callable without a runner (e.g., unit tests).
         current_k = self.active_k
-        mdt = current_k + 1  # tokens per decode request for this step
+        mdt = (current_k + 1) * (2 if getattr(self, "dflash_hybrid", False) else 1)
         num_tokens = input_ids.shape[0]
         num_decodes = num_tokens // mdt  # number of decode requests
         batch_inputs = self.decode_batch_inputs_by_k[current_k]
@@ -1348,18 +1353,17 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 }
             if self.is_spec_decode_target_model:
                 # decode on this model has multiple tokens per batch (aka precode)
+                input_width = self.num_logits_to_keep * (
+                    2 if getattr(self, "dflash_hybrid", False) else 1
+                )
                 decode_single_inputs = dict(
-                    input_ids=np.zeros((1, self.num_logits_to_keep), dtype=np.int64),
-                    position_ids=np.full(
-                        (1, self.num_logits_to_keep), -1, dtype=np.int64
-                    ),
+                    input_ids=np.zeros((1, input_width), dtype=np.int64),
+                    position_ids=np.full((1, input_width), -1, dtype=np.int64),
                 )
                 decode_batch_inputs = dict(
-                    input_ids=np.zeros(
-                        (self.decode_bsz, self.num_logits_to_keep), dtype=np.int64
-                    ),
+                    input_ids=np.zeros((self.decode_bsz, input_width), dtype=np.int64),
                     position_ids=np.full(
-                        (self.decode_bsz, self.num_logits_to_keep), -1, dtype=np.int64
+                        (self.decode_bsz, input_width), -1, dtype=np.int64
                     ),
                 )
             if "batch_index" in self.session.input_names:
@@ -1408,7 +1412,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     self.decode_batch_inputs["mm_token_type_ids"] = np.zeros_like(
                         self.decode_batch_inputs["input_ids"]
                     )
-                if getattr(self, "dflash_requires_replay", False):
+                if getattr(self, "dflash_hybrid", False):
                     self.decode_batch_inputs["cache_commit"] = np.zeros(
                         (1,), dtype=np.int64
                     )
@@ -1539,7 +1543,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     self.decode_batch_inputs[self.dflash_hidden_name] = np.empty(
                         (
                             self.decode_bsz,
-                            self.max_decode_tokens,
+                            self.max_decode_tokens
+                            * (2 if getattr(self, "dflash_hybrid", False) else 1),
                             self.dflash_hidden_size,
                         ),
                         dtype=self._dflash_prefill_hidden_scratch.dtype,
@@ -1829,7 +1834,7 @@ def load_qaic_model(
                     speculative_model_type,
                 )
             if vllm_config.kv_transfer_config and (
-                getattr(model, "dflash_requires_replay", False)
+                getattr(model, "dflash_hybrid", False)
                 or (
                     getattr(model, "is_dflash_vlm", False)
                     and model.config.model_type == "gemma4"
@@ -2492,12 +2497,12 @@ def _get_qaic_compile_config(
                         "Qwen3.5 DFlash requires a power-of-two block_size >= 2."
                     )
                 if (
-                    cfg["prefill_seq_len"] < block_size
+                    cfg["prefill_seq_len"] < 2 * block_size
                     or cfg["prefill_seq_len"] % block_size
                 ):
                     raise ValueError(
-                        "Qwen3.5 DFlash requires prefill_seq_len to be a positive "
-                        "multiple of block_size."
+                        "Qwen3.5 DFlash requires prefill_seq_len to be a multiple "
+                        "of block_size and at least 2 * block_size."
                     )
                 cfg["prefill_only"] = True
                 if model_type == "qwen3_5_moe":

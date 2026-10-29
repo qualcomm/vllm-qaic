@@ -57,6 +57,7 @@ def _make_proposer(decode_bsz: int, block_size: int, hidden_size: int = 8):
     fake session to exercise propose()'s control flow."""
     proposer = QaicDFlashProposer.__new__(QaicDFlashProposer)
     proposer.block_size = block_size
+    proposer.target_seq_len = block_size
     proposer.decode_bsz = decode_bsz
     proposer.mask_token_id = 999
     proposer.hidden_size = hidden_size
@@ -84,6 +85,7 @@ def _make_proposer(decode_bsz: int, block_size: int, hidden_size: int = 8):
 
     proposer.model = _FakeModel()
     proposer._req_state = {}
+    proposer._streaming_req_ids = set()
     proposer._prefill_pending = []
     return proposer, fake_session
 
