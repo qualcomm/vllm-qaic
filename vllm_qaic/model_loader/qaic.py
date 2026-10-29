@@ -52,6 +52,40 @@ logger = init_logger(__name__)
 lock = threading.Lock()
 
 
+def _complete_batch_index_permutation(
+    batch_indices: np.ndarray, batch_size: int
+) -> np.ndarray:
+    """Fill inactive decode rows with the unused physical batch slots.
+
+    Full-batch Qwen decode graphs scatter logical rows into physical slots.
+    Padding those rows with ``-1`` is unsafe because PyTorch/ONNX scatter
+    semantics treat ``-1`` as the last slot, so padding can overwrite a live
+    request in slot ``batch_size - 1``.  A full permutation keeps active rows
+    first (and therefore keeps their logits in logical request order) while
+    routing padded rows only to inactive physical slots.
+    """
+    active = np.asarray(batch_indices, dtype=np.int64).reshape(-1)
+    if active.size > batch_size:
+        raise ValueError(
+            f"Decode batch has {active.size} active rows, exceeding "
+            f"physical batch size {batch_size}"
+        )
+    if np.any((active < 0) | (active >= batch_size)):
+        raise ValueError(
+            f"Decode batch indices must be in [0, {batch_size}), got {active}"
+        )
+    if np.unique(active).size != active.size:
+        raise ValueError(f"Decode batch indices must be unique, got {active}")
+
+    permutation = np.empty(batch_size, dtype=np.int64)
+    permutation[: active.size] = active
+    if active.size < batch_size:
+        used = np.zeros(batch_size, dtype=np.bool_)
+        used[active] = True
+        permutation[active.size :] = np.flatnonzero(~used)
+    return permutation
+
+
 class QaicCompilationComplete(Exception):
     def __init__(
         self,
@@ -87,6 +121,11 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         config = model_config.hf_config
         additional_config = vllm_config.additional_config or {}
         override_qaic_config = additional_config.get("override_qaic_config") or {}
+        qeff_qaic_config = override_qaic_config.get("qaic_config") or {}
+        self.requires_physical_batch_permutation = (
+            qeff_qaic_config.get("blocking_mode") == "kv_batch_fold"
+            or qeff_qaic_config.get("gdn_full_state_update") is True
+        )
 
         pooler_config = vllm_config.model_config.pooler_config
         self._pooler = None
@@ -905,9 +944,14 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             batch_inputs["position_ids"][..., num_decodes:, :] = -1
 
         if not self.ignore_batch_index:
-            batch_inputs["batch_index"][:num_decodes, 0] = batch_indices
-            if num_decodes < self.decode_bsz:
-                batch_inputs["batch_index"][num_decodes:] = -1
+            if self.requires_physical_batch_permutation:
+                batch_inputs["batch_index"][:, 0] = _complete_batch_index_permutation(
+                    batch_indices, self.decode_bsz
+                )
+            else:
+                batch_inputs["batch_index"][:num_decodes, 0] = batch_indices
+                if num_decodes < self.decode_bsz:
+                    batch_inputs["batch_index"][num_decodes:] = -1
 
         if lora_ids is not None:
             batch_inputs["lora_ids"][:num_decodes] = lora_ids.reshape(num_decodes, 1)
