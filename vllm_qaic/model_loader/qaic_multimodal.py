@@ -94,6 +94,7 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
         mm_input_names = [
             "pixel_values",
             "input_features",
+            "input_features_mask",
             "vision_embeds",
             "image_position_ids",
         ]
@@ -127,15 +128,21 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
                 )
             self.decode_batch_inputs.update(self.default_mm_kwargs)
 
-        if self.config.model_type == "whisper":
+        if self.config.model_type in ("whisper", "qwen3_asr"):
             self.default_mm_kwargs = {}
             for k, v in self.mm_input_info.items():
                 if k == "input_features":
                     _shape = v[0].copy()
-                    _shape[-1] = 1  # Feature vector during decode is 1
-                    self.default_mm_kwargs["input_features"] = np.empty(
-                        _shape, dtype=v[1]
-                    )
+                    if self.config.model_type == "whisper":
+                        _shape[-1] = 1  # Whisper decode uses one feature vector.
+                        self.default_mm_kwargs[k] = np.empty(_shape, dtype=v[1])
+                    else:
+                        # Qwen3-ASR keeps the encoder feature shape in its
+                        # decode specialization even though the audio tower is
+                        # inactive for the one-token decode graph.
+                        self.default_mm_kwargs[k] = np.zeros(_shape, dtype=v[1])
+                elif k == "input_features_mask":
+                    self.default_mm_kwargs[k] = np.ones(v[0], dtype=v[1])
             self.decode_batch_inputs.update(self.default_mm_kwargs)
 
     def _to_np(self, t, dtype: np.dtype | None = None) -> np.ndarray | list[np.ndarray]:
@@ -319,6 +326,17 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
     ) -> tuple[dict[str, np.ndarray], int]:
         # Assumption: for all VLMs other than Qwen2.5VL and Qwen3VL,
         # QPC is compiled with only one specialization
+        # vLLM's native Qwen3-ASR parser uses upstream names; normalize them
+        # at the QAIC boundary to the names exposed by the compiled QPC.
+        if "input_audio_features" in kwargs and "input_features" not in kwargs:
+            kwargs["input_features"] = kwargs.pop("input_audio_features")
+        if "feature_attention_mask" in kwargs and "input_features_mask" not in kwargs:
+            kwargs["input_features_mask"] = kwargs["feature_attention_mask"]
+        if isinstance(kwargs.get("input_features_mask"), torch.Tensor):
+            mask = kwargs["input_features_mask"]
+            if mask.ndim == 1:
+                kwargs["input_features_mask"] = mask.unsqueeze(0)
+
         if "pixel_values_flat" in kwargs:
             # InternVL: split flat tensor by num_patches per image
             image_num_patches = kwargs["image_num_patches"]
@@ -372,7 +390,7 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
             else:
                 raise ValueError(f"Unsupported pixel_values type {type(pixel_values)}")
         elif "input_features" in kwargs:
-            # Audio model. Currently only whisper is supported with a single
+            # Audio model. Currently only whisper and Qwen3-ASR are supported with a single
             # audio input.
             num_mm_inputs = 1
         else:
