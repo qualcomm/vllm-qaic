@@ -13,6 +13,10 @@ torch.accelerator calls must be bypassed.
 MemorySnapshot.measure() and memory_profiling() are patched back to the
 v15 current_platform-based implementation so QAIC avoids torch.accelerator
 allocator calls while still reporting device memory for KV cache sizing.
+
+Some model code also calls ``torch.accelerator.empty_cache()`` directly. That
+API reaches PyTorch's CachingDeviceAllocator before vLLM's platform abstraction
+can intervene. Redirect it to ``torch.qaic.empty_cache()`` in eager QAIC mode.
 """
 
 import gc
@@ -25,6 +29,37 @@ import torch
 import vllm.utils.mem_utils
 from vllm.platforms import current_platform
 from vllm.utils.mem_utils import MemoryProfilingResult, MemorySnapshot
+
+_EMPTY_CACHE_PATCHED_ATTR = "_qaic_empty_cache_patch_applied"
+_ORIGINAL_EMPTY_CACHE_ATTR = "_qaic_original_empty_cache"
+
+
+def _patch_accelerator_empty_cache() -> None:
+    """Route generic accelerator cache cleanup through torch-qaic.
+
+    QAIC uses qaicrt rather than PyTorch's CachingDeviceAllocator. Calling the
+    generic implementation therefore raises an internal allocator assertion.
+    The torch-qaic API has the same no-argument cleanup contract and owns the
+    allocator that backs QAIC tensors.
+    """
+    accelerator = torch.accelerator
+    if getattr(accelerator, _EMPTY_CACHE_PATCHED_ATTR, False):
+        return
+
+    qaic = getattr(torch, "qaic", None)
+    qaic_empty_cache = getattr(qaic, "empty_cache", None)
+    if not callable(qaic_empty_cache):
+        # AOT mode has no torch-qaic device allocator and does not execute eager
+        # QAIC model code, so leave the generic API untouched.
+        return
+
+    setattr(accelerator, _ORIGINAL_EMPTY_CACHE_ATTR, accelerator.empty_cache)
+
+    def _qaic_empty_cache() -> None:
+        qaic_empty_cache()
+
+    accelerator.empty_cache = _qaic_empty_cache
+    setattr(accelerator, _EMPTY_CACHE_PATCHED_ATTR, True)
 
 
 def _qaic_post_init(self) -> None:
@@ -140,6 +175,7 @@ def _qaic_memory_profiling(
     )
 
 
+_patch_accelerator_empty_cache()
 MemorySnapshot.__post_init__ = _qaic_post_init
 MemorySnapshot.measure = _qaic_measure
 vllm.utils.mem_utils.memory_profiling = _qaic_memory_profiling

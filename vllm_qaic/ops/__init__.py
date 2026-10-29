@@ -22,6 +22,7 @@ def register_qaic_customop():
     # relative import for cross-compatibility in
     # plugin and fork
     from .grouped_topk_router import register_qaic_grouped_topk_router
+    from .moe_custom_ops import register_qaic_moe_custom_ops
     from .activation import QAicSiluAndMul
     from .layernorm import (
         QAicGemmaRMSNorm,
@@ -38,6 +39,7 @@ def register_qaic_customop():
 
     register_qaic_topk_router()
     register_qaic_grouped_topk_router()
+    register_qaic_moe_custom_ops()
 
     CustomOp.register_oot(
         _decorated_op_cls=QAicUnquantizedFusedMoEMethod,

@@ -9,6 +9,18 @@ import torch
 
 from vllm.model_executor.layers.activation import SiluAndMul
 
+from vllm_qaic.ops._triton_flags import triton_op_enabled
+
+
+def triton_silu_and_mul_out(output: torch.Tensor, x: torch.Tensor) -> None:
+    """Write plain SiLU-and-mul into a caller-provided output using Triton."""
+    from vllm.model_executor.layers.activation import swiglustep_and_mul_triton
+
+    d = x.shape[-1] // 2
+    x2d = x.reshape(-1, x.shape[-1])
+    output2d = output.reshape(-1, d)
+    swiglustep_and_mul_triton(output2d, x2d, limit=float("inf"))
+
 
 class QAicSiluAndMul(SiluAndMul):
     """
@@ -42,4 +54,20 @@ class QAicSiluAndMul(SiluAndMul):
         Returns:
             Output tensor of shape (..., d)
         """
+        # Triton fast path (opt-in): repurpose vLLM's SWIGLUSTEP Triton kernel
+        # (swiglustep_and_mul_triton) as plain SiluAndMul. vLLM ships no plain
+        # Triton silu-and-mul; SWIGLUSTEP computes
+        #   min(silu(gate), limit) * clamp(up, -limit, limit)
+        # which degenerates to silu(gate) * up when limit == +inf (limit is a
+        # tl.constexpr, so it specializes cleanly). The kernel is 2D-only
+        # ([B, 2*d]) and the caller allocates the output. Qwen3-VL's decoder MLP
+        # already feeds 2D [num_tokens, 2*intermediate], but flatten any leading
+        # dims to be safe and restore the original shape afterwards. Flag off ->
+        # the QAIC NSP swiglu op below, bit-for-bit.
+        if triton_op_enabled("SILU_AND_MUL"):
+            d = x.shape[-1] // 2
+            output = torch.empty((*x.shape[:-1], d), dtype=x.dtype, device=x.device)
+            triton_silu_and_mul_out(output, x)
+            return output
+
         return torch.ops.qaic.swiglu(x)
