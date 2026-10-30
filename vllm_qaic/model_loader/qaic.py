@@ -215,6 +215,9 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self.uses_mrope = model_config.uses_mrope
         self.is_vision_encoder = False
         self.is_multimodal_model = vllm_config.model_config.is_multimodal_model
+        # Gated DeltaNet (linear_attention) layers keep per-slot recurrent state that a -1 padding index would corrupt
+        layer_types = getattr(model_config.hf_text_config, "layer_types", None) or []
+        self.pad_decode_with_first_row = "linear_attention" in layer_types
 
     def forward(
         self,
@@ -900,19 +903,37 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         # DFlash: capture TLM decode hidden states for the DLM.
         if dflash_decode_hidden_buf is not None:
             batch_inputs["hidden_states"] = dflash_decode_hidden_buf
+        # Rows only map to slots through batch_index; without it a repeated row would write into another slot.
+        pad_with_first_row = self.pad_decode_with_first_row and not self.ignore_batch_index
         if num_decodes < self.decode_bsz:
-            batch_inputs["input_ids"][num_decodes:] = -1
-            batch_inputs["position_ids"][..., num_decodes:, :] = -1
+            if pad_with_first_row:
+                # Models with retained recurrent state (Gated DeltaNet): an index of -1 wraps around to the last
+                # batch slot on device and overwrites the state of the request living there. Repeat row 0 instead:
+                # the padding rows recompute row 0 and write identical values to its own slot (idempotent), and
+                # their logits are discarded as before.
+                batch_inputs["input_ids"][num_decodes:] = batch_inputs["input_ids"][0]
+                batch_inputs["position_ids"][..., num_decodes:, :] = batch_inputs[
+                    "position_ids"
+                ][..., 0:1, :]
+            else:
+                batch_inputs["input_ids"][num_decodes:] = -1
+                batch_inputs["position_ids"][..., num_decodes:, :] = -1
 
         if not self.ignore_batch_index:
             batch_inputs["batch_index"][:num_decodes, 0] = batch_indices
             if num_decodes < self.decode_bsz:
-                batch_inputs["batch_index"][num_decodes:] = -1
+                batch_inputs["batch_index"][num_decodes:] = (
+                    batch_inputs["batch_index"][0] if pad_with_first_row else -1
+                )
 
         if lora_ids is not None:
             batch_inputs["lora_ids"][:num_decodes] = lora_ids.reshape(num_decodes, 1)
             if num_decodes < self.decode_bsz:
-                batch_inputs["lora_ids"][num_decodes:] = -1
+                # Padding rows that repeat row 0 must also use row 0's adapter, otherwise they would write
+                # different (adapter-less) values into row 0's slot.
+                batch_inputs["lora_ids"][num_decodes:] = (
+                    batch_inputs["lora_ids"][0] if pad_with_first_row else -1
+                )
 
         # For spec-decode target: include num_logits_to_keep in batch_inputs
         # so the hardware knows how many token positions to compute logits for.
