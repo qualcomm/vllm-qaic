@@ -989,7 +989,11 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 exec_obj_idx = pending_prefill_exec_queue.get(
                     timeout=self.model.async_scheduling_exec_timeout  # type: ignore
                 )
-                self.model.complete_inf(exec_obj_idx, True)  # type: ignore[has-type]
+                # Release the slot's CCL in active_ccl, as the sync path of
+                # _run_pipeline_prefill does.
+                self.model.complete_inf(  # type: ignore[has-type]
+                    exec_obj_idx, True, pipeline_prefill_en=True
+                )
         # kv_consumer runs decode on last prompt token as well
         if (num_decodes is not None and num_decodes > 0) or self.is_kv_consumer:
             self.model.complete_inf(self.model.decode_execObj_idx, False)  # type: ignore
