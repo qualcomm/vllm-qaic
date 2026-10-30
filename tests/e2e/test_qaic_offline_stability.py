@@ -53,14 +53,16 @@ def test_offline_stability(
         model_name,
         max_num_seqs=decode_bsz,
         max_model_len=ctx_len,
-        long_prefill_token_threshold=seq_len,
         quantization=dtype,
         kv_cache_dtype=kv_dtype,
         enable_prefix_caching=False,
         async_scheduling=False,
         additional_config={
             "device_group": device_group,
-            "override_qaic_config": override_qaic_config,
+            "override_qaic_config": {
+                **(override_qaic_config or {}),
+                "prefill_seq_len": seq_len,
+            },
         },
     )
 

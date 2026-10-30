@@ -285,9 +285,15 @@ class QaicPlatform(Platform):
             and not model_config.is_multimodal_model
         ):
             # QAIC pooling QPCs are compiled with seq_len == max_model_len.
-            # Set both explicitly here (AOT and eager) so prefill_seq_len is correct.
+            # Disable chunked prefill and pin prefill_seq_len to max_model_len via
+            # override_qaic_config (the single source of truth for prefill chunking).
             scheduler_config.enable_chunked_prefill = False
-            scheduler_config.long_prefill_token_threshold = model_config.max_model_len
+            if additional_config is None:
+                additional_config = vllm_config.additional_config = {}
+            additional_config.setdefault("override_qaic_config", {})
+            additional_config["override_qaic_config"]["prefill_seq_len"] = (
+                model_config.max_model_len
+            )
 
         if not cls.is_aot:
             # TODO: Re-enable JIT warmup once QAIC JIT support is fully onboarded.
@@ -336,22 +342,20 @@ class QaicPlatform(Platform):
                     model_config.hf_config, "max_source_positions", 1500
                 )
             else:
+                # Prefill chunk length comes solely from
+                # override_qaic_config["prefill_seq_len"]; when unset, default to
+                # min(128, max_model_len). The prior long_prefill_token_threshold
+                # input has been removed.
                 __prefill_seq_len = override_qaic_config.get("prefill_seq_len", 0)
                 if not __prefill_seq_len:
-                    if scheduler_config.long_prefill_token_threshold == 0:
-                        __prefill_seq_len = min(128, model_config.max_model_len)
-                    else:
-                        __prefill_seq_len = min(
-                            scheduler_config.long_prefill_token_threshold,
-                            model_config.max_model_len,
-                        )
-                if not scheduler_config.enable_chunked_prefill:
-                    # TODO: long_prefill_token_threshold should not be set when
-                    # chunked prefill is disabled
-                    logger.warning_once(
-                        "Chunked prefill is disabled; chunk size=%s will be used"
-                        " as prefill_seq_len.",
-                        str(__prefill_seq_len),
+                    __prefill_seq_len = min(128, model_config.max_model_len)
+                # Vision encoder disables chunked prefill itself; skip it here.
+                if not scheduler_config.enable_chunked_prefill and not (
+                    model_config.runner_type == "pooling"
+                    and "skip_vision" not in override_qaic_config
+                ):
+                    assert not model_config.is_multimodal_model, (
+                        "QAIC multimodal models require chunked prefill."
                     )
                 if "override_qaic_config" not in additional_config:
                     additional_config["override_qaic_config"] = {}
@@ -373,6 +377,13 @@ class QaicPlatform(Platform):
                     ),
                     scheduler_config.max_num_batched_tokens,
                 )
+                # Without chunked prefill a prompt is scheduled whole, so the
+                # budget must fit max_model_len; QAIC still chunks on device.
+                if not scheduler_config.enable_chunked_prefill:
+                    scheduler_config.max_num_batched_tokens = max(
+                        scheduler_config.max_num_batched_tokens,
+                        model_config.max_model_len,
+                    )
             # Reset max_num_scheduled_tokens so that
             # _set_max_num_scheduled_tokens() recalculates it from the
             # (now-overridden) max_num_batched_tokens when __post_init__

@@ -55,13 +55,14 @@ def main():
         enable_prefix_caching=False,
         gpu_memory_utilization=1.0,
         async_scheduling=False,
-        long_prefill_token_threshold=seq_len,
-        # Example of optional additional_config specific to qaic
-        # additional_config={
-        #     "device_group": [0, 1],
-        #     "num_cores": 8,
-        #     "dfs": False,
-        # },
+        additional_config={
+            # Prefill chunk length; must match the compiled QPC seq_len.
+            "override_qaic_config": {"prefill_seq_len": seq_len},
+            # Example of optional settings specific to qaic
+            # "device_group": [0, 1],
+            # "num_cores": 8,
+            # "dfs": False,
+        },
     )
     # Generate texts from the prompts. The output is a list of RequestOutput objects
     # that contain the prompt, generated text, and other information.

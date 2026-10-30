@@ -55,11 +55,11 @@ def run_gemma3(questions: list[str], modality: str) -> ModelRequestData:
     engine_params = {
         "model": "google/gemma-3-4b-it",
         "max_model_len": ctx_len,
-        "long_prefill_token_threshold": seq_len,
         "enable_prefix_caching": False,
         "limit_mm_per_prompt": {"image": 1},
         "additional_config": {
             "override_qaic_config": {
+                "prefill_seq_len": seq_len,
                 "split_model_io": True,
             },
         },
@@ -88,11 +88,11 @@ def run_gemma4(questions: list[str], modality: str) -> ModelRequestData:
     engine_params = {
         "model": "google/gemma-4-E2B-it",
         "max_model_len": ctx_len,
-        "long_prefill_token_threshold": seq_len,
         "enable_prefix_caching": False,
         "limit_mm_per_prompt": {"image": 1},
         "additional_config": {
             "override_qaic_config": {
+                "prefill_seq_len": seq_len,
                 "use_onnx_subfunctions": False,
                 "split_model_io": True,
             },
@@ -121,12 +121,12 @@ def run_internvl(questions: list[str], modality: str) -> ModelRequestData:
         "model": model_name,
         "trust_remote_code": True,
         "max_model_len": ctx_len,
-        "long_prefill_token_threshold": seq_len,
         "enable_prefix_caching": False,
         "limit_mm_per_prompt": {"image": 1},
         "mm_processor_kwargs": {"max_dynamic_patch": 12},
         "additional_config": {
             "override_qaic_config": {
+                "prefill_seq_len": seq_len,
                 "split_model_io": True,
             },
         },
@@ -164,11 +164,11 @@ def run_llava(questions: list[str], modality: str) -> ModelRequestData:
     engine_params = {
         "model": "llava-hf/llava-1.5-7b-hf",
         "max_model_len": ctx_len,
-        "long_prefill_token_threshold": seq_len,
         "enable_prefix_caching": False,
         "limit_mm_per_prompt": {"image": 1},
         "additional_config": {
             "override_qaic_config": {
+                "prefill_seq_len": seq_len,
                 "split_model_io": True,
             },
         },
@@ -198,7 +198,6 @@ def run_qwen2_5_vl(questions: list[str], modality: str) -> ModelRequestData:
     engine_params = {
         "model": model_name,
         "max_model_len": ctx_len,
-        "long_prefill_token_threshold": seq_len,
         "enable_prefix_caching": False,
         "mm_processor_kwargs": {
             "min_pixels": 28 * 28,
@@ -208,6 +207,7 @@ def run_qwen2_5_vl(questions: list[str], modality: str) -> ModelRequestData:
         "limit_mm_per_prompt": {"image": 1},
         "additional_config": {
             "override_qaic_config": {
+                "prefill_seq_len": seq_len,
                 "height": height,
                 "width": width,
                 "split_model_io": True,
@@ -259,7 +259,6 @@ def run_qwen3_vl(questions: list[str], modality: str) -> ModelRequestData:
     engine_params = {
         "model": model_name,
         "max_model_len": ctx_len,
-        "long_prefill_token_threshold": seq_len,
         "enable_prefix_caching": False,
         "mm_processor_kwargs": {
             "min_pixels": 28 * 28,
@@ -269,6 +268,7 @@ def run_qwen3_vl(questions: list[str], modality: str) -> ModelRequestData:
         "limit_mm_per_prompt": {"image": 1},
         "additional_config": {
             "override_qaic_config": {
+                "prefill_seq_len": seq_len,
                 "height": height,
                 "width": width,
                 "split_model_io": True,
@@ -317,7 +317,6 @@ def run_qwen3_6_vl(questions: list[str], modality: str) -> ModelRequestData:
     engine_params = {
         "model": model_name,
         "max_model_len": ctx_len,
-        "long_prefill_token_threshold": seq_len,
         "enable_prefix_caching": False,
         "mm_processor_kwargs": {
             "min_pixels": 28 * 28,
@@ -327,6 +326,7 @@ def run_qwen3_6_vl(questions: list[str], modality: str) -> ModelRequestData:
         "limit_mm_per_prompt": {"image": 1},
         "additional_config": {
             "override_qaic_config": {
+                "prefill_seq_len": seq_len,
                 "height": height,
                 "width": width,
                 "use_onnx_subfunctions": True,
