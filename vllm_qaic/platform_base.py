@@ -326,9 +326,11 @@ class QaicPlatform(Platform):
                 __prefill_seq_len = override_qaic_config.get("prefill_seq_len", 0)
                 if not __prefill_seq_len:
                     __prefill_seq_len = min(128, model_config.max_model_len)
-                if not scheduler_config.enable_chunked_prefill:
-                    # Each prefill step feeds at most prefill_seq_len multimodal
-                    # embeddings into the QPC; a whole prompt would be cropped.
+                # Vision encoder disables chunked prefill itself; skip it here.
+                if not scheduler_config.enable_chunked_prefill and not (
+                    model_config.runner_type == "pooling"
+                    and "skip_vision" not in override_qaic_config
+                ):
                     assert not model_config.is_multimodal_model, (
                         "QAIC multimodal models require chunked prefill."
                     )
