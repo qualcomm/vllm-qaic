@@ -54,6 +54,12 @@ def make_routing_data_qaic(
         BLOCK_SIZE_K=block_size_k,
     )
 
+    # The packing kernel writes uint32 bit patterns, and triton_kernels'
+    # vpopc helper requires loads from the bitmatrix to have tl.uint32 dtype.
+    # Keep the QAIC-supported int32 allocation above, then reinterpret the
+    # identically sized storage without copying it.
+    bitmatrix = bitmatrix.view(torch.uint32)
+
     bitmatrix_shape = [n_rows, bm_cols * 32]
     bitmatrix_shape_max = [n_rows, None]
     bitmatrix = wrap_torch_tensor(
