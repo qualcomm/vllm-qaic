@@ -100,23 +100,26 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 classifier=classifier,
             )
             _embed_pooler = pooler_for_embed(pooler_config)
-            self._pooler = DispatchPooler(
-                {
-                    "token_embed": pooler_for_token_embed(pooler_config),
-                    "embed": _embed_pooler,
-                    "token_classify": _token_classify_pooler,
-                    "classify": pooler_for_classify(
-                        pooler_config,
-                        pooling=pooling,
-                        act_fn=None,  # softmax not applied; raw logits returned
-                    ),
-                    # new task added in upstream vllm
-                    "embed&token_classify": BgeM3Pooler(
-                        token_classify_pooler=_token_classify_pooler,
-                        embed_pooler=_embed_pooler,
-                    ),
-                }
-            )
+            poolers = {
+                "token_embed": pooler_for_token_embed(pooler_config),
+                "embed": _embed_pooler,
+                "token_classify": _token_classify_pooler,
+                "classify": pooler_for_classify(
+                    pooler_config,
+                    pooling=pooling,
+                    act_fn=None,  # softmax not applied; raw logits returned
+                ),
+            }
+            # "embed&token_classify" is BGE-M3 specific (upstream vLLM only registers it for
+            # BgeM3EmbeddingModel). vLLM's ModelConfig.get_pooling_task() gives it priority over
+            # "embed", so advertising it for every model makes the OpenAI server skip the
+            # /v1/embeddings endpoint (HTTP 501) unless --pooler-config '{"task": "embed"}' is passed.
+            if "BgeM3EmbeddingModel" in (model_config.architectures or []):
+                poolers["embed&token_classify"] = BgeM3Pooler(
+                    token_classify_pooler=_token_classify_pooler,
+                    embed_pooler=_embed_pooler,
+                )
+            self._pooler = DispatchPooler(poolers)
             self.hidden_dimension = model_config.get_hidden_size()
             self.encode_num_logits_buffer: dict | None = None
             self.is_qaic_pooler = False
