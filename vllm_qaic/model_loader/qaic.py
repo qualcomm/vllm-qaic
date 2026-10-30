@@ -2473,7 +2473,9 @@ def _get_qaic_compile_config(
                 if kv_role == "kv_producer":
                     num_logits_to_keep = 1
             if is_dflash_vlm:
-                cfg["use_onnx_subfunctions"] = False
+                # Export Gemma4 decoder blocks as subfunctions
+                # to avoid the slow flattened path with generated FP32 overrides.
+                cfg["use_onnx_subfunctions"] = model_type == "gemma4"
                 if not vllm_config.kv_transfer_config:
                     cfg["split_model_io"] = True
                 cfg.pop("full_batch_size", None)
