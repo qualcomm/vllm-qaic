@@ -145,6 +145,7 @@ class QaicAsyncPoolingModelRunnerOutput(AsyncModelRunnerOutput):
             self._model_runner.model._encode_prefill_cum_sum,
             self._model_runner.model._encode_prompt_lens,
             self._model_runner.model._encode_output_key,
+            self._model_runner.model._encode_output_order,
         )
 
         result = self._model_runner._pool(

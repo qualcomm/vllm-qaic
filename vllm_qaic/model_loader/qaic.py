@@ -944,6 +944,9 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
 
     def _run_encode(self, prefill_cum_sum, input_ids, positions):
         prompt_lens = np.diff(np.concatenate(([0], prefill_cum_sum))).tolist()
+        # Keep request/output association stable when the fixed-batch QPC
+        # schedules variable-length rows by sequence length.
+        output_order = np.argsort(prompt_lens, kind="stable")
         allowed_seqlens = self.get_allowed_seqlens()
         encode_seq_len = (
             min(sq for sq in allowed_seqlens if int(sq) > max(prompt_lens))
@@ -982,25 +985,29 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 (self.decode_bsz, encode_seq_len), dtype=input_ids[0].dtype
             ),
         }
-        idx_start = 0
-        for i, idx_end in enumerate(prefill_cum_sum):
-            pl = prompt_lens[i]
-            self._encode_merged_inputs["input_ids"][i, :pl] = input_ids[
+        request_starts = np.concatenate(([0], prefill_cum_sum[:-1]))
+        for output_i, request_i in enumerate(output_order):
+            idx_start = request_starts[request_i]
+            idx_end = prefill_cum_sum[request_i]
+            pl = prompt_lens[request_i]
+            self._encode_merged_inputs["input_ids"][output_i, :pl] = input_ids[
                 idx_start:idx_end
             ]
-            self._encode_merged_inputs["attention_mask"][i, :pl] = 1
-            idx_start = idx_end
+            self._encode_merged_inputs["attention_mask"][output_i, :pl] = 1
 
         self.run_encode(
             self._encode_merged_inputs, output_key, encode_num_logits_buffer
         )
 
         if not self.use_async_scheduling:
-            return self._process_encode_output(prefill_cum_sum, prompt_lens, output_key)
+            return self._process_encode_output(
+                prefill_cum_sum, prompt_lens, output_key, output_order
+            )
         else:
             self._encode_prefill_cum_sum = prefill_cum_sum
             self._encode_prompt_lens = prompt_lens
             self._encode_output_key = output_key
+            self._encode_output_order = output_order
             pending_encode_queue: Queue = Queue()
             pending_encode_queue.put(self.encode_execObj_idx)
             return pending_encode_queue
@@ -1010,6 +1017,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         prefill_cum_sum: np.ndarray,
         prompt_lens: list[int],
         output_key: str,
+        output_order: np.ndarray | None = None,
     ) -> torch.Tensor:
         """Convert the filled encode output buffer into a torch tensor.
 
@@ -1018,6 +1026,10 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         output = self.encode_num_logits_buffer
         assert output is not None, "encode buffer not initialized"
         output_array = output[output_key][: len(prefill_cum_sum)]
+        if output_order is not None:
+            restored_order = np.empty_like(output_order)
+            restored_order[output_order] = np.arange(len(output_order))
+            output_array = output_array[restored_order]
         output_tensor = torch.tensor(output_array)
 
         if not self.is_qaic_pooler and output_key != "logits":
