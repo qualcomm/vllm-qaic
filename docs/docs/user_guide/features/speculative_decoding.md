@@ -5,14 +5,11 @@ Speculative decoding (SpD) accelerates token generation by using a fast proposer
 !!! tip "Quick recommendation"
     Start with **ngram** SpD — it requires no separate model binary or dedicated core allocation and works well for summarization and conversational workloads. Switch to **draft_model** if you need higher acceptance rates on diverse generation tasks.
 
-!!! note "Triton-CPU backend required for AOT SpD"
-    For AOT mode, the rejection sampler uses Triton kernels running on CPU.
-    Install the triton-cpu backend during setup:
-    ```bash
-    TRITON_CPU=1 ./scripts/install.sh aot
-    # Or standalone after installation:
-    ./scripts/install_triton_cpu.sh
-    ```
+!!! note "AOT rejection sampler runs on Numba"
+    In AOT mode, the host-side rejection sampler runs on Numba (pinned in the AOT
+    requirements and installed by `./scripts/install.sh aot`). No triton-cpu backend
+    is needed for SpD or normal AOT serving. The dedicated parity environment must
+    be installed with `TRITON_CPU=1` to run mandatory Tier A Numba/Triton tests.
 
 ## Methods
 
@@ -36,9 +33,9 @@ llm = LLM(
     model="meta-llama/Llama-3.1-8B-Instruct",
     max_num_seqs=8,
     max_model_len=2048,
-    long_prefill_token_threshold=128,
     quantization="mxfp6",
     kv_cache_dtype="mxint8",
+    additional_config={"override_qaic_config": {"prefill_seq_len": 128}},
     speculative_config={
         "method": "ngram",
         "num_speculative_tokens": 5,
@@ -72,13 +69,13 @@ llm = LLM(
     model="meta-llama/Llama-3.1-8B-Instruct",
     max_num_seqs=4,
     max_model_len=2048,
-    long_prefill_token_threshold=128,
     quantization="mxfp6",
     kv_cache_dtype="mxint8",
     additional_config={
         "override_qaic_config": {
             "device_group": [0, 1, 2, 3],
             "num_cores": 10,       # 10 cores for target model
+            "prefill_seq_len": 128,
         },
         "draft_override_qaic_config": {
             "device_group": [0, 1, 2, 3],   # Same device
@@ -129,14 +126,13 @@ llm = LLM(
     model="Qwen/Qwen3-4B",
     max_num_seqs=4,
     max_model_len=4096,
-    long_prefill_token_threshold=128,  # TLM prefill_seq_len (multiple of block_size)
     quantization="mxfp6",
     kv_cache_dtype="mxint8",
     additional_config={
         "override_qaic_config": {
             "device_group": device_group,
             "num_cores": 8,
-            "prefill_seq_len": 128,
+            "prefill_seq_len": 128,  # TLM prefill_seq_len (multiple of block_size)
             "mxfp6_matmul": True,
             "mxint8_kv_cache": True,
             "mos": 1,
@@ -185,7 +181,7 @@ docker run --rm -it --network host \
     for details.
 
 !!! note "TLM `prefill_seq_len` must be a multiple of `block_size`"
-    The target model's `prefill_seq_len` (`long_prefill_token_threshold`) must be
+    The target model's `prefill_seq_len` must be
     an exact multiple of the DLM's `block_size`, since prefill chunks are fanned
     out into `block_size`-sized sub-blocks for the DLM.
 
@@ -234,7 +230,8 @@ No additional hardware is required — both models run on the same device.
     export LD_PRELOAD="$IOMP_PATH:$LD_PRELOAD"
     ```
 
-    Set `VLLM_DISABLE_LD_PRELOAD_OPT=1` to opt out of this tuning.
+    When `libiomp5.so` is on `LD_PRELOAD`, vllm-qaic sets `KMP_BLOCKTIME=1` and
+    `KMP_TPAUSE=0`. Set `VLLM_DISABLE_LD_PRELOAD_OPT=1` to opt out of this tuning.
 
 ## SpD with Disaggregated Serving
 

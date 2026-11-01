@@ -15,9 +15,9 @@ license = "Apache-2.0"
 authors = [{ name = "Qualcomm Data Center, LLM Serving Team" }]
 classifiers = [
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Development Status :: 5 - Development/Unstable",
     "Intended Audience :: Information Technology",
     "Intended Audience :: Developers",
@@ -26,7 +26,7 @@ classifiers = [
     "Operating System :: Linux",
     "Topic :: Scientific/Engineering :: Artificial Intelligence for Inference Accelerator",
 ]
-requires-python = ">=3.10,<3.13"
+requires-python = ">=3.11,<3.14"
 dynamic = [ "version", "dependencies", "optional-dependencies", "entry-points"]
 
 #[project.urls]
@@ -175,4 +175,5 @@ markers = [
     "qaic_test_config(**kwargs): per-test/module QAIC run configuration overrides",
     "qaic_aot_mode: test requires QAIC AOT (ahead-of-time compiled) mode to be installed",
     "qaic_disagg_installed: test requires the qaic_disagg package to be installed",
+    "triton_parity: differential Numba-vs-upstream-triton-cpu rejection-sampler test (skipped without triton-cpu)",
 ]

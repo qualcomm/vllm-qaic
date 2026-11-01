@@ -7,9 +7,17 @@
 # Adapted from vllm/examples/offline_inference/basic/basic.py
 
 import os
-import random
 
-from vllm import LLM, SamplingParams
+# Must be set before `import vllm` pulls in torch, which autoloads torch_qaic
+# and reads this variable to enumerate devices.
+os.environ.setdefault(
+    "QAIC_VISIBLE_DEVICES",
+    "0",  # for multiple devices, separate them through comma, i.e. 0,1,2,3
+)
+
+import random  # noqa: E402
+
+from vllm import LLM, SamplingParams  # noqa: E402
 
 # Sample prompts.
 prompts = ["My name is", "How are you?", "Hello,"] * 1
@@ -27,11 +35,6 @@ ctx_len = 256
 seq_len = 128
 decode_bsz = 2
 
-# set QAIC specific environment variables
-os.environ["QAIC_VISIBLE_DEVICES"] = (
-    "0"  # for multiple devices, separate them through comma, i.e. 0,1,2,3
-)
-
 
 def main():
     # Create a LLM.
@@ -44,7 +47,7 @@ def main():
         gpu_memory_utilization=0.9,
         enforce_eager=True,
         async_scheduling=False,
-        long_prefill_token_threshold=seq_len,
+        max_num_batched_tokens=seq_len,  # max tokens scheduled per step
         tensor_parallel_size=1,
         # buffers
     )

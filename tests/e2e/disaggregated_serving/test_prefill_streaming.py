@@ -163,10 +163,7 @@ def test_prefill_streaming_metrics(
             kv_port=kv_port,
         )
         extra_kwargs = {}
-        if disable_stream_prefill:
-            long_prefill_token_threshold = seq_len
-        else:
-            long_prefill_token_threshold = 0
+        if not disable_stream_prefill:
             extra_kwargs["max_num_batched_tokens"] = seq_len
 
         return make_runner(
@@ -174,7 +171,6 @@ def test_prefill_streaming_metrics(
             dg=dg,
             enable_chunked_prefill=True,
             override_qaic_config=override,
-            long_prefill_token_threshold=long_prefill_token_threshold,
             kv_transfer_config=ktc,
             **extra_kwargs,
         )

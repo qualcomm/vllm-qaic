@@ -96,8 +96,8 @@ The following hooks run automatically on `git commit`:
 - `markdownlint-cli2` — Markdown linting and auto-fixing (config in
   `.markdownlint.yaml`).
 - `actionlint` — GitHub Actions workflow linting.
-- `mypy-3.10` — static type checking on Python 3.10. The 3.11 and 3.12 jobs
-  (`mypy-3.11`, `mypy-3.12`) run only in CI (`manual` stage).
+- `mypy-3.11` — static type checking on Python 3.11. The 3.12 and 3.13 jobs
+  (`mypy-3.12`, `mypy-3.13`) run only in CI (`manual` stage).
 - `shellcheck` — shell script linting.
 - `signoff-commit` — appends the DCO `Signed-off-by` trailer at commit time.
 - `check-qualcomm-header` — verifies the Qualcomm license header on Python files.

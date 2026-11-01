@@ -37,7 +37,6 @@ llm = LLM(
     model="mistralai/Mistral-7B-v0.1",
     max_num_seqs=decode_bsz,
     max_model_len=ctx_len,
-    long_prefill_token_threshold=seq_len,
     quantization="mxfp6",
     kv_cache_dtype="mxint8",
     # disable_log_stats=False,
@@ -46,6 +45,7 @@ llm = LLM(
     max_loras=decode_bsz,  # maximum loras to run within a batch,
     additional_config={
         "device_group": [0],
+        "override_qaic_config": {"prefill_seq_len": seq_len},
         "lora_modules": [
             LoRAModulePath(
                 name=repo_id[i].split("/")[1],

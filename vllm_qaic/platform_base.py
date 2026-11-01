@@ -214,18 +214,6 @@ class QaicPlatform(Platform):
                 )
                 vllm_config.model_config.enforce_eager = True
             device_config.device = torch.device("qaic")
-            # set QAIC_VISIBLE_DEVICES from device_group
-            # if not already set
-            if (
-                os.environ.get(cls.device_control_env_var) is None
-                and "device_group" in additional_config
-            ):
-                logger.warning_once(
-                    "setting inference mode to Eager mode since torch_qaic is installed"
-                )
-                os.environ[cls.device_control_env_var] = additional_config[
-                    "device_group"
-                ]
 
         # Shorthand used throughout this method
         override_qaic_config = additional_config.get("override_qaic_config", {})
@@ -276,9 +264,15 @@ class QaicPlatform(Platform):
             and not model_config.is_multimodal_model
         ):
             # QAIC pooling QPCs are compiled with seq_len == max_model_len.
-            # Set both explicitly here (AOT and eager) so prefill_seq_len is correct.
+            # Disable chunked prefill and pin prefill_seq_len to max_model_len via
+            # override_qaic_config (the single source of truth for prefill chunking).
             scheduler_config.enable_chunked_prefill = False
-            scheduler_config.long_prefill_token_threshold = model_config.max_model_len
+            if additional_config is None:
+                additional_config = vllm_config.additional_config = {}
+            additional_config.setdefault("override_qaic_config", {})
+            additional_config["override_qaic_config"]["prefill_seq_len"] = (
+                model_config.max_model_len
+            )
 
         if not cls.is_aot:
             assert vllm_config.kv_transfer_config is None, (
@@ -300,6 +294,8 @@ class QaicPlatform(Platform):
         if cache_config:
             if model_config.enforce_eager:
                 cache_config.block_size = 16
+                # FIXME remove below hard-coding once PagedAttention is enabled
+                cache_config.enable_prefix_caching = False
             else:
                 if cache_config.enable_prefix_caching:
                     cache_config.enable_prefix_caching = False
@@ -325,22 +321,20 @@ class QaicPlatform(Platform):
                     else getattr(model_config.hf_config, "max_source_positions", 1500)
                 )
             else:
+                # Prefill chunk length comes solely from
+                # override_qaic_config["prefill_seq_len"]; when unset, default to
+                # min(128, max_model_len). The prior long_prefill_token_threshold
+                # input has been removed.
                 __prefill_seq_len = override_qaic_config.get("prefill_seq_len", 0)
                 if not __prefill_seq_len:
-                    if scheduler_config.long_prefill_token_threshold == 0:
-                        __prefill_seq_len = min(128, model_config.max_model_len)
-                    else:
-                        __prefill_seq_len = min(
-                            scheduler_config.long_prefill_token_threshold,
-                            model_config.max_model_len,
-                        )
-                if not scheduler_config.enable_chunked_prefill:
-                    # TODO: long_prefill_token_threshold should not be set when
-                    # chunked prefill is disabled
-                    logger.warning_once(
-                        "Chunked prefill is disabled; chunk size=%s will be used"
-                        " as prefill_seq_len.",
-                        str(__prefill_seq_len),
+                    __prefill_seq_len = min(128, model_config.max_model_len)
+                # Vision encoder disables chunked prefill itself; skip it here.
+                if not scheduler_config.enable_chunked_prefill and not (
+                    model_config.runner_type == "pooling"
+                    and "skip_vision" not in override_qaic_config
+                ):
+                    assert not model_config.is_multimodal_model, (
+                        "QAIC multimodal models require chunked prefill."
                     )
                 if "override_qaic_config" not in additional_config:
                     additional_config["override_qaic_config"] = {}
@@ -362,6 +356,13 @@ class QaicPlatform(Platform):
                     ),
                     scheduler_config.max_num_batched_tokens,
                 )
+                # Without chunked prefill a prompt is scheduled whole, so the
+                # budget must fit max_model_len; QAIC still chunks on device.
+                if not scheduler_config.enable_chunked_prefill:
+                    scheduler_config.max_num_batched_tokens = max(
+                        scheduler_config.max_num_batched_tokens,
+                        model_config.max_model_len,
+                    )
             # Reset max_num_scheduled_tokens so that
             # _set_max_num_scheduled_tokens() recalculates it from the
             # (now-overridden) max_num_batched_tokens when __post_init__
@@ -375,6 +376,10 @@ class QaicPlatform(Platform):
             # CPUs (KMP_TPAUSE is a documented no-op on non-Intel silicon; the other
             # KMP_* vars measurably speed up CPU-bound speculative-decoding proposers
             # on AMD EPYC as well).
+            # KMP_*_BARRIER_PATTERN=dist,dist is deliberately not set: under dist
+            # barriers, OpenMP teams forked from non-main threads (e.g. the host
+            # rejection sampler) busy-spin between regions and starve the
+            # engine threads (see docs/qaic for the measured SpD slowdown).
             # Set VLLM_DISABLE_LD_PRELOAD_OPT=1 to skip this optimization.
             ld_preload_str = os.getenv("LD_PRELOAD", "")
             disable_opt = os.getenv("VLLM_DISABLE_LD_PRELOAD_OPT", "0") == "1"
@@ -382,15 +387,9 @@ class QaicPlatform(Platform):
                 import platform
 
                 cpu_info = platform.processor() or "unknown"
-                print(
-                    f"Updating KMP_BLOCKTIME, KMP_TPAUSE, "
-                    f"KMP_FORKJOIN_BARRIER_PATTERN for {cpu_info}"
-                )
+                print(f"Updating KMP_BLOCKTIME, KMP_TPAUSE for {cpu_info}")
                 os.environ["KMP_BLOCKTIME"] = "1"
                 os.environ["KMP_TPAUSE"] = "0"
-                os.environ["KMP_FORKJOIN_BARRIER_PATTERN"] = "dist,dist"
-                os.environ["KMP_PLAIN_BARRIER_PATTERN"] = "dist,dist"
-                os.environ["KMP_REDUCTION_BARRIER_PATTERN"] = "dist,dist"
 
         from vllm.config import CompilationMode
 
@@ -546,6 +545,13 @@ class QaicPlatform(Platform):
             scheduler_config.max_num_batched_tokens = (
                 scheduler_config.max_num_seqs
                 * scheduler_config.long_prefill_token_threshold
+            )
+            # Pin encoder cache/compute budget so all vision frames encode in one step.
+            scheduler_config.max_num_encoder_input_tokens = (
+                scheduler_config.max_num_batched_tokens
+            )
+            scheduler_config.encoder_cache_size = (
+                scheduler_config.max_num_batched_tokens
             )
             if "override_qaic_config" not in vllm_config.additional_config:
                 additional_config["override_qaic_config"] = {}

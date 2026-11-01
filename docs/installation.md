@@ -34,16 +34,36 @@ This guide covers installing `vllm-qaic` in both **AOT** (Ahead-of-Time compiled
 |---|---|
 | Hardware | Qualcomm Cloud AI 100 / Cloud AI 080 |
 | OS | Linux (Ubuntu 22.04+) |
-| Python | 3.12 |
+| Python | PYT mode: 3.11 / 3.12 / 3.13 &nbsp;·&nbsp; AOT mode: 3.11 / 3.12 only — **not 3.13** |
 | QAIC Platform SDK | >= 1.22.0 |
 | QAIC Apps SDK | >= 1.22.0 (PYT mode requires `--install-torch-qaic` flag) |
+
+> [!WARNING]
+> **AOT mode does not work on Python 3.13.** AOT depends on `QEfficient`, whose own
+> `pyproject.toml` declares `requires-python = ">=3.10,<3.13"` and hard-pins
+> `sentencepiece==0.2.0`. `sentencepiece` publishes cp313 wheels only from 0.2.1
+> onward, so under Python 3.13 that pin forces a source build of 0.2.0, which fails:
+>
+> ```text
+> Building sentencepiece==0.2.0
+> /bin/sh: 1: pkg-config: not found
+> CMake Error at CMakeLists.txt:15 (cmake_minimum_required):
+>   Compatibility with CMake < 3.5 has been removed from CMake.
+> hint: `sentencepiece` (v0.2.0) was included because `qefficient` (v1.23.0.dev0)
+>       depends on `sentencepiece`
+> ```
+>
+> **Workaround:** use Python 3.11 or 3.12 for AOT environments. This will be
+> resolved upstream when QEfficient supports 3.13 and relaxes the
+> `sentencepiece==0.2.0` pin.
 
 Install the QAIC SDK before proceeding:
 
 - [SDK installation guide](https://quic.github.io/cloud-ai-sdk-pages/latest/Getting-Started/Installation/index.html)
 - For **PYT mode**: run the Apps SDK installer with `--install-torch-qaic` to build `torch_qaic` wheels into `/opt/qti-aic/integrations/torch_qaic/py312/`
 
-Activate a Python 3.12 environment before running any install step:
+Activate a Python 3.11, 3.12, or 3.13 environment before running any install step
+(3.11 or 3.12 for AOT):
 
 ```bash
 # conda
@@ -84,6 +104,11 @@ The script handles all dependency ordering, version pinning, and `uv`/`pip` dete
 
 ### AOT mode — `install.sh`
 
+> [!WARNING]
+> Requires Python 3.11 or 3.12. **Python 3.13 is not supported for AOT** — Step 1
+> (QEfficient) fails on a `sentencepiece==0.2.0` source build. See
+> [Prerequisites](#prerequisites) for details and the full matrix.
+
 ```bash
 # From the vllm-qaic repo root, with your env activated:
 ./scripts/install.sh aot
@@ -102,7 +127,8 @@ The script handles all dependency ordering, version pinning, and `uv`/`pip` dete
 TRANSFORMERS_VERSION_AOT=4.55.3 ./scripts/install.sh aot
 TRANSFORMERS_VERSION_PYT=4.57.3 ./scripts/install.sh pyt
 
-# Enable triton-cpu backend for AOT Speculative Decoding
+# Optional: triton-cpu backend — only for the Numba/Triton rejection-sampler parity
+# tests (not needed for AOT Speculative Decoding, which uses Numba)
 # triton-cpu is a large C++ build — requires ~10 GB of free disk space at TRITON_CPU_SRC
 TRITON_CPU=1 ./scripts/install.sh aot
 
@@ -203,7 +229,7 @@ python -m pip install \
     "torchaudio==2.11.0+cpu"
 
 # 1b. torch_qaic AFTER torch is confirmed CPU-only
-#     Replace py312 with your Python version (py310, py311, py312)
+#     Replace py312 with your Python version (py311, py312, py313)
 pip install /opt/qti-aic/integrations/torch_qaic/py312/torch_qaic-*.whl
 
 # [Optional] Pin transformers if torch_qaic's version conflicts with your model
@@ -241,7 +267,13 @@ pip install --no-build-isolation ./vllm-qaic
 
 `ci` and `dev` additionally install `requirements/test.txt` (pytest, ruff, mypy, etc.) so tests can run directly inside the image; `release`/`wheel` don't, since they're meant to be lean runtime/distribution artifacts.
 
-`PYTHON_VERSION` (default `3.12`; also `3.10`/`3.11`) is threaded through every target via `aot-base`/`pyt-base`, provisioned with `uv python install` rather than apt so non-default versions work regardless of the base image's own Python.
+`PYTHON_VERSION` (default `3.12`; also `3.11`/`3.13`) is threaded through every target via `aot-base`/`pyt-base`, provisioned with `uv python install` rather than apt so non-default versions work regardless of the base image's own Python.
+
+> [!WARNING]
+> `PYTHON_VERSION=3.13` works for `Dockerfile.pyt` but **fails for `Dockerfile.aot`**
+> at the QEfficient layer (`sentencepiece==0.2.0` has no cp313 wheel). Build AOT images
+> and wheels with 3.11 or 3.12 — the AOT wheel is `py3-none-any`, so one build covers
+> every supported Python version anyway. See [Prerequisites](#prerequisites).
 
 ### Build args
 
@@ -254,17 +286,17 @@ All `ARG`s are global (declared before the first `FROM`) and re-declared inside 
 | `BASE_IMAGE` | `ghcr.io/quic/cloud_ai_inference_ubuntu24:1.21.6.0` | Must have the QAIC Platform and Apps SDKs installed (`/opt/qti-aic/` present) |
 | `VENV` | `/opt/venv-aot` | Path to the venv created inside the image |
 | `UV_VERSION` | `0.11.29` | Pinned `uv` binary version, pulled via `COPY --from` |
-| `PYTHON_VERSION` | `3.12` | Python version (`3.10`/`3.11`/`3.12`), provisioned via `uv python install` |
+| `PYTHON_VERSION` | `3.12` | Python version (`3.11`/`3.12`), provisioned via `uv python install`. **`3.13` is not supported for AOT** — see [Prerequisites](#prerequisites) |
 | `RUST_VERSION` | `1.90` | Pinned Rust toolchain image tag (`rust:<ver>-slim`); only used when `VLLM_BUILD_RUST=1` |
 | `RUST_IMAGE` | `docker.io/library/rust:${RUST_VERSION}-slim` | Full image ref for the Rust toolchain. Override to pull from a mirror or internal registry; supplies its own tag, so it takes precedence over `RUST_VERSION` |
 | `VLLM_VERSION` | `0.23.0` | vLLM release tag to install |
 | `VLLM_PR` | *(empty)* | Any target: vLLM PR number to fetch (takes priority over `VLLM_BRANCH` and `VLLM_VERSION`) |
 | `VLLM_BRANCH` | *(empty)* | Any target: vLLM branch to clone instead of the pinned `VLLM_VERSION` tag |
-| `VLLM_QAIC_VERSION` | `1.22` | vllm-qaic SDK/version tag (wheel tag/version suffix) |
-| `QEFF_BRANCH` | `release/v1.22.0` | QEfficient branch/tag to install |
+| `VLLM_QAIC_VERSION` | `1.23` | vllm-qaic SDK/version tag (wheel tag/version suffix) |
+| `QEFF_BRANCH` | `release/v1.23.0` | QEfficient branch/tag to install |
 | `TORCH_VERSION_AOT` | `2.7.0+cpu` | CPU torch version for AOT |
 | `TORCHVISION_VERSION_AOT` | `0.22.0+cpu` | torchvision version for AOT |
-| `TRITON_CPU` | `1` | Set to `1` to build the triton-cpu backend (AOT SpD); Docker defaults ON, unlike `install.sh`'s default OFF |
+| `TRITON_CPU` | `0` | Set to `1` to build the optional triton-cpu backend (Numba/Triton rejection-sampler parity tests only; not needed for AOT SpD) |
 | `TRITON_CPU_COMMIT` | `e60f448f8f197073b75d6d3e77347414a5db3ee7` | Pinned triton-cpu commit hash |
 | `TRITON_CPU_COMPILE_MAX_JOBS` | `4` | Parallel build jobs for triton-cpu compilation |
 | `VLLM_BUILD_RUST` | `1` | Set to `1` to build vLLM's experimental Rust OpenAI frontend (`vllm-rs`) |
@@ -281,15 +313,15 @@ All `ARG`s are global (declared before the first `FROM`) and re-declared inside 
 | `BASE_IMAGE` | `ghcr.io/quic/cloud_ai_inference_ubuntu24:1.21.6.0` | Must have the QAIC Platform and Apps SDKs installed (`/opt/qti-aic/` present with `torch_qaic` wheels) |
 | `VENV` | `/opt/venv-pyt` | Path to the venv created inside the image |
 | `UV_VERSION` | `0.11.29` | Pinned `uv` binary version, pulled via `COPY --from` |
-| `PYTHON_VERSION` | `3.12` | Python version (`3.10`/`3.11`/`3.12`), provisioned via `uv python install` |
+| `PYTHON_VERSION` | `3.12` | Python version (`3.11`/`3.12`/`3.13`), provisioned via `uv python install` |
 | `RUST_VERSION` | `1.90` | Pinned Rust toolchain image tag (`rust:<ver>-slim`); only used when `VLLM_BUILD_RUST=1` |
 | `RUST_IMAGE` | `docker.io/library/rust:${RUST_VERSION}-slim` | Full image ref for the Rust toolchain. Override to pull from a mirror or internal registry; supplies its own tag, so it takes precedence over `RUST_VERSION` |
 | `VLLM_VERSION` | `0.23.0` | vLLM release tag to install |
 | `VLLM_PR` | *(empty)* | Any target: vLLM PR number to fetch (takes priority over `VLLM_BRANCH` and `VLLM_VERSION`) |
 | `VLLM_BRANCH` | *(empty)* | Any target: vLLM branch to clone instead of the pinned `VLLM_VERSION` tag |
-| `VLLM_QAIC_VERSION` | `1.22` | vllm-qaic SDK/version tag (wheel tag/version suffix) |
-| `TORCH_VERSION_PYT` | `2.11.0+cpu` | CPU torch version for PYT |
-| `TORCHVISION_VERSION_PYT` | `0.26.0+cpu` | torchvision version for PYT |
+| `VLLM_QAIC_VERSION` | `1.23` | vllm-qaic SDK/version tag (wheel tag/version suffix) |
+| `TORCH_VERSION_PYT` | `2.13.0+cpu` | CPU torch version for PYT |
+| `TORCHVISION_VERSION_PYT` | `0.28.0+cpu` | torchvision version for PYT |
 | `TORCHAUDIO_VERSION_PYT` | `2.11.0+cpu` | torchaudio version for PYT |
 | `VLLM_TARGET_DEVICE_PYT` | `empty` | vLLM build target device (`empty` = no C++ compilation) |
 | `TORCH_QAIC_BASE_PATH` | `/opt/qti-aic/integrations/torch_qaic` | SDK path containing `torch_qaic` wheels inside `BASE_IMAGE` |
@@ -471,22 +503,22 @@ All version constants are defined in [`scripts/utility.sh`](../scripts/utility.s
 | Constant | Value | Description |
 |---|---|---|
 | `VLLM_VERSION` | `0.23.0` | vLLM release tag |
-| `VLLM_QAIC_VERSION` | `0.23.0` | vllm-qaic SDK/version tag (used in wheel tag and version suffix) |
+| `VLLM_QAIC_VERSION` | `1.23` | vllm-qaic SDK/version tag (used in wheel tag and version suffix) |
 | `TORCH_VERSION_AOT` | `2.7.0+cpu` | CPU torch for AOT (matches QEfficient exact pin) |
 | `TORCHVISION_VERSION_AOT` | `0.22.0+cpu` | torchvision for AOT (keep in sync with torch) |
-| `TORCH_VERSION_PYT` | `2.11.0+cpu` | CPU torch for PYT |
-| `TORCHVISION_VERSION_PYT` | `0.26.0+cpu` | torchvision for PYT (keep in sync with torch) |
+| `TORCH_VERSION_PYT` | `2.13.0+cpu` | CPU torch for PYT |
+| `TORCHVISION_VERSION_PYT` | `0.28.0+cpu` | torchvision for PYT (keep in sync with torch) |
 | `TORCHAUDIO_VERSION_PYT` | `2.11.0+cpu` | torchaudio for PYT (keep in sync with torch) |
-| `QEFF_BRANCH` | `main` | QEfficient branch/tag |
+| `QEFF_BRANCH` | `release/v1.23.0` | QEfficient branch/tag |
 | `TORCH_QAIC_VERSION` | `0.1.0` | torch_qaic wheel version |
 | `VLLM_TARGET_DEVICE_AOT` | `empty` | vLLM build target for AOT mode |
 | `VLLM_TARGET_DEVICE_PYT` | `empty` | vLLM build target for PYT mode |
-| `TRITON_CPU` | `0` | Set to `1` to enable triton-cpu backend (AOT SpD) |
+| `TRITON_CPU` | `0` | Set to `1` to build the optional triton-cpu backend (parity tests only; not needed for AOT SpD) |
 | `TRITON_CPU_COMMIT` | `e60f448f...` | Pinned triton-cpu commit hash |
 | `TRITON_CPU_SRC` | `<repo>/.build/triton-cpu` | Clone destination for triton-cpu source |
 | `TRITON_CPU_COMPILE_MAX_JOBS` | `4` | Parallel build jobs for triton-cpu compilation |
 | `TRITON_CPU_SKIP_DISK_CHECK`¹ | `0` | Set to `1` to skip the 10 GB disk-space pre-flight check |
 | `TORCH_QAIC_BASE_PATH` | `/opt/qti-aic/integrations/torch_qaic` | SDK path for torch_qaic wheels |
-| `VLLM_QAIC_SDK_PATH` | `/opt/qti-aic/integrations/vllm_qaic` | SDK path for pre-built vllm-qaic wheels |
+| `VLLM_QAIC_SDK_PATH` | `/opt/qti-aic/integrations/vllm-qaic` | SDK path for pre-built vllm-qaic wheels |
 
 ¹ Defined in `scripts/install_triton_cpu.sh`, not `utility.sh`.

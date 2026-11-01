@@ -135,7 +135,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
 
         self.config = config
         self.vocab_size = config.get_text_config().vocab_size
-        # `long_prefill_token_threshold` will define prefill chunk length
+        # `override_qaic_config["prefill_seq_len"]` defines the prefill chunk length
         if self.config.model_type == "whisper":
             # Encoder-decoder models have chunked prefill disabled by vllm,
             # but QAIC still requires a prefill sequence length.
@@ -435,16 +435,18 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 (1, self.prefill_seq_len, _hidden_size), dtype=_hs_info[1]
             )
 
+        # Resolve CCL lengths before loading multimodal model since
+        # multimodal dummy input shapes depend on whether CCL is enabled.
+        self.comp_ctx_lengths_prefill, self.comp_ctx_lengths_decode = (
+            self.get_comp_ctx_lengths()
+        )
+
         if self.is_multimodal_model:
             self._load_multimodal()
             if self.is_vision_encoder:
                 # The vision encoder runs standalone, outside the prefill/decode
                 # paradigm, so remaining configs do not apply.
                 return
-
-        self.comp_ctx_lengths_prefill, self.comp_ctx_lengths_decode = (
-            self.get_comp_ctx_lengths()
-        )
         self.prefill_num_logits_buffer = None
         self.prefill_logits = dict(
             logits=np.random.randn(self.prefill_bsz, 1, self.vocab_size).astype(

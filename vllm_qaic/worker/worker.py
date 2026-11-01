@@ -684,6 +684,10 @@ class QaicWorkerAoT(QaicWorker):
 
         self._configure_thread_parallelism()
 
+        # The Numba rejection kernels are needed only by speculative decoding.
+        # The top-k/top-p AOT patch is registered during plugin initialization.
+        self._install_aot_rejection_sampler()
+
         # Construct the model runner
         self.model_runner: QaicModelRunnerAoT = QaicModelRunnerAoT(
             self.vllm_config, self.device
@@ -694,8 +698,28 @@ class QaicWorkerAoT(QaicWorker):
         self.model_runner.load_model()
 
     def compile_or_warm_up_model(self) -> CompilationTimes:
+        self._warm_up_aot_speculative_decoding()
         self.model_runner._qaic_dummy_run()
         return CompilationTimes(language_model=0.0, encoder=0.0)
+
+    def _install_aot_rejection_sampler(self) -> None:
+        """Install host rejection kernels only for speculative decoding."""
+        if self.speculative_config is None:
+            return
+
+        from vllm_qaic.v1.sample import rejection_sampler_numba
+
+        rejection_sampler_numba.install()
+
+    def _warm_up_aot_speculative_decoding(self) -> None:
+        """Prewarm speculative sampler and drafter kernels when configured."""
+        if self.speculative_config is None:
+            return
+
+        from vllm_qaic.v1.sample import rejection_sampler_numba
+
+        rejection_sampler_numba.prewarm()
+        self.model_runner._qaic_warm_up_drafter()
 
     def reload_weights(self) -> None:
         logger.warning("reloading weights is not supported on QAIC in AoT mode.")

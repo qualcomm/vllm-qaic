@@ -54,7 +54,6 @@ vision_bsz = 4
 engine_args = {
     "model": "Qwen/Qwen2.5-VL-32B-Instruct",
     "max_model_len": ctx_len,
-    "long_prefill_token_threshold": seq_len,
     "max_num_seqs": decode_bsz,
     "quantization": "mxfp6",
     "kv_cache_dtype": "mxint8",
@@ -62,6 +61,7 @@ engine_args = {
     "additional_config": {
         "override_qaic_config": {
             "device_group": [1],       # Language on QID 1
+            "prefill_seq_len": seq_len,
             "height": [364, 512],      # Compiled resolutions
             "width": [532, 910],
         },

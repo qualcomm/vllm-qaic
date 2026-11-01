@@ -8,19 +8,19 @@
 
 """Monkey-patch for vllm.v1.sample.rejection_sampler.RejectionSampler.
 
-QAIC-specific optimizations in the rejection-sampling forward pass:
+QAIC-specific optimization in the rejection-sampling forward pass:
 
-  1. Skip-clone optimization:
+  Skip-clone optimization:
      When all requests are greedy AND no logprobs are needed, the tensor
      clone before apply_logits_processors is unnecessary because the raw
      logits are never read again.  Skipping the clone avoids a memory
      allocation on the hot path.
 
-  2. Skip-softmax optimization:
-     For greedy decoding argmax(logits) == argmax(softmax(logits)), so
-     computing the probability distribution is unnecessary.  Pass the
-     logits directly as `target_probs` to rejection_sample, which uses
-     target_probs only for argmax when all_greedy=True.
+Everything else mirrors upstream ``RejectionSampler.forward`` (vLLM v0.23.0).
+In particular, ``rejection_sample`` receives the post-constraint *logits*
+(it applies softmax itself, and already skips it when all requests are
+greedy), plus the ``synthetic_mode``/``synthetic_conditional_rates``/
+``use_fp64_gumbel`` options configured on the sampler.
 """
 
 from dataclasses import replace
@@ -43,7 +43,7 @@ def _qaic_forward(
     logits,
     sampling_metadata,
 ) -> SamplerOutput:
-    """Forward pass with QAIC greedy-path optimizations (skip-clone, skip-softmax)."""
+    """Upstream forward with the QAIC greedy-path skip-clone optimization."""
     assert metadata.max_spec_len <= MAX_SPEC_LEN
 
     bonus_logits_indices = metadata.bonus_logits_indices
@@ -84,13 +84,6 @@ def _qaic_forward(
         metadata.cu_num_draft_tokens,
         sampling_metadata,
     )
-    # --- BEGIN QAIC modification: skip-softmax optimisation ---
-    # For greedy decoding argmax(logits) == argmax(softmax(logits)).
-    if sampling_metadata.all_greedy:
-        target_probs = target_logits
-    else:
-        target_probs = target_logits.softmax(dim=-1, dtype=torch.float32)
-    # --- END QAIC modification ---
 
     output_token_ids = rejection_sample(
         metadata.draft_token_ids,
@@ -98,9 +91,12 @@ def _qaic_forward(
         metadata.max_spec_len,
         metadata.cu_num_draft_tokens,
         draft_probs,
-        target_probs,
+        target_logits,
         bonus_token_ids,
         sampling_metadata,
+        synthetic_mode=self.synthetic_mode,
+        synthetic_conditional_rates=self.synthetic_conditional_rates,
+        use_fp64_gumbel=self.use_fp64_gumbel,
     )
 
     logprobs_tensors = None
