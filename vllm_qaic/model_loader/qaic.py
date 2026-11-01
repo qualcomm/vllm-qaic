@@ -7,7 +7,6 @@
 
 import json
 import os
-import sys
 import threading
 import time
 from collections.abc import Callable
@@ -51,13 +50,6 @@ from vllm_qaic.utils.qaic_utils import _clean_config, compute_max_decode_tokens
 logger = init_logger(__name__)
 
 lock = threading.Lock()
-
-
-def _use_local_efficient_transformers() -> None:
-    """Allow a checkout under test to provide the QEfficient package."""
-    path = os.environ.get("VLLM_QAIC_EFFICIENT_TRANSFORMERS")
-    if path and os.path.isdir(path) and path not in sys.path:
-        sys.path.insert(0, path)
 
 
 class QaicCompilationComplete(Exception):
@@ -207,7 +199,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             _d: dict = {
                 "input_ids": np.full((self.decode_bsz, _mdt), -1, dtype=np.int64),
                 "position_ids": np.full((self.decode_bsz, _mdt), -1, dtype=np.int64),
-                "attention_mask": np.ones((self.decode_bsz, _mdt), dtype=np.int64),
                 "batch_index": np.full((self.decode_bsz, 1), -1, dtype=np.int64),
             }
             if self.lora_mode:
@@ -830,10 +821,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 chunk_inputs["input_ids"] = iids[lower_idx:upper_idx].reshape(
                     1, self.prefill_seq_len
                 )
-                if "attention_mask" in self.session.input_names:
-                    chunk_inputs["attention_mask"] = (
-                        chunk_inputs["input_ids"] != -1
-                    ).astype(np.int64)
                 # Reconstruct mm_token_type_ids from input_ids: positions where
                 # input_ids == image_token_id get value 1, all others get 0.
                 # This tells the decoder which tokens are image embeddings.
@@ -934,7 +921,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         if num_decodes < self.decode_bsz:
             batch_inputs["input_ids"][num_decodes:] = -1
             batch_inputs["position_ids"][..., num_decodes:, :] = -1
-            batch_inputs["attention_mask"][num_decodes:] = 0
 
         if not self.ignore_batch_index:
             batch_inputs["batch_index"][:num_decodes, 0] = batch_indices
@@ -1575,7 +1561,6 @@ def load_qaic_model(
                 vllm_config.additional_config,
             )
 
-            _use_local_efficient_transformers()
             from QEfficient import (
                 QEFFAutoModel,
                 QEFFAutoModelForCTC,
@@ -1821,7 +1806,6 @@ def get_hf_model(
     additional_config: dict | None = None,
 ):
     logger.info("Downloading model from Hugging face server")
-    _use_local_efficient_transformers()
     from QEfficient import (
         QEFFAutoModel,
         QEFFAutoModelForCausalLM,

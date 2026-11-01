@@ -28,9 +28,6 @@ from transformers.utils.import_utils import (
 )
 
 from vllm_qaic.logger import init_logger
-from vllm_qaic.model_loader.qaic_qwen3_asr_processor import (
-    QAIC_QWEN3_ASR_PROCESSOR,
-)
 from vllm.model_executor.models.gemma3_mm import (
     Gemma3DummyInputsBuilder,
     Gemma3ForConditionalGeneration,
@@ -52,6 +49,12 @@ from vllm.model_executor.models.qwen2_5_vl import (
 from vllm.model_executor.models.qwen2_vl import (
     Qwen2VLMultiModalDataParser,
     _create_qwen2vl_field_factory,
+)
+from vllm.model_executor.models.qwen3_asr import (
+    Qwen3ASRDummyInputsBuilder,
+    Qwen3ASRForConditionalGeneration,
+    Qwen3ASRMultiModalProcessor,
+    Qwen3ASRProcessingInfo,
 )
 from vllm.model_executor.models.qwen3_5 import (
     Qwen3_5ForConditionalGeneration,
@@ -93,6 +96,43 @@ from vllm.multimodal.processing.processor import (
 )
 
 logger = init_logger(__name__)
+
+
+class QaicQwen3ASRMultiModalProcessor(Qwen3ASRMultiModalProcessor):
+    """Keep native Qwen mel features instead of flattened embeddings."""
+
+    def _call_hf_processor(self, *args, **kwargs):
+        hf_inputs = super()._call_hf_processor(*args, **kwargs)
+        if "input_audio_features" in hf_inputs and "input_features" not in hf_inputs:
+            hf_inputs["input_features"] = hf_inputs.pop("input_audio_features")
+        if "feature_attention_mask" in hf_inputs:
+            mask = hf_inputs["feature_attention_mask"]
+            if isinstance(mask, torch.Tensor) and mask.dtype != torch.int32:
+                hf_inputs["feature_attention_mask"] = mask.to(torch.int32)
+            hf_inputs["input_features_mask"] = hf_inputs["feature_attention_mask"]
+        return hf_inputs
+
+    def _get_mm_fields_config(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        fields = {
+            "input_features": MultiModalFieldConfig.batched("audio"),
+            "feature_attention_mask": MultiModalFieldConfig.batched("audio"),
+            "input_features_mask": MultiModalFieldConfig.batched("audio"),
+        }
+        if "audio_feature_lengths" in hf_inputs:
+            fields["audio_feature_lengths"] = MultiModalFieldConfig.batched("audio")
+        return fields
+
+
+QAIC_QWEN3_ASR_PROCESSOR = (
+    QaicQwen3ASRMultiModalProcessor,
+    Qwen3ASRProcessingInfo,
+    Qwen3ASRDummyInputsBuilder,
+    Qwen3ASRForConditionalGeneration,
+)
 # transformers v5.5.4 replaced image_processor.min_pixels / .max_pixels class
 # attributes with a size dict keyed by 'shortest_edge' / 'longest_edge'.
 _TRANSFORMERS_NEW_IMAGE_PROCESSOR = _Version(_transformers_version) == _Version("5.5.4")

@@ -20,14 +20,8 @@ The reference QPC configuration is:
 
 Device selection is controlled by the normal QAIC settings. No device ID is reserved by the model integration.
 
-When testing a local QEfficient checkout, set:
-
-```bash
-export VLLM_QAIC_EFFICIENT_TRANSFORMERS=/path/to/efficient-transformers
-export QAIC_VISIBLE_DEVICES=20
-```
-
-For a precompiled QPC:
+Use the installed QEfficient package in the runtime environment. Select the
+precompiled QPC and an available QAIC device with:
 
 ```bash
 export VLLM_QAIC_QPC_PATH=/path/to/qpc
@@ -42,19 +36,3 @@ python examples/qaic_qwen3_asr.py /path/to/audio.wav \
 ```
 
 The example loads the model once, sends one audio request, and prints the transcription and elapsed time.
-
-## Persistent benchmark
-
-The benchmark creates one persistent `LLM` instance, performs one warmup request, excludes that request from measurements, and sends each benchmark file once afterward:
-
-```bash
-python examples/qaic_qwen3_asr_benchmark.py \
-  /path/to/audio_samples \
-  --device 0 \
-  --max-tokens 128 \
-  --output qwen3_asr_vllm_benchmark.json
-```
-
-Audio files are grouped by parent directory and nominal filename duration (`40s`, `50s`, or `60s`). The JSON report contains per-file latency, transcription, warmup latency, and total inference wall time.
-
-Speech requests use batch size 1. Application-level chunking should split long audio into 30-second windows and merge the resulting text; overlap is a preprocessing choice and does not change the compiled QPC shapes.

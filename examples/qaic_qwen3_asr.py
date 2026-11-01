@@ -41,11 +41,6 @@ def main() -> None:
         default=os.environ.get("VLLM_QAIC_QPC_PATH"),
         help="Compiled QPC directory; defaults to VLLM_QAIC_QPC_PATH.",
     )
-    parser.add_argument(
-        "--efficient-transformers",
-        default=os.environ.get("VLLM_QAIC_EFFICIENT_TRANSFORMERS"),
-        help="Optional local QEfficient checkout.",
-    )
     parser.add_argument("--prefill-seq-len", type=int, default=512)
     parser.add_argument("--encoder-ctx-len", type=int, default=3000)
     parser.add_argument("--max-model-len", type=int, default=512)
@@ -54,9 +49,6 @@ def main() -> None:
 
     if args.qpc_path:
         os.environ["VLLM_QAIC_QPC_PATH"] = args.qpc_path
-    if args.efficient_transformers:
-        os.environ["VLLM_QAIC_EFFICIENT_TRANSFORMERS"] = args.efficient_transformers
-
     from vllm import LLM, SamplingParams
 
     llm = LLM(
