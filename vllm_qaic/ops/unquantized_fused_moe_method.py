@@ -58,8 +58,9 @@ class QAicUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # and applies the gated activation internally (apply_moe_activation), so
         # the routing/activation branching below is handled entirely in-kernel.
         # Biases (has_bias) are threaded through via biased_moe_quant_config; the
-        # activation string is parsed to the MoEActivation enum. Flag off -> the
-        # QAIC NSP path below, bit-for-bit.
+        # activation is passed as a MoEActivation enum (layer.activation may
+        # already be one; from_str rejects enums, so only strings are parsed).
+        # Flag off -> the QAIC NSP path below, bit-for-bit.
         if triton_en:
             from vllm.model_executor.layers.fused_moe.activation import (
                 MoEActivation,
@@ -82,7 +83,11 @@ class QAicUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 w2=layer.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                activation=MoEActivation.from_str(layer.activation),
+                activation=(
+                    layer.activation
+                    if isinstance(layer.activation, MoEActivation)
+                    else MoEActivation.from_str(layer.activation)
+                ),
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 global_num_experts=layer.global_num_experts,
                 expert_map=layer.expert_map,

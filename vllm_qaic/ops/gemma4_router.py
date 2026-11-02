@@ -3,12 +3,26 @@
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 # ------------------------------------------------------------------
 
-"""Register QAIC Gemma4 routing override."""
+"""Register QAIC Gemma4 routing override.
+
+Upstream ``Gemma4MoE.routing_function`` calls the Triton kernel
+``gemma4_fused_routing_kernel_triton`` only on CUDA-alike/XPU platforms and
+otherwise calls ``gemma4_routing_function_torch``, so on QAIC it always takes
+the torch path. The closure resolves that name as a module global at call time,
+so rebinding it reroutes every Gemma4 MoE layer:
+
+  VLLM_QAIC_TRITON_GEMMA4_ROUTER=1  -> upstream's Triton routing kernel
+  otherwise, supported inputs       -> QAIC NSP ``gemma4_topk`` kernel
+  otherwise                         -> the original torch function
+"""
 
 from __future__ import annotations
 
 import torch
 
+from vllm_qaic.ops._triton_flags import triton_op_enabled
+
+triton_en = triton_op_enabled("GEMMA4_ROUTER")
 
 _PATCH_APPLIED_ATTR = "_qaic_gemma4_router_patch_applied"
 _ORIGINAL_ROUTING_ATTR = "_qaic_original_gemma4_routing_function_torch"
@@ -63,6 +77,11 @@ def register_qaic_gemma4_router() -> None:
         topk: int,
         per_expert_scale: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if triton_en:
+            return gemma4.gemma4_fused_routing_kernel_triton(
+                gating_output, topk, per_expert_scale
+            )
+
         qaic_ops = _get_qaic_ops()
         if qaic_ops is not None and _supports_qaic_gemma4_topk(
             gating_output, topk, per_expert_scale

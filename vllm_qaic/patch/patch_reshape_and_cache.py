@@ -118,6 +118,11 @@ def _qaic_triton_reshape_and_cache_flash(
     # heuristics instead of autotuning
     TILE_SIZE = min(2048, triton.next_power_of_2(n))
 
+    # QAIC int64 tensors keep only the low 32 bits, so the -1 padding slots load
+    # as 4294967295 and the kernel's `slot_idx < 0` skip never fires. int32 holds
+    # -1 exactly, and the kernel widens the loaded slot back to int64.
+    slot_mapping = slot_mapping.to(torch.int32)
+
     # TODO(ngl): maybe replace with static launch grid to avoid overhead if
     #   using cudagraphs
     grid = lambda meta: (

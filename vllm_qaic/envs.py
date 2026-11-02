@@ -47,6 +47,15 @@ if TYPE_CHECKING:
     # (apply_top_k_top_p_triton) via patch_topk_topp_sampler; when unset the
     # PyTorch sort implementation is used regardless of batch size.
     VLLM_QAIC_TRITON_TOPK_TOPP: bool = False
+    # Route Gemma 4's MoE routing function (top-k + softmax + renorm + per-expert
+    # scale) to vLLM's Triton kernel (gemma4_fused_routing_kernel_triton) via
+    # ops/gemma4_router.py; when unset the QAIC NSP gemma4_topk kernel (or the
+    # PyTorch routing function, for inputs it does not support) is used.
+    VLLM_QAIC_TRITON_GEMMA4_ROUTER: bool = False
+    # Route the fused-MoE top-k reduction (vllm._custom_ops.moe_sum) to vLLM's
+    # Triton kernel (masked_moe_sum) via patch_fused_moe_sum; when unset the
+    # PyTorch implementation of the same semantics is used.
+    VLLM_QAIC_TRITON_MOE_SUM: bool = False
 
 
 # --8<-- [start:env-vars-definition]
@@ -105,6 +114,14 @@ qaic_environment_variables.update(
         == "1",
         "VLLM_QAIC_TRITON_TOPK_TOPP": lambda: os.getenv(
             "VLLM_QAIC_TRITON_TOPK_TOPP", "1" if _triton_all_ops_en else "0"
+        )
+        == "1",
+        "VLLM_QAIC_TRITON_GEMMA4_ROUTER": lambda: os.getenv(
+            "VLLM_QAIC_TRITON_GEMMA4_ROUTER", "1" if _triton_all_ops_en else "0"
+        )
+        == "1",
+        "VLLM_QAIC_TRITON_MOE_SUM": lambda: os.getenv(
+            "VLLM_QAIC_TRITON_MOE_SUM", "1" if _triton_all_ops_en else "0"
         )
         == "1",
     }
