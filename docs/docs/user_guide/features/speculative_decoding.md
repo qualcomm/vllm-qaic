@@ -33,9 +33,9 @@ llm = LLM(
     model="meta-llama/Llama-3.1-8B-Instruct",
     max_num_seqs=8,
     max_model_len=2048,
-    long_prefill_token_threshold=128,
     quantization="mxfp6",
     kv_cache_dtype="mxint8",
+    additional_config={"override_qaic_config": {"prefill_seq_len": 128}},
     speculative_config={
         "method": "ngram",
         "num_speculative_tokens": 5,
@@ -69,13 +69,13 @@ llm = LLM(
     model="meta-llama/Llama-3.1-8B-Instruct",
     max_num_seqs=4,
     max_model_len=2048,
-    long_prefill_token_threshold=128,
     quantization="mxfp6",
     kv_cache_dtype="mxint8",
     additional_config={
         "override_qaic_config": {
             "device_group": [0, 1, 2, 3],
             "num_cores": 10,       # 10 cores for target model
+            "prefill_seq_len": 128,
         },
         "draft_override_qaic_config": {
             "device_group": [0, 1, 2, 3],   # Same device
@@ -126,14 +126,13 @@ llm = LLM(
     model="Qwen/Qwen3-4B",
     max_num_seqs=4,
     max_model_len=4096,
-    long_prefill_token_threshold=128,  # TLM prefill_seq_len (multiple of block_size)
     quantization="mxfp6",
     kv_cache_dtype="mxint8",
     additional_config={
         "override_qaic_config": {
             "device_group": device_group,
             "num_cores": 8,
-            "prefill_seq_len": 128,
+            "prefill_seq_len": 128,  # TLM prefill_seq_len (multiple of block_size)
             "mxfp6_matmul": True,
             "mxint8_kv_cache": True,
             "mos": 1,
@@ -182,7 +181,7 @@ docker run --rm -it --network host \
     for details.
 
 !!! note "TLM `prefill_seq_len` must be a multiple of `block_size`"
-    The target model's `prefill_seq_len` (`long_prefill_token_threshold`) must be
+    The target model's `prefill_seq_len` must be
     an exact multiple of the DLM's `block_size`, since prefill chunks are fanned
     out into `block_size`-sized sub-blocks for the DLM.
 

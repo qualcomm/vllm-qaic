@@ -44,10 +44,9 @@ vllm serve TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
   --port 8000 \
   --max-model-len 256 \
   --max-num-seqs 16 \
-  --long-prefill-token-threshold 128 \
   --quantization mxfp6 \
   --kv-cache-dtype mxint8 \
-  --additional-config '{"override_qaic_config": {"ccl_enabled": true}}'
+  --additional-config '{"override_qaic_config": {"ccl_enabled": true, "prefill_seq_len": 128}}'
 ```
 
 No additional flags are required — the CCL list is auto-generated.

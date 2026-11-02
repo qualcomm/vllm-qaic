@@ -59,7 +59,6 @@ def main() -> None:
         model=tlm_repo,
         max_num_seqs=decode_bsz,
         max_model_len=ctx_len,
-        long_prefill_token_threshold=seq_len,
         quantization="mxfp6",
         kv_cache_dtype="mxint8",
         disable_log_stats=False,  # native spec-decode acceptance metrics

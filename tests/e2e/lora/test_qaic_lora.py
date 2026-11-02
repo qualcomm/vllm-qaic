@@ -77,7 +77,6 @@ def test_llm_lora_offline_init_caching(device_group):
         model=BASE_MODEL_NAME,
         max_num_seqs=2,
         max_model_len=64,
-        long_prefill_token_threshold=32,
         quantization="mxfp6",
         kv_cache_dtype="mxint8",
         gpu_memory_utilization=1.0,
@@ -88,6 +87,7 @@ def test_llm_lora_offline_init_caching(device_group):
         additional_config={
             "device_group": device_group,
             "lora_modules": lora_modules,
+            "override_qaic_config": {"prefill_seq_len": 32},
         },
     )
 

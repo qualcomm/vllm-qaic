@@ -43,9 +43,9 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
   --port 8000 \
   --max-num-seqs 8 \
   --max-model-len 2048 \
-  --long-prefill-token-threshold 128 \
   --quantization mxfp6 \
-  --kv-cache-dtype mxint8
+  --kv-cache-dtype mxint8 \
+  --additional-config '{"override_qaic_config":{"prefill_seq_len":128}}'
 ```
 
 ## API Endpoints
@@ -114,11 +114,10 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
   --port 8000 \
   --max-num-seqs 4 \
   --max-model-len 2048 \
-  --long-prefill-token-threshold 128 \
   --quantization mxfp6 \
   --kv-cache-dtype mxint8 \
   --speculative-config '{"method":"ngram","num_speculative_tokens":5}' \
-  --additional-config '{"override_qaic_config":{"device_group":[0],"num_cores":16}}'
+  --additional-config '{"override_qaic_config":{"device_group":[0],"num_cores":16,"prefill_seq_len":128}}'
 ```
 
 ## Monitoring

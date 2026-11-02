@@ -35,13 +35,13 @@ llm = LLM(
     model="mistralai/Mistral-7B-v0.1",
     max_num_seqs=4,
     max_model_len=1024,
-    long_prefill_token_threshold=128,
     quantization="mxfp6",
     kv_cache_dtype="mxint8",
     enable_lora=True,
     max_loras=9,
     additional_config={
         "device_group": [0],
+        "override_qaic_config": {"prefill_seq_len": 128},
         "lora_modules": [
             LoRAModulePath(
                 name=repo_id.split("/")[1],

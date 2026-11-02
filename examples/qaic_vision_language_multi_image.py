@@ -62,10 +62,10 @@ def run_internvl(questions: list[str], num_images: int) -> ModelRequestData:
         model=model_name,
         trust_remote_code=True,
         max_model_len=ctx_len,
-        long_prefill_token_threshold=seq_len,
         enable_prefix_caching=False,
         mm_processor_kwargs={"max_dynamic_patch": 4},
         limit_mm_per_prompt={"image": num_images},
+        additional_config={"override_qaic_config": {"prefill_seq_len": seq_len}},
     )
 
     placeholders = "\n".join(f"Image-{i}: <image>\n" for i in range(1, num_images + 1))
@@ -108,7 +108,6 @@ def run_qwen2_5_vl(questions: list[str], num_images: int) -> ModelRequestData:
     engine_args = EngineArgs(
         model=model_name,
         max_model_len=ctx_len,
-        long_prefill_token_threshold=seq_len,
         enable_prefix_caching=False,
         mm_processor_kwargs={
             "min_pixels": 28 * 28,
@@ -118,6 +117,7 @@ def run_qwen2_5_vl(questions: list[str], num_images: int) -> ModelRequestData:
         limit_mm_per_prompt={"image": num_images},
         additional_config={
             "override_qaic_config": {
+                "prefill_seq_len": seq_len,
                 "height": height,
                 "width": width,
                 "use_onnx_subfunctions": False,
@@ -163,7 +163,6 @@ def run_qwen3_vl(questions: list[str], num_images: int) -> ModelRequestData:
     engine_args = EngineArgs(
         model=model_name,
         max_model_len=ctx_len,
-        long_prefill_token_threshold=seq_len,
         enable_prefix_caching=False,
         mm_processor_kwargs={
             "min_pixels": 28 * 28,
@@ -173,6 +172,7 @@ def run_qwen3_vl(questions: list[str], num_images: int) -> ModelRequestData:
         limit_mm_per_prompt={"image": num_images},
         additional_config={
             "override_qaic_config": {
+                "prefill_seq_len": seq_len,
                 "height": height,
                 "width": width,
                 "use_onnx_subfunctions": False,
@@ -218,7 +218,6 @@ def run_qwen3_vl_moe(questions: list[str], num_images: int) -> ModelRequestData:
     engine_args = EngineArgs(
         model=model_name,
         max_model_len=ctx_len,
-        long_prefill_token_threshold=seq_len,
         enable_prefix_caching=False,
         mm_processor_kwargs={
             "min_pixels": 28 * 28,
@@ -228,6 +227,7 @@ def run_qwen3_vl_moe(questions: list[str], num_images: int) -> ModelRequestData:
         limit_mm_per_prompt={"image": num_images},
         additional_config={
             "override_qaic_config": {
+                "prefill_seq_len": seq_len,
                 "height": height,
                 "width": width,
                 "use_onnx_subfunctions": False,
@@ -271,7 +271,6 @@ def run_qwen3_5_vl_moe(questions: list[str], num_images: int) -> ModelRequestDat
     engine_args = EngineArgs(
         model=model_name,
         max_model_len=ctx_len,
-        long_prefill_token_threshold=seq_len,
         enable_prefix_caching=False,
         mm_processor_kwargs={
             "min_pixels": 28 * 28,
@@ -281,6 +280,7 @@ def run_qwen3_5_vl_moe(questions: list[str], num_images: int) -> ModelRequestDat
         limit_mm_per_prompt={"image": num_images},
         additional_config={
             "override_qaic_config": {
+                "prefill_seq_len": seq_len,
                 "height": height,
                 "width": width,
                 "use_onnx_subfunctions": True,
@@ -319,7 +319,6 @@ def run_qwen3_6_vl_moe(questions: list[str], num_images: int) -> ModelRequestDat
     engine_args = EngineArgs(
         model=model_name,
         max_model_len=ctx_len,
-        long_prefill_token_threshold=seq_len,
         enable_prefix_caching=False,
         mm_processor_kwargs={
             "min_pixels": 28 * 28,
@@ -329,6 +328,7 @@ def run_qwen3_6_vl_moe(questions: list[str], num_images: int) -> ModelRequestDat
         limit_mm_per_prompt={"image": num_images},
         additional_config={
             "override_qaic_config": {
+                "prefill_seq_len": seq_len,
                 "height": height,
                 "width": width,
                 "use_onnx_subfunctions": True,
@@ -364,11 +364,11 @@ def run_gemma4(questions: list[str], num_images: int) -> ModelRequestData:
     engine_args = EngineArgs(
         model=model_name,
         max_model_len=ctx_len,
-        long_prefill_token_threshold=seq_len,
         enable_prefix_caching=False,
         limit_mm_per_prompt={"image": num_images},
         additional_config={
             "override_qaic_config": {
+                "prefill_seq_len": seq_len,
                 "use_onnx_subfunctions": False,
                 "split_model_io": True,
             }
