@@ -156,6 +156,94 @@
 #       Imported only when VLLM_QAIC_ENABLE_TRITON_ATTN is set, since that
 #       backend is the only caller of this wrapper on QAIC.
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# ** 10. File: patch_gemma4_dtype.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. vllm.model_executor.models.gemma4_mm.Gemma4ForConditionalGeneration.__init__
+#    Why:
+#       The vision/audio towers are built with AutoModel.from_config(sub_config),
+#       which uses the sub-config's own dtype (bf16) and ignores --dtype.
+#    How:
+#       Set dtype/torch_dtype on the config and its sub-configs to
+#       model_config.dtype before calling the original __init__.
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# ** 11. File: patch_mem_utils.py (addition) **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. torch.accelerator.get_memory_info
+#    Why:
+#       Model code (gemma4_mm video encoder) calls it directly and it asserts a
+#       PyTorch DeviceAllocator, which QAIC does not use.
+#    How:
+#       Rebind it to current_platform.mem_get_info.
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# ** 12. File: patch_gemma4_router.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. vllm.model_executor.models.gemma4.gemma4_routing_function_torch
+#    Why:
+#       Gemma4MoE builds a routing_function closure (top-k, softmax,
+#       renormalisation, per-expert scale) and hands it to the fused-MoE layer
+#       as custom_routing_function. The closure calls the Triton kernel
+#       gemma4_fused_routing_kernel_triton only when current_platform is
+#       CUDA-alike or XPU, and otherwise calls gemma4_routing_function_torch.
+#       QAIC is neither, so Triton is unreachable (not a CustomOp, so
+#       forward_oot can't dispatch it either).
+#    How:
+#       The closure resolves gemma4_routing_function_torch as a module global at
+#       call time, so rebind that name to a wrapper gated solely on
+#       VLLM_QAIC_TRITON_GEMMA4_ROUTER (read per call via triton_op_enabled):
+#       set to 1 -> upstream's gemma4_fused_routing_kernel_triton, otherwise ->
+#       the original torch function, saved before the rebind.
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# ** 13. File: patch_fused_moe_activation.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. vllm.model_executor.layers.fused_moe.fused_moe.apply_moe_activation
+#    Why:
+#       fused_experts_impl (reached when VLLM_QAIC_TRITON_FUSED_MOE is set)
+#       applies the activation between the two expert GEMMs through
+#       apply_moe_activation, which for GELU_TANH (Gemma 4) calls the compiled
+#       op torch.ops._C.gelu_tanh_and_mul directly. It is not a CustomOp, so
+#       forward_oot can't dispatch it, and the op is not built for QAIC.
+#    How:
+#       fused_moe resolves apply_moe_activation as a module global at call
+#       time, so rebind that name to a wrapper that runs GELU_TANH with
+#       upstream's PyTorch math (that of GeluAndMul.forward_native,
+#       approximate="tanh", computed inline since a CustomOp cannot be built
+#       at forward time) and passes every other activation to the original
+#       function.
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# ** 14. File: patch_fused_moe_sum.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. vllm._custom_ops.moe_sum
+#    Why:
+#       fused_experts_impl (reached when VLLM_QAIC_TRITON_FUSED_MOE is set)
+#       reduces the per-expert outputs over the top-k dim with ops.moe_sum,
+#       which calls the compiled op torch.ops._moe_C.moe_sum directly. It is
+#       not a CustomOp, so forward_oot can't dispatch it, and the op is not
+#       built for QAIC.
+#    How:
+#       fused_moe resolves ops.moe_sum on the _custom_ops module at call time,
+#       so rebind that attribute to a wrapper reproducing the CUDA op's
+#       semantics (fp32 accumulation, output overwritten, topk_ids/expert_map
+#       slot skipping). PyTorch by default; VLLM_QAIC_TRITON_MOE_SUM routes it
+#       to upstream's Triton masked_moe_sum kernel.
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# ** 15. File: patch_fused_moe_align.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. vllm._custom_ops.moe_align_block_size
+#    Why:
+#       fused_experts_impl (reached when VLLM_QAIC_TRITON_FUSED_MOE is set)
+#       groups the top-k assignments by expert, padded to the GEMM block size,
+#       through moe_align_block_size, whose wrapper calls the compiled op
+#       torch.ops._moe_C.moe_align_block_size directly. It is not a CustomOp,
+#       so forward_oot can't dispatch it, and the op is not built for QAIC.
+#       vLLM has no Triton version of it.
+#    How:
+#       The wrapper resolves ops.moe_align_block_size on the _custom_ops module
+#       at call time, so rebind that attribute to a PyTorch version reproducing
+#       the CUDA op's semantics (invalid/unmapped ids dropped, per-expert
+#       padding to block_size, sorted_token_ids padded with numel, expert_ids -1
+#       past the padded total, num_tokens_post_pad set). The wrapper's buffer
+#       allocation and expert_map remapping stay upstream's.
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # =================
 
 # NOTE: patch_topk_topp_sampler must stay first; it rebinds a module-level
@@ -168,6 +256,11 @@ import vllm_qaic.patch.patch_utils  # noqa
 import vllm_qaic.patch.patch_rejection_sampler  # noqa
 import vllm_qaic.patch.patch_graph_pickler  # noqa
 import vllm_qaic.patch.patch_mem_utils  # noqa
+import vllm_qaic.patch.patch_gemma4_dtype  # noqa
+import vllm_qaic.patch.patch_gemma4_router  # noqa
+import vllm_qaic.patch.patch_fused_moe_activation  # noqa
+import vllm_qaic.patch.patch_fused_moe_sum  # noqa
+import vllm_qaic.patch.patch_fused_moe_align  # noqa
 
 import vllm_qaic.envs as qaic_envs
 

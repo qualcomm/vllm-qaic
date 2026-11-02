@@ -26,7 +26,7 @@ so the flag remains authoritative. The QAIC platform must implement
 NotImplementedError at launch.
 """
 
-from vllm.model_executor.layers.batch_invariant import linear_batch_invariant
+from vllm.model_executor.determinism.batch_invariant import linear_batch_invariant
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod,

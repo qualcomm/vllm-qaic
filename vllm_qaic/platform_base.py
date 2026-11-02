@@ -15,7 +15,6 @@ import torch
 
 from vllm_qaic.logger import init_logger
 from vllm.platforms import Platform, PlatformEnum
-from vllm.triton_utils import HAS_TRITON
 from vllm.utils.import_utils import PlaceholderModule
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -37,6 +36,15 @@ else:
 
 logger = init_logger(__name__)
 
+
+def _has_triton() -> bool:
+    # vLLM's Triton detection imports current_platform. Keep this import lazy
+    # because QAICPlatform is loaded while current_platform is being resolved.
+    from vllm.triton_utils import HAS_TRITON
+
+    return HAS_TRITON
+
+
 DYNAMIC_RESOLUTION_MODELS = [
     "qwen2_5_vl",
     "qwen3_vl",
@@ -51,17 +59,6 @@ class QaicPlatform(Platform):
     primary_attn_backend_cls = (
         "vllm_qaic.attention.backends.qaic_attn.QAicTorchAttentionBackend"
     )
-    if os.environ.get("VLLM_QAIC_ENABLE_TRITON_ATTN") == "1":
-        if HAS_TRITON:
-            primary_attn_backend_cls = (
-                "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"
-            )
-        else:
-            logger.warning(
-                "VLLM_QAIC_ENABLE_TRITON_ATTN=1 but Triton is not installed; "
-                "keeping the QAIC attention backend %s",
-                primary_attn_backend_cls,
-            )
     device_name: str = "qaic"
     # Set device type to cpu if it's AOT.
     # This is a workaround for online serving's AsyncEngineArgs.
@@ -525,12 +522,21 @@ class QaicPlatform(Platform):
         if attn_selector_config.use_sparse:
             raise NotImplementedError("QAic doesn't support sparse attention")
 
+        if os.environ.get("VLLM_QAIC_ENABLE_TRITON_ATTN") == "1":
+            if _has_triton():
+                return "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"
+            logger.warning_once(
+                "VLLM_QAIC_ENABLE_TRITON_ATTN=1 but Triton is not installed; "
+                "keeping the QAIC attention backend %s",
+                cls.primary_attn_backend_cls,
+            )
+
         return cls.primary_attn_backend_cls
 
     @classmethod
     def get_supported_vit_attn_backends(cls) -> list[AttentionBackendEnum]:
         backends = [AttentionBackendEnum.TORCH_SDPA]
-        if HAS_TRITON:
+        if _has_triton():
             backends.append(AttentionBackendEnum.TRITON_ATTN)
         return backends
 

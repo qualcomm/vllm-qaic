@@ -43,15 +43,17 @@ class QAicRMSNorm(RMSNorm):
             )
             return normed, new_residual
 
-        # No residual: plain normalization only.
+        # No residual: plain normalization only. Like upstream, a norm built
+        # with has_weight=False gets weight=None (no per-channel multiply).
+        weight = self.weight.data if self.pass_weight else None
         if triton_op_enabled("RMS_NORM"):
-            from vllm.model_executor.layers.batch_invariant import (
+            from vllm.model_executor.determinism.batch_invariant import (
                 rms_norm_batch_invariant,
             )
 
-            return rms_norm_batch_invariant(x, self.weight, self.variance_epsilon)
+            return rms_norm_batch_invariant(x, weight, self.variance_epsilon)
 
-        return F.rms_norm(x, [self.hidden_size], self.weight, self.variance_epsilon)
+        return F.rms_norm(x, [self.hidden_size], weight, self.variance_epsilon)
 
 
 class QAicGemmaRMSNorm(GemmaRMSNorm):

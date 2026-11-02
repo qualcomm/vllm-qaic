@@ -143,3 +143,12 @@ def _qaic_memory_profiling(
 MemorySnapshot.__post_init__ = _qaic_post_init
 MemorySnapshot.measure = _qaic_measure
 vllm.utils.mem_utils.memory_profiling = _qaic_memory_profiling
+
+
+def _qaic_accelerator_get_memory_info(device=None) -> tuple[int, int]:
+    # Model code (e.g. gemma4_mm video encoder) calls torch.accelerator
+    # .get_memory_info() directly, which asserts a PyTorch DeviceAllocator.
+    return current_platform.mem_get_info(device)
+
+
+torch.accelerator.get_memory_info = _qaic_accelerator_get_memory_info
