@@ -527,9 +527,9 @@ class QAICInferenceSession:
         buff_map: list[tuple[str, int]],
         index=0,
     ):
-        # `buffers` is always a list of numpy arrays zipped against `buff_map`
-        # (a list of (name, binding_index) tuples). Each entry registers one
-        # binding's buffer with the exec object.
+        # `buffers` is an ordered collection with one top-level entry per
+        # binding in `buff_map`. It may be a list of arrays or a stacked array.
+        # Each entry registers one binding's buffer with the exec object.
         assert len(buffers) == len(buff_map) or len(buffers) + 1 == len(buff_map), (
             f"buffer count mismatch: got {len(buffers)} buffers "
             f"but buff_map has {len(buff_map)} entries"
