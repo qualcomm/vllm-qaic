@@ -171,6 +171,10 @@ class QaicPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        spec_config = vllm_config.speculative_config
+        is_dflash = spec_config is not None and spec_config.method == "dflash"
+        if vllm_config.kv_transfer_config and is_dflash:
+            raise ValueError("DFlash requires running without kv_transfer_config.")
         additional_config = vllm_config.additional_config
         device_config = vllm_config.device_config
         if additional_config:
@@ -254,12 +258,9 @@ class QaicPlatform(Platform):
         assert not (vllm_config.lora_config and model_config.is_multimodal_model), (
             "LORA with Multi-modality is not yet supported for QAIC backend"
         )
-        if vllm_config.speculative_config and model_config.is_multimodal_model:
-            if (
-                vllm_config.speculative_config.method != "dflash"
-                or model_config.hf_config.model_type
-                not in {"qwen3_5", "qwen3_5_moe", "qwen3_vl", "gemma4"}
-            ):
+        if spec_config and model_config.is_multimodal_model:
+            vlm_families = {"qwen3_5", "qwen3_5_moe", "qwen3_vl", "gemma4"}
+            if not is_dflash or model_config.hf_config.model_type not in vlm_families:
                 raise ValueError(
                     "QAIC multimodal speculative decoding currently supports "
                     "DFlash with Qwen3.5, Qwen3.5-MoE, Qwen3-VL, and Gemma4 only."
@@ -361,12 +362,9 @@ class QaicPlatform(Platform):
                     if isinstance(__prefill_seq_len, (list, tuple))
                     else __prefill_seq_len
                 )
-                if (
-                    vllm_config.speculative_config
-                    and vllm_config.speculative_config.method == "dflash"
-                ):
+                if is_dflash:
                     max_num_batched_tokens += (
-                        vllm_config.speculative_config.max_num_new_slots_for_drafting
+                        spec_config.max_num_new_slots_for_drafting
                         * scheduler_config.max_num_seqs
                     )
                 # Include drafting slots in the cap, not in the previous budget.
@@ -441,89 +439,12 @@ class QaicPlatform(Platform):
             )
             assert (
                 not vllm_config.speculative_config
-                or vllm_config.speculative_config.method
-                in ["ngram", "draft_model", "dflash"]
+                or vllm_config.speculative_config.method in ["ngram", "draft_model"]
             ), (
                 "PLD and DLM based SPD Types are supported with Disaggregated "
                 "serving, other SPD types such as Turbo is not yet supported "
                 "with Disaggregated serving for QAIC backend"
             )
-            if (
-                vllm_config.speculative_config
-                and vllm_config.speculative_config.use_dflash()
-            ):
-                if (
-                    model_config.hf_config.model_type
-                    not in {
-                        "gpt_oss",
-                        "qwen3",
-                        "llama",
-                        "qwen3_vl",
-                        "qwen3_5",
-                        "qwen3_5_moe",
-                        "gemma4",
-                    }
-                    or scheduler_config.async_scheduling
-                    or vllm_config.kv_transfer_config.kv_connector != "QaicConnector"
-                    or vllm_config.kv_transfer_config.kv_role
-                    not in {"kv_producer", "kv_consumer"}
-                ):
-                    raise ValueError(
-                        "DFlash disaggregation requires GPT-OSS, Qwen3, Llama, "
-                        "Qwen3.5 dense/MoE, Qwen3-VL, or Gemma4, "
-                        "synchronous scheduling, and QaicConnector."
-                    )
-                if vllm_config.cache_config.enable_prefix_caching:
-                    raise ValueError(
-                        "DFlash disaggregation requires prefix caching "
-                        "to be disabled on both workers."
-                    )
-                override_qaic_config.setdefault("stages", 1)
-                stages = int(override_qaic_config["stages"])
-                if stages < 1:
-                    raise ValueError("DFlash prefill pipeline stages must be positive.")
-                if (
-                    vllm_config.kv_transfer_config.kv_role == "kv_producer"
-                    and stages > 1
-                ):
-                    # Schedule enough QPC-sized chunks to overlap pipeline stages.
-                    prefill_window = min(
-                        model_config.max_model_len,
-                        override_qaic_config["prefill_seq_len"] * (stages + 1),
-                    )
-                    scheduler_config.long_prefill_token_threshold = prefill_window
-                    scheduler_config.max_num_batched_tokens = (
-                        prefill_window
-                        + vllm_config.speculative_config.max_num_new_slots_for_drafting
-                        * scheduler_config.max_num_seqs
-                    )
-                    scheduler_config.max_num_scheduled_tokens = None
-                if vllm_config.kv_transfer_config.kv_role == "kv_consumer":
-                    block_size = (
-                        vllm_config.speculative_config.num_speculative_tokens + 1
-                    )
-                    scheduler_config.max_num_batched_tokens = max(
-                        scheduler_config.max_num_batched_tokens,
-                        scheduler_config.max_num_seqs
-                        * (
-                            block_size
-                            + (
-                                vllm_config.speculative_config.max_num_new_slots_for_drafting
-                            )
-                        ),
-                    )
-                    scheduler_config.max_num_scheduled_tokens = None
-                if any(
-                    override_qaic_config.get(key)
-                    for key in (
-                        "ccl_enabled",
-                        "comp_ctx_lengths_prefill",
-                        "comp_ctx_lengths_decode",
-                    )
-                ):
-                    raise ValueError(
-                        "DFlash disaggregation does not support CCL specializations."
-                    )
             assert not (
                 vllm_config.kv_transfer_config.kv_role != "kv_producer"
                 and vllm_config.cache_config.enable_prefix_caching

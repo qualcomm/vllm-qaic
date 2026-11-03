@@ -37,8 +37,10 @@ class _RecordingSession(_FakeSession):
     def __init__(self, logits_buf: np.ndarray, vocab_size: int):
         super().__init__(logits_buf, vocab_size)
         self.target_hidden_calls: list[np.ndarray] = []
+        self.input_calls: list[dict[str, np.ndarray]] = []
 
     def np_run(self, dlm_inputs, is_prefill=True):
+        self.input_calls.append({k: v.copy() for k, v in dlm_inputs.items()})
         self.target_hidden_calls.append(dlm_inputs["target_hidden"][0].copy())
         return super().np_run(dlm_inputs, is_prefill=is_prefill)
 
@@ -85,7 +87,6 @@ def _make_proposer(decode_bsz: int, block_size: int, hidden_size: int = 8):
 
     proposer.model = _FakeModel()
     proposer._req_state = {}
-    proposer._streaming_req_ids = set()
     proposer._prefill_pending = []
     return proposer, fake_session
 
@@ -391,3 +392,65 @@ def test_prefill_step_partial_multichunk_advances_without_candidates(
     assert st.position_counter == n_tokens - 1
     assert st.candidates_from_prefill is False
     assert st.dlm_candidates is None
+
+
+@pytest.mark.parametrize("n_tokens", [1, 8, 13, 16])
+@pytest.mark.parametrize("partial", [False, True])
+def test_wide_target_prefill_preserves_features_with_fewer_calls(n_tokens, partial):
+    for target_width in (4, 8):
+        proposer = _prep_prefill_proposer(4, 4)
+        proposer.target_seq_len = target_width
+        proposer.num_sub_blocks = 8 // target_width
+        proposer._dlm_position_ids_target = np.full(
+            (4, target_width), -1, dtype=np.int64
+        )
+        proposer._dlm_target_hidden = np.zeros((4, target_width, 8), dtype=np.float32)
+        recorder = _RecordingSession(proposer._dlm_logits_buf, proposer.vocab_size)
+        proposer.model.session = recorder
+        features = np.arange(16 * 8, dtype=np.float32).reshape(1, 16, 8)
+        proposer.prefill_step(
+            target_hidden=[features[:, :8], features[:, 8:]],
+            prefill_positions=np.arange(n_tokens),
+            prefill_cum_sum=np.array([n_tokens]),
+            batch_indices=np.array([3]),
+            prefill_is_partial=np.array([partial]),
+            last_chunk_logits=None,
+            req_id="request",
+        )
+        assert recorder.run_count == -(-n_tokens // target_width)
+        state = proposer._req_state["request"]
+        assert state.position_counter == n_tokens - 1
+        assert state.candidates_from_prefill is (not partial)
+        positions, hidden = [], []
+        for inputs in recorder.input_calls:
+            valid = inputs["position_ids_target"][0] >= 0
+            positions.extend(inputs["position_ids_target"][0, valid])
+            hidden.extend(inputs["target_hidden"][0, valid])
+            assert inputs["position_ids"].shape == (4, 4)
+            assert inputs["batch_index"][0, 0] == 3
+            assert np.all(inputs["batch_index"][1:] == -1)
+            assert np.all(inputs["position_ids_target"][1:] == -1)
+            assert np.all(inputs["position_ids"][1:] == -1)
+        np.testing.assert_array_equal(positions, np.arange(n_tokens))
+        np.testing.assert_array_equal(hidden, features[0, :n_tokens])
+
+
+def test_wide_decode_clears_padding_and_finished_request_state():
+    proposer, _ = _make_proposer(4, 4)
+    proposer.target_seq_len = 8
+    proposer._dlm_position_ids_target = np.zeros((4, 8), dtype=np.int64)
+    proposer._dlm_target_hidden = np.full((4, 8, 8), -123, dtype=np.float32)
+    recorder = _RecordingSession(proposer._dlm_logits_buf, proposer.vocab_size)
+    proposer.model.session = recorder
+    proposer._state_for("finished")
+    proposer._state_for("active").position_counter = 20
+    batch = _FakeInputBatch(["active"], [10], [15])
+    features = np.ones((1, 4, 8), dtype=np.float32)
+    proposer.propose(batch, [[10, 11]], np.array([2]), features)
+    inputs = recorder.input_calls[0]
+    assert "finished" not in proposer._req_state
+    assert np.all(inputs["position_ids_target"][0, 2:] == -1)
+    assert np.all(inputs["target_hidden"][0, 4:] == 0)
+    assert np.all(inputs["target_hidden"][1:] == 0)
+    assert np.all(inputs["position_ids_target"][1:] == -1)
+    assert np.all(inputs["batch_index"][1:] == -1)

@@ -98,10 +98,7 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
 
     def _load_multimodal(self) -> None:
         if self.is_dflash_vlm and isinstance(self.prefill_seq_len, list | tuple):
-            raise ValueError(
-                "DFlash VLM requires a single integer prefill_seq_len; "
-                "list/tuple prefill lengths are not supported."
-            )
+            raise ValueError("DFlash VLM requires a single integer prefill_seq_len.")
         mm_input_names = [
             "pixel_values",
             "input_features",
@@ -139,52 +136,26 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
             self.decode_batch_inputs.update(self.default_mm_kwargs)
 
         if self.is_dflash_vlm:
-            input_shapes = self.session.get_bindings_shapes(["input_ids"]).get(
-                "input_ids", []
-            )
-            if not input_shapes and (
-                binding := self.get_io_shape_and_dtype("input_ids")
-            ):
-                input_shapes = [binding[0]]
-            input_batch_size = (
-                self.prefill_bsz if self.disagg_producer_en else self.decode_bsz
-            )
+            block_size = self.num_spec_tokens + 1
+            input_shapes = self._get_dflash_binding_shapes("input_ids")
             sequence_lengths = {
                 shape[1]
                 for shape in input_shapes
-                if len(shape) == 2 and shape[0] == input_batch_size
+                if len(shape) == 2 and shape[0] == self.decode_bsz
             }
-            decode_width = (self.num_spec_tokens + 1) * (2 if self.dflash_hybrid else 1)
+            decode_width = block_size * (2 if self.dflash_hybrid else 1)
             required_lengths = {self.prefill_seq_len, decode_width}
-            if self.disagg_serving_en:
-                required_lengths = {
-                    self.prefill_seq_len if self.disagg_producer_en else decode_width
-                }
             if not required_lengths.issubset(sequence_lengths):
                 raise ValueError(
-                    "DFlash VLM target QPC input lengths do not match this run: "
-                    f"prefill_seq_len={self.prefill_seq_len}, "
-                    f"block_size={self.num_spec_tokens + 1}, "
-                    f"batch_size={input_batch_size}, "
-                    f"compiled input shapes={input_shapes}. "
-                    "Select a matching target QPC or recompile it. "
-                    "Qwen3.5 dense/MoE requires 2 * block_size decode inputs."
+                    f"DFlash VLM QPC needs input lengths {sorted(required_lengths)} "
+                    f"at batch_size={self.decode_bsz} required; found {input_shapes}."
                 )
-            logits_shapes = self.session.get_bindings_shapes(["logits"]).get(
-                "logits", []
-            )
-            if not logits_shapes and (
-                binding := self.get_io_shape_and_dtype("logits", is_input=False)
-            ):
-                logits_shapes = [binding[0]]
+            logits_shapes = self._get_dflash_binding_shapes("logits", is_input=False)
             if not logits_shapes or any(
                 len(shape) != 3 or shape[-1] != self.vocab_size
                 for shape in logits_shapes
             ):
-                raise ValueError(
-                    "vLLM DFlash requires a target QPC returning vocabulary logits, "
-                    "not greedy token IDs."
-                )
+                raise ValueError("DFlash target QPC must return vocabulary logits.")
             for decode_k, inputs in self.decode_batch_inputs_by_k.items():
                 if "mm_token_type_ids" in self.session.input_names:
                     inputs["mm_token_type_ids"] = np.zeros(
@@ -195,7 +166,7 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
                 capacity = min(
                     self.ctx_len,
                     text_config.sliding_window
-                    + max(self.prefill_seq_len, self.num_spec_tokens + 1)
+                    + max(self.prefill_seq_len, block_size)
                     - 1,
                 )
                 for index, kind in enumerate(text_config.layer_types):
@@ -210,38 +181,27 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
                         ),
                         name,
                     )
-                    shapes = self.session.get_bindings_shapes([name]).get(name, [])
-                    if not shapes and (binding := self.get_io_shape_and_dtype(name)):
-                        shapes = [binding[0]]
+                    shapes = self._get_dflash_binding_shapes(name)
                     if not shapes or any(
                         len(shape) != 4 or shape[2] < capacity for shape in shapes
                     ):
                         raise ValueError(
-                            "Recompile the Gemma4 DFlash target QPC with sliding-cache "
-                            "block headroom; the existing QPC may overwrite "
-                            "needed history."
+                            f"Recompile Gemma4 DFlash QPC: {name} requires cache "
+                            f"capacity >= {capacity}; found {shapes}."
                         )
 
         if self.dflash_hybrid:
-            if not self.disagg_producer_en:
-                from QEfficient.generation.dflash_generation import (
-                    get_qwen35_target_seq_len,
-                )
+            from QEfficient.generation.dflash_generation import (
+                get_qwen35_target_seq_len,
+            )
 
-                get_qwen35_target_seq_len(self.session, self.num_spec_tokens + 1)
+            get_qwen35_target_seq_len(self.session, block_size)
             if "cache_commit" not in self.session.input_names:
                 raise ValueError("Qwen3.5 DFlash target QPC must expose cache_commit.")
             if self.default_mm_kwargs is None:
-                raise ValueError(
-                    "Qwen3.5 DFlash target QPC must expose image_idx "
-                    "to initialize multimodal inputs."
-                )
+                raise ValueError("Qwen3.5 DFlash target QPC must expose image_idx.")
             if self._dflash_prefill_hidden_scratch is None:
-                raise ValueError(
-                    "Qwen3.5 DFlash requires a prefill hidden-state buffer. "
-                    "Use a target QPC exposing DFlash hidden states and a single "
-                    "integer prefill_seq_len."
-                )
+                raise ValueError("Qwen3.5 DFlash needs a prefill hidden-state buffer.")
             self.default_mm_kwargs["cache_commit"] = np.ones((1,), dtype=np.int64)
             for inputs in self.decode_batch_inputs_by_k.values():
                 inputs["cache_commit"] = np.zeros((1,), dtype=np.int64)
@@ -254,10 +214,10 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
                 if "mm_token_type_ids" in inputs:
                     inputs["mm_token_type_ids"] = np.zeros_like(inputs["input_ids"])
             self._dflash_prefix_ids = np.zeros(
-                (self.full_batch_size, self.num_spec_tokens + 1), dtype=np.int64
+                (self.full_batch_size, block_size), dtype=np.int64
             )
             self._dflash_prefix_positions = np.full(
-                (4, self.full_batch_size, self.num_spec_tokens + 1), -1, dtype=np.int64
+                (4, self.full_batch_size, block_size), -1, dtype=np.int64
             )
             self._dflash_decode_hidden = np.empty(
                 (self.decode_bsz, decode_width, self.dflash_hidden_size),
@@ -320,7 +280,7 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
             self._dflash_decode_hidden,
         )
         # The QEfficient logit window ends at the last valid input. A partial
-        # verification suffix (including disagg's final prompt token) is right-aligned.
+        # verification suffix is right-aligned.
         valid_counts = (
             positions[0].reshape(rows, 2 * block_size)[:, block_size:] >= 0
         ).sum(axis=1)
