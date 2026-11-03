@@ -148,7 +148,7 @@ class ShmBuffer:
         name: str | None = None,
         create: bool = True,
         use_full_kv_transfer: bool = False,
-        ec_preserve_shape: bool = False,
+        preserve_shape: bool = False,
     ):
         """
         A shared memory buffer implementation, wrapper over shared_memory.SharedMemory
@@ -161,14 +161,14 @@ class ShmBuffer:
         self.name = name
         self.list_of_np_buff = []
         self.cleanup_done = False
-        self.ec_preserve_shape = ec_preserve_shape
+        self.preserve_shape = preserve_shape
         if not isinstance(kv_cache_info, list):
             raise ValueError("shape must be a list")
 
         self.buff_sizes = []
         for kv_shape, kv_type, _ in kv_cache_info:
             _kv_shape = self._get_kv_shape(
-                use_full_kv_transfer, kv_shape, num_tokens, self.ec_preserve_shape
+                use_full_kv_transfer, kv_shape, num_tokens, self.preserve_shape
             )
             _bytes_of_buffer = 1
             for dim in _kv_shape:
@@ -224,7 +224,7 @@ class ShmBuffer:
         for i, (kv_shape, kv_type, _) in enumerate(self.kv_cache_info):
             with self.get_data(i) as buff:
                 _kv_shape = self._get_kv_shape(
-                    use_full_kv_transfer, kv_shape, num_tokens, self.ec_preserve_shape
+                    use_full_kv_transfer, kv_shape, num_tokens, self.preserve_shape
                 )
                 self.list_of_np_buff.append(
                     np.ndarray(_kv_shape, dtype=kv_type, buffer=buff)
@@ -235,9 +235,9 @@ class ShmBuffer:
         use_full_kv_transfer: bool,
         kv_shape: tuple,
         num_tokens: int,
-        ec_preserve_shape: bool = False,
+        preserve_shape: bool = False,
     ) -> tuple:
-        if ec_preserve_shape:
+        if preserve_shape:
             # EC embeddings are fixed-size per image; dim0 is NOT a batch dim
             # (e.g. (num_vision_tokens, hidden)). Preserve the shape verbatim.
             return tuple(kv_shape)
@@ -281,7 +281,7 @@ class QaicKVCacheBank:
             os.getenv(VLLM_QAIC_USE_FULL_KV_TRANSFER_ENV, "0") == "1"
         )
         # EC connector sets this True so ShmBuffer preserves embedding shape.
-        self.ec_preserve_shape = False
+        self.preserve_shape = False
 
     def get_Storage(
         self, kv_cache_info: list, num_tokens: int, name: str | None = None
@@ -299,7 +299,7 @@ class QaicKVCacheBank:
             name=name,
             create=create,
             use_full_kv_transfer=self.use_full_kv_transfer,
-            ec_preserve_shape=self.ec_preserve_shape,
+            preserve_shape=self.preserve_shape,
         )
         self.MemBank[shm.name] = shm
         return shm.name, shm.list_of_np_buff

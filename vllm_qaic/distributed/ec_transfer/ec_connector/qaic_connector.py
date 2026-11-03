@@ -81,7 +81,7 @@ class QaicECConnector(ECConnectorBase):
         self.mem_bank = QaicECBank()
         self.mem_bank.use_full_kv_transfer = True
         # Preserve embedding shape verbatim (dim0 is tokens, not batch)
-        self.mem_bank.ec_preserve_shape = True
+        self.mem_bank.preserve_shape = True
         # Consumer-side map: mm_hash -> shm_name(s), for post-forward release
         self._loaded: dict[str, list[str]] = {}
 
