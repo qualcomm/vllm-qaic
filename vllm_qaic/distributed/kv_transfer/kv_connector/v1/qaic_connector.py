@@ -329,7 +329,9 @@ class QaicKVCacheBank:
         Returns:
             None
         """
-        assert name in self.MemBank, f"Storage {name} not found in MemBank"
+        if name not in self.MemBank:
+            logger.debug("Storage %s not found in MemBank; nothing to release", name)
+            return
         shm = self.MemBank[name]
         if shm.is_creator:
             resource_tracker.unregister(shm.shared_memory._name, "shared_memory")
