@@ -1838,6 +1838,8 @@ def get_hf_model(
     # For Gptoss models, vllm sets the quantization to gpt_oss_mxfp4 while qeff
     # needs mxfp4 quantization. Because of this mismatch, qeff do not adds MoE
     # weights to the graph and model generates garbage output
+    # Internally too qefficient doesn't support mxfp4, they will accept this
+    # flag and internally dequantize the model weights to fp16/fp32
     architectures = getattr(hf_config, "architectures", None) or []
     quantization_config = getattr(hf_config, "quantization_config", None)
     if "GptOssForCausalLM" in architectures:
