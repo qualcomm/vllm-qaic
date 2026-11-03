@@ -174,13 +174,12 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             if vllm_config.speculative_config
             else None
         )
-        _kv_transfer_config = vllm_config.kv_transfer_config
-        _is_disagg_consumer = (
-            _kv_transfer_config is not None
-            and _kv_transfer_config.kv_role == "kv_consumer"
+        self.is_kv_consumer: bool = bool(
+            vllm_config.kv_transfer_config
+            and vllm_config.kv_transfer_config.kv_role == "kv_consumer"
         )
         _uses_variable_k = _method in ("ngram", "suffix") or (
-            _method == "draft_model" and _is_disagg_consumer
+            _method == "draft_model" and self.is_kv_consumer
         )
         self.decode_ks: list[int] = (
             [0, self.num_spec_tokens]
@@ -1964,12 +1963,18 @@ def _get_qaic_compile_config(
     # Number of kv cache blocks should be same as num_gpu_blocks, if CPL==blk_size
     kv_cache_batch_size = vllm_config.cache_config.num_cpu_blocks
     additional_config = vllm_config.additional_config or {}
+    is_kv_consumer = bool(
+        vllm_config.kv_transfer_config
+        and vllm_config.kv_transfer_config.kv_role == "kv_consumer"
+    )
     prefill_only = None
     # prefill_only options
     if vllm_config.kv_transfer_config:
         kv_role = vllm_config.kv_transfer_config.kv_role
-        if kv_role in ["kv_producer", "kv_consumer"]:
-            prefill_only = kv_role == "kv_producer"
+        if kv_role == "kv_producer":
+            prefill_only = True
+        elif is_kv_consumer:
+            prefill_only = False
 
     _device_group = additional_config.get("device_group")
 
@@ -1984,8 +1989,7 @@ def _get_qaic_compile_config(
         "prefill_seq_len": 128,
         "ctx_len": vllm_config.model_config.max_model_len,
         "batch_size": vllm_config.scheduler_config.max_num_seqs
-        if vllm_config.kv_transfer_config
-        and vllm_config.kv_transfer_config.kv_role == "kv_consumer"
+        if is_kv_consumer
         else 1,
         "full_batch_size": vllm_config.scheduler_config.max_num_seqs,
         "kv_cache_batch_size": kv_cache_batch_size,
@@ -2096,15 +2100,11 @@ def _get_qaic_compile_config(
         # no proposals) and K=max (full SpD).  The K=0 kernel is used on steps
         # where the proposer finds no matches, avoiding the wasted 5-token
         # forward pass.  For draft_model the single K is sufficient.
-        is_disagg_consumer = (
-            vllm_config.kv_transfer_config is not None
-            and vllm_config.kv_transfer_config.kv_role == "kv_consumer"
-        )
         uses_variable_k = bool(
             spec_cfg
             and (
                 spec_cfg.method in ("ngram", "suffix")
-                or (spec_cfg.method == "draft_model" and is_disagg_consumer)
+                or (spec_cfg.method == "draft_model" and is_kv_consumer)
             )
         )
         if spec_cfg and spec_cfg.method == "dflash" and K:
@@ -2299,7 +2299,7 @@ def _get_qaic_compile_config(
     if vllm_config.kv_transfer_config and "prefill_only" in cfg:
         assert (
             (kv_role == "kv_producer" and cfg["prefill_only"])
-            or (kv_role == "kv_consumer" and not cfg["prefill_only"])
+            or (is_kv_consumer and not cfg["prefill_only"])
             or (kv_role == "kv_both" and cfg["prefill_only"] is None)
         ), (
             "prefill_only False is only supported for kv_consumer"
