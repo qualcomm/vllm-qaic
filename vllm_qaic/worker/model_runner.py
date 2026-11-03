@@ -1200,8 +1200,16 @@ class QaicModelRunnerAoT(GPUModelRunner):
             )
 
             if self.max_decode_tokens > 1:
-                # mark padded positions as -1 so QAIC hardware ignores them
-                decode_positions[..., decode_input_ids == -1] = -1
+                padding_mask = decode_input_ids == -1
+                if self.speculative_config.use_dflash():
+                    # Token-table padding may contain rejected or previous-request IDs.
+                    padding_mask |= self.query_pos.np[
+                        : self.num_decode_tokens
+                    ] >= np.repeat(
+                        self.signal_num_scheduled_tokens[: self.num_decodes],  # type: ignore[index]
+                        self.active_k + 1,
+                    )
+                decode_positions[..., padding_mask] = -1
 
             # prefill arrays
             prefill_input_ids: np.ndarray = input_ids[
@@ -1523,8 +1531,10 @@ class QaicModelRunnerAoT(GPUModelRunner):
         spec_config = self.speculative_config
         propose_drafts_after_bookkeeping = False
         if spec_config is not None and not self.is_kv_producer:
+            # DFlash writes a bonus-token slot in addition to the K drafts.
+            draft_positions = self.num_spec_tokens + int(spec_config.use_dflash())
             input_fits_in_drafter = spec_decode_common_attn_metadata is not None and (
-                spec_decode_common_attn_metadata.max_seq_len + self.num_spec_tokens
+                spec_decode_common_attn_metadata.max_seq_len + draft_positions
                 <= self.effective_drafter_max_model_len
             )
             # QAIC: draft_model always proposes after bookkeeping because
@@ -1561,7 +1571,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
         ):
             self.drafter.update_prefill_kv()
             if not propose_drafts_after_bookkeeping:
-                # Gate is batch-wide: advance others' DLM KV via a discarded forward.
+                # Keep shorter requests' DLM KV current; out-of-context rows skip.
                 self.drafter.propose(
                     self.input_batch,
                     valid_sampled_token_ids,

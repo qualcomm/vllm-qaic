@@ -3,7 +3,10 @@
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 # ------------------------------------------------------------------
 
+import runpy
+from pathlib import Path
 from types import MethodType, SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -11,6 +14,65 @@ import pytest
 from vllm_qaic.model_loader.qaic import QaicCausalLM
 from vllm_qaic.model_loader.qaic_multimodal import QaicMultiModal
 from vllm_qaic.platform_base import QaicPlatform
+
+
+@pytest.mark.parametrize("nested_block_size", [False, True])
+@pytest.mark.parametrize("fail_generate", [False, True])
+def test_simple_vlm_example(monkeypatch, nested_block_size, fail_generate):
+    from PIL import Image
+
+    path = Path(__file__).resolve().parents[3] / "examples/qaic_spd_dflash_vlm.py"
+    main = runpy.run_path(str(path))["main"]
+    config = SimpleNamespace(
+        **(
+            {"dflash_config": {"block_size": 16}}
+            if nested_block_size
+            else {"block_size": 16}
+        )
+    )
+    grid = np.array([[1, 28, 28]])
+    processor = Mock(return_value={"image_grid_thw": grid})
+    processor.apply_chat_template.return_value = "formatted image prompt"
+    embeddings = np.zeros((1, 196, 32), dtype=np.float32)
+    vision, target = Mock(), Mock()
+    vision.encode.return_value = [
+        SimpleNamespace(outputs=SimpleNamespace(data=embeddings))
+    ]
+    target.generate.return_value = [
+        SimpleNamespace(outputs=[SimpleNamespace(text="response", token_ids=[1, 2])])
+    ]
+    llm = Mock(side_effect=[vision, target])
+    monkeypatch.setitem(main.__globals__, "LLM", llm)
+    monkeypatch.setitem(
+        main.__globals__, "AutoConfig", Mock(from_pretrained=Mock(return_value=config))
+    )
+    monkeypatch.setitem(
+        main.__globals__,
+        "AutoProcessor",
+        Mock(from_pretrained=Mock(return_value=processor)),
+    )
+    monkeypatch.setitem(
+        main.__globals__, "fetch_image", lambda _: Image.new("RGB", (448, 448))
+    )
+    if fail_generate:
+        target.generate.side_effect = RuntimeError("generation failed")
+        with pytest.raises(RuntimeError, match="generation failed"):
+            main()
+    else:
+        main()
+    vision_config, target_config = [call.kwargs for call in llm.call_args_list]
+    assert vision_config["runner"] == "pooling"
+    assert target_config["model"] == "Qwen/Qwen3.5-4B"
+    assert target_config["max_num_seqs"] == 1
+    assert target_config["speculative_config"]["num_speculative_tokens"] == 15
+    assert "enable_thinking" not in processor.apply_chat_template.call_args.kwargs
+    assert processor.apply_chat_template.call_args.kwargs["add_generation_prompt"]
+    request = target.generate.call_args.args[0][0]
+    assert request["prompt"] == "formatted image prompt"
+    assert request["multi_modal_data"]["image"]["image_embeds"] is embeddings
+    assert request["multi_modal_data"]["image"]["image_grid_thw"] is grid
+    vision.llm_engine.engine_core.shutdown.assert_called_once()
+    target.llm_engine.engine_core.shutdown.assert_called_once()
 
 
 @pytest.mark.parametrize("role", ["kv_producer", "kv_consumer", "kv_both"])

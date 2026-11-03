@@ -147,6 +147,12 @@ class QaicDFlashProposer:
             self.mask_token_id,
         )
         self.model = load_qaic_model(self._draft_vllm_config, "draft")
+        cache_shapes = [shape for shape, _, _ in self.model.kv_cache_info]
+        if not cache_shapes or any(len(s) != 4 or s[2] <= 0 for s in cache_shapes):
+            raise ValueError(
+                "DFlash DLM QPC requires rank-4 KV caches with positive capacity."
+            )
+        self.max_model_len = min(self.max_model_len, *(s[2] for s in cache_shapes))
         target_info = self.model.get_io_shape_and_dtype("target_hidden")
         position_info = self.model.get_io_shape_and_dtype("position_ids_target")
         if target_info is None or position_info is None:
@@ -300,6 +306,13 @@ class QaicDFlashProposer:
         st = self._state_for(req_id)
         is_final_chunk = not bool(prefill_is_partial[0])
         block_size = self.block_size
+        last_pos = int(prefill_positions[n_tokens - 1])
+        # Once the next noise block cannot fit, this request stays TLM-only.
+        if last_pos + block_size >= self.max_model_len:
+            st.position_counter = last_pos
+            st.dlm_candidates = None
+            st.candidates_from_prefill = False
+            return
         target_seq_len = self.target_seq_len
         active_slot = 0
         active_kv_slot = int(batch_indices[0])
@@ -366,7 +379,6 @@ class QaicDFlashProposer:
         # Final chunk: last_sub holds the last real token and receives the bonus.
         last_real_idx = n_tokens - 1
         last_sub = last_real_idx // target_seq_len
-        last_pos = int(prefill_positions[last_real_idx])
         assert last_sub < n_chunks * self.num_sub_blocks, (
             f"DFlash bonus sub-block index {last_sub} out of range "
             f"(total sub-blocks={n_chunks * self.num_sub_blocks})."
@@ -469,6 +481,11 @@ class QaicDFlashProposer:
 
             accepted_length = n_advanced - 1
             prev_counter = st.position_counter
+            st.position_counter = prev_counter + n_advanced
+            # Also protect discarded forwards when the batch-wide gate is closed.
+            if st.position_counter + block_size >= self.max_model_len:
+                st.dlm_candidates = None
+                continue
             row_pids_target = np.arange(
                 prev_counter + 1,
                 prev_counter + 1 + block_size,
@@ -477,7 +494,6 @@ class QaicDFlashProposer:
             row_pids_target[accepted_length + 1 :] = -1
             position_ids_target[i, :block_size] = row_pids_target
 
-            st.position_counter = prev_counter + n_advanced
             position_ids[i] = np.arange(
                 st.position_counter + 1,
                 st.position_counter + 1 + block_size,

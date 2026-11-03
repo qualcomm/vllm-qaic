@@ -4,6 +4,8 @@
 # ------------------------------------------------------------------
 """Unit-level regression test for the DFlash decode-side KV-advance-on-skip fix."""
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -61,6 +63,7 @@ def _make_proposer(decode_bsz: int, block_size: int, hidden_size: int = 8):
     proposer.block_size = block_size
     proposer.target_seq_len = block_size
     proposer.decode_bsz = decode_bsz
+    proposer.max_model_len = 4096
     proposer.mask_token_id = 999
     proposer.hidden_size = hidden_size
     vocab_size = 32
@@ -454,3 +457,208 @@ def test_wide_decode_clears_padding_and_finished_request_state():
     assert np.all(inputs["target_hidden"][1:] == 0)
     assert np.all(inputs["position_ids_target"][1:] == -1)
     assert np.all(inputs["batch_index"][1:] == -1)
+
+
+@pytest.mark.parametrize("commit", [False, True])
+@pytest.mark.parametrize("accepted", [1, 7, 15, 16])
+@pytest.mark.parametrize("last_noise_pos", [4095, 4096, 4100])
+@pytest.mark.parametrize("target_width", [16, 128])
+def test_decode_context_boundary_keeps_short_requests_active(
+    commit, accepted, last_noise_pos, target_width
+):
+    proposer, _ = _make_proposer(2, 16)
+    proposer.target_seq_len = target_width
+    proposer._dlm_position_ids_target = np.full((2, target_width), -1, dtype=np.int64)
+    proposer._dlm_target_hidden = np.zeros((2, target_width, 8), dtype=np.float32)
+    recorder = _RecordingSession(proposer._dlm_logits_buf, proposer.vocab_size)
+    proposer.model.session = recorder
+    proposer._state_for("long").position_counter = last_noise_pos - 16 - accepted
+    proposer._state_for("short").position_counter = 20
+    batch = _FakeInputBatch(["long", "short"], [10, 10], [4080, 22])
+    drafts = proposer.propose(
+        batch,
+        [list(range(accepted)), [7]],
+        np.array([0, 1]),
+        np.ones((2, 16, 8), dtype=np.float32),
+        commit=commit,
+    )
+    fits = last_noise_pos < 4096
+    inputs = recorder.input_calls[0]
+    assert recorder.run_count == 1
+    for name in ("position_ids", "position_ids_target"):
+        assert np.all(
+            (inputs[name] == -1) | ((inputs[name] >= 0) & (inputs[name] < 4096))
+        )
+        if not fits:
+            assert np.all(inputs[name][0] == -1)
+    assert inputs["batch_index"][0, 0] == (0 if fits else -1)
+    assert inputs["batch_index"][1, 0] == 1
+    assert proposer._req_state["long"].position_counter == last_noise_pos - 16
+    assert proposer._req_state["short"].position_counter == 21
+    assert len(drafts[0]) == (15 if fits and commit else 0)
+    assert len(drafts[1]) == (15 if commit else 0)
+
+
+@pytest.mark.parametrize("partial", [False, True])
+@pytest.mark.parametrize("last_noise_pos", [4095, 4096, 4111, 4200])
+@pytest.mark.parametrize("target_width", [16, 128])
+def test_prefill_context_boundary_skips_unusable_dlm_work(
+    partial, last_noise_pos, target_width
+):
+    proposer = _prep_prefill_proposer(2, 16, sub_blocks_per_chunk=8)
+    proposer.target_seq_len = target_width
+    proposer.num_sub_blocks = 128 // target_width
+    proposer._dlm_position_ids_target = np.full((2, target_width), -1, dtype=np.int64)
+    proposer._dlm_target_hidden = np.zeros((2, target_width, 8), dtype=np.float32)
+    recorder = _RecordingSession(proposer._dlm_logits_buf, proposer.vocab_size)
+    proposer.model.session = recorder
+    last_pos = last_noise_pos - 16
+    proposer.prefill_step(
+        target_hidden=[np.ones((1, 128, 8), dtype=np.float32)],
+        prefill_positions=np.arange(last_pos - 127, last_pos + 1),
+        prefill_cum_sum=np.array([128]),
+        batch_indices=np.array([1]),
+        prefill_is_partial=np.array([partial]),
+        last_chunk_logits=None,
+        req_id="long",
+    )
+    fits = last_noise_pos < 4096
+    assert recorder.run_count == (128 // target_width if fits else 0)
+    state = proposer._req_state["long"]
+    assert state.position_counter == last_pos
+    assert state.candidates_from_prefill == (fits and not partial)
+    for inputs in recorder.input_calls:
+        for name in ("position_ids", "position_ids_target"):
+            assert np.all(
+                (inputs[name] == -1) | ((inputs[name] >= 0) & (inputs[name] < 4096))
+            )
+    if not fits:
+        assert state.dlm_candidates is None
+        batch = _FakeInputBatch(["long"], [128], [last_pos + 2])
+        assert proposer.propose(
+            batch, [[7]], np.array([1]), np.ones((1, 16, 8), dtype=np.float32)
+        ) == [[]]
+        assert recorder.run_count == 0
+
+
+@pytest.mark.parametrize("prompt_len", [4080, 4081, 4090, 4095])
+@pytest.mark.parametrize("target_width", [16, 128])
+def test_update_prefill_kv_checks_final_prompt_boundary(prompt_len, target_width):
+    proposer = _prep_prefill_proposer(2, 16, sub_blocks_per_chunk=8)
+    proposer.target_seq_len = target_width
+    proposer.num_sub_blocks = 128 // target_width
+    proposer._dlm_position_ids_target = np.full((2, target_width), -1, dtype=np.int64)
+    proposer._dlm_target_hidden = np.zeros((2, target_width, 8), dtype=np.float32)
+    recorder = _RecordingSession(proposer._dlm_logits_buf, proposer.vocab_size)
+    proposer.model.session = recorder
+    fits = prompt_len + proposer.block_size <= proposer.max_model_len
+
+    for start in range(0, prompt_len, 128):
+        end = min(start + 128, prompt_len)
+        proposer.build_prefill_pending(
+            np.array([end - start]),
+            np.arange(start, end),
+            np.array([1]),
+            np.array([end < prompt_len]),
+            None,
+            [np.ones((1, 128, 8), dtype=np.float32)],
+            ["request"],
+        )
+        calls_before = recorder.run_count
+        proposer.update_prefill_kv()
+        assert not proposer._prefill_pending
+        if end == prompt_len and not fits:
+            assert recorder.run_count == calls_before
+
+    state = proposer._req_state["request"]
+    assert state.position_counter == prompt_len - 1
+    assert state.candidates_from_prefill == fits
+    for inputs in recorder.input_calls:
+        for name in ("position_ids", "position_ids_target"):
+            assert np.all(
+                (inputs[name] == -1) | ((inputs[name] >= 0) & (inputs[name] < 4096))
+            )
+    calls_before = recorder.run_count
+    drafts = proposer.propose(
+        _FakeInputBatch(["request"], [prompt_len], [prompt_len + 1]),
+        [[7]],
+        np.array([1]),
+        np.ones((1, 16, 8), dtype=np.float32),
+    )
+    assert len(drafts[0]) == (15 if fits else 0)
+    assert recorder.run_count == calls_before
+
+
+@pytest.mark.parametrize("compiled_ctx", [2048, 4096, 8192])
+def test_dlm_context_limit_uses_loaded_cache_capacity(monkeypatch, compiled_ctx):
+    proposer, _ = _make_proposer(2, 16)
+    proposer.tlm_prefill_seq_len = 128
+    proposer._draft_vllm_config = SimpleNamespace(
+        additional_config={}, model_config=SimpleNamespace(model="draft")
+    )
+    model = proposer.model
+    model.kv_cache_info = [
+        ((2, 1, capacity, 8), np.float32, 0)
+        for capacity in (compiled_ctx, compiled_ctx + 128)
+    ]
+    model.get_io_shape_and_dtype = lambda name: (
+        [2, 128, 8] if name == "target_hidden" else [2, 128],
+        np.float32,
+        0,
+    )
+    monkeypatch.setattr(
+        "vllm_qaic.spec_decode.dflash_draft_model.load_qaic_model", lambda *args: model
+    )
+    proposer.load_model()
+    assert proposer.max_model_len == min(4096, compiled_ctx)
+
+
+@pytest.mark.parametrize("method", ["dflash", "draft_model", "ngram", "suffix"])
+@pytest.mark.parametrize("seq_len", [4080, 4081, 4082, None])
+def test_runner_context_gate_reserves_dflash_bonus_slot(method, seq_len):
+    from vllm_qaic.worker.model_runner import QaicModelRunnerAoT
+
+    calls = []
+    metadata = SimpleNamespace(max_seq_len=seq_len) if seq_len is not None else None
+    scheduler = SimpleNamespace(total_num_scheduled_tokens=1)
+    runner = SimpleNamespace(
+        kv_connector_output=None,
+        use_async_scheduling=False,
+        is_kv_producer=False,
+        execute_model_state=(
+            scheduler,
+            None,
+            None,
+            metadata,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ),
+        _sample=lambda *args: None,
+        input_batch=SimpleNamespace(
+            prev_sampled_token_ids=None, sampling_metadata=None
+        ),
+        speculative_config=SimpleNamespace(
+            method=method, use_dflash=lambda: method == "dflash"
+        ),
+        num_spec_tokens=15,
+        effective_drafter_max_model_len=4096,
+        _bookkeeping_sync=lambda *args: (0, None, [[7]], {}, ["r"], {"r": 0}, []),
+        model=SimpleNamespace(),
+        batch_indices=np.array([0]),
+        _tlm_hidden_buf=None,
+        drafter=SimpleNamespace(
+            update_prefill_kv=lambda: None,
+            propose=lambda *args, commit=True: calls.append(commit),
+        ),
+        propose_draft_token_ids=lambda *args: calls.append(True) or [[]],
+        _copy_draft_token_ids_to_cpu=lambda *args: None,
+    )
+    QaicModelRunnerAoT.sample_tokens(runner, None)
+    expected = seq_len is not None and seq_len + 15 + (method == "dflash") <= 4096
+    assert calls.count(True) == int(expected)
+    if method == "dflash":
+        assert calls == [expected]
