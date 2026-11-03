@@ -257,6 +257,9 @@ class QaicECConnector(ECConnectorBase):
                 raise ValueError(
                     f"Unable to find prompt hash {req_pkt.mm_hash} in ECStore!"
                 )
+            assert result.payload, (
+                f"ECStore returned empty payload for {mm_data.mm_hash}"
+            )
             try:
                 (_, buffs) = self.mem_bank.get_Storage(
                     kv_cache_info=[
@@ -290,8 +293,9 @@ class QaicECConnector(ECConnectorBase):
             return
         for mm_hash in mm_hashes:
             names = self._loaded.pop(mm_hash, None)
-            if not names:
+            if names is None:
                 continue
+            assert names, f"Empty SHM name list tracked for {mm_hash}"
             for name in names:
                 try:
                     self.mem_bank.release_Storage(name, unlink=False)
@@ -361,6 +365,7 @@ class QaicECConnector(ECConnectorBase):
             raise ValueError(
                 f"Failed to copy embedding into EC SHM for {mm_hash}: {e}"
             ) from e
+        assert name, f"No SHM name allocated for {mm_hash}"
         req_pkt = QaicECHandOffPutReq(
             buff_type=QaicBufferType.SHM,
             timestamp=time.perf_counter(),
