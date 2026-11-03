@@ -313,8 +313,10 @@ class QaicKVCacheBank:
           is removed from the `resource_tracker`. In this case, no actual
           cleanup occurs because the resource tracker assumes the creator
           will manage its lifecycle.
-        - If invoked during decode (or by a non-creator), the SHM is
-          explicitly unlinked, ensuring proper cleanup.
+        - If invoked by a non-creator with `unlink=True`, the SHM is
+          explicitly unlinked, ensuring proper cleanup. With `unlink=False`
+          the segment is only closed (e.g. EC consumers, where the ECStore
+          owns the segment lifecycle).
 
         Notes:
         - The `resource_tracker` automatically deletes SHM segments in the
@@ -325,6 +327,8 @@ class QaicKVCacheBank:
         Args:
             name (Optional[str]): The name of the SHM segment to release.
                 If None, defaults to the internally tracked segment name.
+            unlink (bool): Whether a non-creator should unlink the segment.
+                Defaults to True; set False to close without unlinking.
 
         Returns:
             None
