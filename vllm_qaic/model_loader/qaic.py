@@ -166,6 +166,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
 
         self.num_logits_to_keep: int | None = None
         self.decode_logits: dict[str, np.ndarray] | None = None
+        self.non_retained_output_buffers: dict[str, np.ndarray] = {}
         self.is_spec_decode_target_model = False
 
         # Variable-K decode specializations: compile with [0, K] for ngram/suffix
@@ -408,6 +409,19 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             np.dtype(_logits_info[1]) if _logits_info is not None else np.float32
         )
 
+        # Speech QPCs can expose auxiliary outputs in addition to logits.
+        # Allocate these from the descriptor so every runtime submission binds
+        # the complete QPC ABI, including outputs such as audio_embeds.3.
+        for output_name in self.session.output_names:
+            if output_name == "logits" or self.session._is_kv_cache_name(output_name):
+                continue
+            output_info = self.get_io_shape_and_dtype(output_name, is_input=False)
+            if output_info is not None:
+                output_shape, output_dtype, _ = output_info
+                self.non_retained_output_buffers[output_name] = np.empty(
+                    output_shape, dtype=output_dtype
+                )
+
         e = time.perf_counter() - s
         logger.info("Successfully loaded QPC in %s secs", e)
 
@@ -649,6 +663,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 chunk_inputs["lora_ids"] = lora_ids
             if mm_kwargs_list and (mm_kwargs := mm_kwargs_list[index]):
                 chunk_inputs.update(mm_kwargs)
+            if self.non_retained_output_buffers:
+                chunk_inputs.update(self.non_retained_output_buffers)
 
             # chunk the request
             n_chunks: int = iids.shape[-1] // self.prefill_seq_len
@@ -792,6 +808,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 chunk_inputs["lora_ids"] = lora_index
             if mm_kwargs_list and (mm_kwargs := mm_kwargs_list[i]):
                 chunk_inputs.update(mm_kwargs)
+            if self.non_retained_output_buffers:
+                chunk_inputs.update(self.non_retained_output_buffers)
             # chunk the request
             n_chunks: int = iids.shape[-1] // self.prefill_seq_len
 
@@ -897,6 +915,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 num_decodes, mdt
             )
         batch_inputs["logits"] = logits
+        if self.non_retained_output_buffers:
+            batch_inputs.update(self.non_retained_output_buffers)
         # DFlash: capture TLM decode hidden states for the DLM.
         if dflash_decode_hidden_buf is not None:
             batch_inputs["hidden_states"] = dflash_decode_hidden_buf
@@ -1873,7 +1893,7 @@ def get_hf_model(
 
     model_type = "lora" if lora_config else "default"
     if model_config.is_multimodal_model:
-        if model_config.hf_config.model_type == "whisper":
+        if model_config.hf_config.model_type in ("whisper", "qwen3_asr"):
             model_type = "speech"
             del args["kv_offload"]
         elif model_config.hf_config.model_type != "internvl_chat":
@@ -2155,11 +2175,16 @@ def _get_qaic_compile_config(
         else:
             # Audio models (e.g. Whisper):
             # QEff requires fixed prefill_seq_len=1, no batching.
-            if "encoder_ctx_len" not in cfg:
-                cfg["encoder_ctx_len"] = getattr(
-                    hf_config, "max_source_positions", None
-                )
-            cfg["prefill_seq_len"] = 1
+            if hf_config.model_type == "qwen3_asr":
+                cfg.setdefault("prefill_seq_len", 512)
+                if not cfg.get("encoder_ctx_len"):
+                    cfg["encoder_ctx_len"] = 3000
+            else:
+                if "encoder_ctx_len" not in cfg:
+                    cfg["encoder_ctx_len"] = getattr(
+                        hf_config, "max_source_positions", None
+                    )
+                cfg["prefill_seq_len"] = 1
 
         if kv_offload:
             # Dual QPC approach: select which QPC to load based on which path
