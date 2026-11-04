@@ -148,6 +148,7 @@ class ShmBuffer:
         name: str | None = None,
         create: bool = True,
         use_full_kv_transfer: bool = False,
+        preserve_shape: bool = False,
     ):
         """
         A shared memory buffer implementation, wrapper over shared_memory.SharedMemory
@@ -160,12 +161,15 @@ class ShmBuffer:
         self.name = name
         self.list_of_np_buff = []
         self.cleanup_done = False
+        self.preserve_shape = preserve_shape
         if not isinstance(kv_cache_info, list):
             raise ValueError("shape must be a list")
 
         self.buff_sizes = []
         for kv_shape, kv_type, _ in kv_cache_info:
-            _kv_shape = self._get_kv_shape(use_full_kv_transfer, kv_shape, num_tokens)
+            _kv_shape = self._get_kv_shape(
+                use_full_kv_transfer, kv_shape, num_tokens, self.preserve_shape
+            )
             _bytes_of_buffer = 1
             for dim in _kv_shape:
                 _bytes_of_buffer *= dim
@@ -220,26 +224,34 @@ class ShmBuffer:
         for i, (kv_shape, kv_type, _) in enumerate(self.kv_cache_info):
             with self.get_data(i) as buff:
                 _kv_shape = self._get_kv_shape(
-                    use_full_kv_transfer, kv_shape, num_tokens
+                    use_full_kv_transfer, kv_shape, num_tokens, self.preserve_shape
                 )
                 self.list_of_np_buff.append(
                     np.ndarray(_kv_shape, dtype=kv_type, buffer=buff)
                 )
 
     def _get_kv_shape(
-        self, use_full_kv_transfer: bool, kv_shape: tuple, num_tokens: int
+        self,
+        use_full_kv_transfer: bool,
+        kv_shape: tuple,
+        num_tokens: int,
+        preserve_shape: bool = False,
     ) -> tuple:
+        if preserve_shape:
+            # EC embeddings are fixed-size per image; dim0 is NOT a batch dim
+            # (e.g. (num_vision_tokens, hidden)). Preserve the shape verbatim.
+            return tuple(kv_shape)
         if not use_full_kv_transfer and len(kv_shape) > 3:
             seq_len = min(num_tokens, kv_shape[2])
             return (1, kv_shape[1], seq_len) + kv_shape[3:]
         # Use batch size 1 and keep other dims intact
         return (1,) + kv_shape[1:]
 
-    def cleanup(self):
+    def cleanup(self, unlink: bool = True):
         if not self.cleanup_done:
             self.cleanup_done = True
             self.shared_memory.close()
-            if not self.is_creator:
+            if not self.is_creator and unlink:
                 self.shared_memory.unlink()
             del self.list_of_np_buff
             del self.shared_memory
@@ -268,6 +280,8 @@ class QaicKVCacheBank:
         self.use_full_kv_transfer = (
             os.getenv(VLLM_QAIC_USE_FULL_KV_TRANSFER_ENV, "0") == "1"
         )
+        # EC connector sets this True so ShmBuffer preserves embedding shape.
+        self.preserve_shape = False
 
     def get_Storage(
         self, kv_cache_info: list, num_tokens: int, name: str | None = None
@@ -285,11 +299,12 @@ class QaicKVCacheBank:
             name=name,
             create=create,
             use_full_kv_transfer=self.use_full_kv_transfer,
+            preserve_shape=self.preserve_shape,
         )
         self.MemBank[shm.name] = shm
         return shm.name, shm.list_of_np_buff
 
-    def release_Storage(self, name: str | None = None):
+    def release_Storage(self, name: str | None = None, unlink=True):
         """
         Release a shared memory (SHM) segment from the memory bank.
 
@@ -298,8 +313,10 @@ class QaicKVCacheBank:
           is removed from the `resource_tracker`. In this case, no actual
           cleanup occurs because the resource tracker assumes the creator
           will manage its lifecycle.
-        - If invoked during decode (or by a non-creator), the SHM is
-          explicitly unlinked, ensuring proper cleanup.
+        - If invoked by a non-creator with `unlink=True`, the SHM is
+          explicitly unlinked, ensuring proper cleanup. With `unlink=False`
+          the segment is only closed (e.g. EC consumers, where the ECStore
+          owns the segment lifecycle).
 
         Notes:
         - The `resource_tracker` automatically deletes SHM segments in the
@@ -310,15 +327,19 @@ class QaicKVCacheBank:
         Args:
             name (Optional[str]): The name of the SHM segment to release.
                 If None, defaults to the internally tracked segment name.
+            unlink (bool): Whether a non-creator should unlink the segment.
+                Defaults to True; set False to close without unlinking.
 
         Returns:
             None
         """
-        assert name in self.MemBank, f"Storage {name} not found in MemBank"
+        if name not in self.MemBank:
+            logger.debug("Storage %s not found in MemBank; nothing to release", name)
+            return
         shm = self.MemBank[name]
         if shm.is_creator:
             resource_tracker.unregister(shm.shared_memory._name, "shared_memory")
-        shm.cleanup()
+        shm.cleanup(unlink=unlink)
         del self.MemBank[name]
 
     def cleanup(self):
