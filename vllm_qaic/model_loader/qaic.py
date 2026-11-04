@@ -1906,6 +1906,32 @@ def get_hf_model(
         # If tie_word_embeddings is not set correctly,
         # single QPC's output would be wrong
         hf_config.tie_word_embeddings = pretrained_hf_config.tie_word_embeddings
+    # Layer IDs request hidden-state extraction; the draft checkpoint selects
+    # DFlash's projection. Do not apply its loading policy to other SpD methods.
+    is_dflash_target = bool(
+        qaic_config
+        and qaic_config.get("target_layer_ids")
+        and qaic_config.get("dflash_dlm_repo")
+    )
+    if hf_config.model_type == "gpt_oss" and is_dflash_target:
+        # Apply the shared quantizer fix without changing vLLM's DFlash config.
+        hf_config = deepcopy(hf_config)
+    # For Gptoss models, vllm sets the quantization to gpt_oss_mxfp4 while qeff
+    # needs mxfp4 quantization. Because of this mismatch, qeff do not adds MoE
+    # weights to the graph and model generates garbage output
+    # Internally too qefficient doesn't support mxfp4, they will accept this
+    # flag and internally dequantize the model weights to fp16/fp32
+    architectures = getattr(hf_config, "architectures", None) or []
+    quantization_config = getattr(hf_config, "quantization_config", None)
+    if "GptOssForCausalLM" in architectures:
+        if isinstance(quantization_config, dict):
+            if quantization_config.get("quant_method") == "gpt_oss_mxfp4":
+                quantization_config["quant_method"] = "mxfp4"
+        elif (
+            quantization_config is not None
+            and getattr(quantization_config, "quant_method", None) == "gpt_oss_mxfp4"
+        ):
+            quantization_config.quant_method = "mxfp4"
     override_qaic_config = (
         additional_config.get("override_qaic_config") if additional_config else None
     )
@@ -1927,24 +1953,10 @@ def get_hf_model(
         override_qaic_config.pop("pretrained_extra_args")
 
     model_type = "lora" if lora_config else "default"
-    # Layer IDs request hidden-state extraction; the draft checkpoint selects
-    # DFlash's projection. Do not apply its loading policy to other SpD methods.
-    is_dflash_target = bool(
-        qaic_config
-        and qaic_config.get("target_layer_ids")
-        and qaic_config.get("dflash_dlm_repo")
-    )
     if hf_config.model_type == "gpt_oss" and is_dflash_target:
         # Load target weights and the injected projection/norm in FP32 before
         # QEfficient applies the selected export/compiler precision policy.
         args["dtype"] = "float32"
-        if (getattr(hf_config, "quantization_config", None) or {}).get(
-            "quant_method"
-        ) == "gpt_oss_mxfp4":
-            # vLLM renames HF's MXFP4 quantizer; restore the name that the
-            # Transformers loader recognizes without mutating vLLM's config.
-            args["config"] = deepcopy(hf_config)
-            args["config"].quantization_config["quant_method"] = "mxfp4"
     if model_config.is_multimodal_model:
         if model_config.hf_config.model_type == "whisper":
             model_type = "speech"

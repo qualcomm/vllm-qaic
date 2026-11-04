@@ -114,18 +114,34 @@ def test_compile_only_builds_draft_before_exiting(monkeypatch, dflash, draft_err
 
 
 @pytest.mark.parametrize(
-    "model_type",
-    ["gemma4", "qwen3_vl", "qwen3_5", "qwen3_5_moe", "gpt_oss", "qwen3", "llama"],
+    "model_type,quantizer_object",
+    [
+        ("gemma4", False),
+        ("qwen3_vl", False),
+        ("qwen3_5", False),
+        ("qwen3_5_moe", False),
+        ("gpt_oss", False),
+        ("gpt_oss", True),
+        ("qwen3", False),
+        ("llama", False),
+    ],
 )
 @pytest.mark.parametrize("metadata", ["none", "layers_only", "repo_only", "dflash"])
-def test_hf_loading_defaults_require_dflash_metadata(monkeypatch, model_type, metadata):
+def test_hf_loading_defaults_require_dflash_metadata(
+    monkeypatch, model_type, metadata, quantizer_object
+):
     import QEfficient
     from vllm_qaic.model_loader import qaic
 
     vlm = model_type in {"gemma4", "qwen3_vl", "qwen3_5", "qwen3_5_moe"}
     hf_config = SimpleNamespace(model_type=model_type)
     if model_type == "gpt_oss":
-        hf_config.quantization_config = {"quant_method": "gpt_oss_mxfp4"}
+        hf_config.architectures = ["GptOssForCausalLM"]
+        hf_config.quantization_config = (
+            SimpleNamespace(quant_method="gpt_oss_mxfp4")
+            if quantizer_object
+            else {"quant_method": "gpt_oss_mxfp4"}
+        )
     config = SimpleNamespace(
         hf_config=hf_config,
         model="target",
@@ -155,10 +171,17 @@ def test_hf_loading_defaults_require_dflash_metadata(monkeypatch, model_type, me
     if vlm:
         assert args["continuous_batching"] is (metadata != "dflash")
     if model_type == "gpt_oss":
-        assert hf_config.quantization_config["quant_method"] == "gpt_oss_mxfp4"
+        original_quantizer = hf_config.quantization_config
+        loaded_quantizer = args["config"].quantization_config
+        if quantizer_object:
+            original_quantizer = vars(original_quantizer)
+            loaded_quantizer = vars(loaded_quantizer)
+        assert loaded_quantizer["quant_method"] == "mxfp4"
+        assert original_quantizer["quant_method"] == (
+            "gpt_oss_mxfp4" if specialized else "mxfp4"
+        )
         if specialized:
             assert args["config"] is not hf_config
-            assert args["config"].quantization_config["quant_method"] == "mxfp4"
 
 
 def test_dflash_registry_separates_vlm_from_text_architectures():
