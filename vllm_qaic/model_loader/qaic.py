@@ -453,20 +453,10 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             self.stages = 1
         from .qaic_session_np import QAICInferenceSession
 
-        # qaicrt uses virtual device IDs (0-based within QAIC_VISIBLE_DEVICES).
-        # Translate physical device IDs to virtual IDs before creating the session.
-        _visible = os.environ.get(current_platform.device_control_env_var)
-        if _visible is not None:
-            _visible_ids = [int(x) for x in _visible.replace(",", " ").split()]
-            _phys_to_virt = {phys: virt for virt, phys in enumerate(_visible_ids)}
-            session_device_ids = [_phys_to_virt.get(d, d) for d in device_id]
-        else:
-            session_device_ids = device_id
-
         self.session = QAICInferenceSession(
             qpc_path,
             full_batch_size=self.full_batch_size,
-            device_ids=session_device_ids,
+            device_ids=device_id,
             stages=self.stages,
             cluster_id=cluster_id,
             use_async_scheduling=self.use_async_scheduling,
