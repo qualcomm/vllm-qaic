@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 import zmq
-from qaic_disagg.ec_handoff.protocol import (
+from vllm_qaic.distributed.ec_transfer.ec_connector.protocol import (
     QaicBufferType,
     QaicECHandOffGetReq,
     QaicECHandOffGetResp,
@@ -221,7 +221,7 @@ class QaicECConnector(ECConnectorBase):
             if mm_data.mm_hash in encoder_cache:
                 continue
 
-            result: QaicECHandOffGetResp = None
+            result: QaicECHandOffGetResp | None = None
             req_pkt = QaicECHandOffGetReq(
                 timestamp=time.perf_counter(),
                 mm_hash=mm_data.mm_hash,
@@ -257,9 +257,12 @@ class QaicECConnector(ECConnectorBase):
                 raise ValueError(
                     f"Unable to find prompt hash {req_pkt.mm_hash} in ECStore!"
                 )
-            assert result.payload, (
-                f"ECStore returned empty payload for {mm_data.mm_hash}"
-            )
+            assert (
+                result is not None
+                and result.payload
+                and result.shape
+                and (result.dtype)
+            ), f"ECStore returned incomplete response for {mm_data.mm_hash}"
             try:
                 (_, buffs) = self.mem_bank.get_Storage(
                     kv_cache_info=[
