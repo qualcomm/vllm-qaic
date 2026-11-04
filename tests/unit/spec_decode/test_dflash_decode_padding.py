@@ -125,7 +125,7 @@ def test_decode_padding_ignores_stale_positive_token_ids(
             decode_bsz=num_decodes,
             uses_mrope=uses_mrope,
             num_prefill_chunks=lambda cum: len(cum),
-            dflash_hidden_size=8,
+            tlm_hidden_size=8,
             prefill_seq_len=128,
         ),
     )

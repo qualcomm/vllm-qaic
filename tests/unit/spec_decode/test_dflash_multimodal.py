@@ -125,19 +125,25 @@ def _vlm_model(model_type="qwen3_vl", missing_phase=None):
         ctx_len=4096,
         prefill_seq_len=128,
         num_spec_tokens=15,
-        dflash_hidden_size=8,
-        _dflash_prefill_hidden_scratch=np.zeros((1, 128, 8), dtype=np.float32),
+        tlm_hidden_size=8,
+        _prefill_hidden_scratch=np.zeros((1, 128, 8), dtype=np.float32),
     )
-    model._get_dflash_binding_shapes = MethodType(
-        QaicCausalLM._get_dflash_binding_shapes, model
+    model._get_binding_shapes = MethodType(QaicCausalLM._get_binding_shapes, model)
+    model._load_multimodal_dflash_hybrid = MethodType(
+        QaicMultiModal._load_multimodal_dflash_hybrid, model
     )
     return model
 
 
 @pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe", "qwen3_vl", "gemma4"])
 @pytest.mark.parametrize("missing_phase", [None, "prefill", "decode"])
-def test_vlm_requires_both_language_specializations(model_type, missing_phase):
+@pytest.mark.parametrize("token_type_mask", [False, True])
+def test_vlm_requires_both_language_specializations(
+    model_type, missing_phase, token_type_mask
+):
     model = _vlm_model(model_type, missing_phase)
+    if not token_type_mask:
+        model.session.input_names.remove("mm_token_type_ids")
     if missing_phase:
         with pytest.raises(ValueError, match="input lengths"):
             QaicMultiModal._load_multimodal(model)
@@ -145,12 +151,24 @@ def test_vlm_requires_both_language_specializations(model_type, missing_phase):
     QaicMultiModal._load_multimodal(model)
     inputs = model.decode_batch_inputs
     width = 32 if model.dflash_hybrid else 16
-    assert inputs["mm_token_type_ids"].shape == (1, width)
+    if token_type_mask:
+        assert inputs["mm_token_type_ids"].shape == (1, width)
+    else:
+        assert "mm_token_type_ids" not in inputs
     if model.dflash_hybrid:
         assert inputs["input_ids"].shape == (1, 32)
+        assert inputs["position_ids"].shape == (4, 1, 32)
+        assert np.all(inputs["position_ids"] == -1)
         assert inputs["cache_commit"].item() == 0
         assert model.default_mm_kwargs["cache_commit"].item() == 1
+        assert model._dflash_prefix_ids.shape == (1, 16)
+        assert model._dflash_prefix_positions.shape == (4, 1, 16)
         assert np.all(model._dflash_prefix_positions == -1)
+        assert model._dflash_decode_hidden.shape == (1, 32, 8)
+        assert model._dflash_decode_hidden.dtype == model._prefill_hidden_scratch.dtype
+    else:
+        assert "cache_commit" not in inputs
+        assert not hasattr(model, "_dflash_prefix_ids")
 
 
 @pytest.mark.parametrize("is_input", [True, False])
@@ -165,24 +183,22 @@ def test_dflash_binding_shapes_prefer_specializations_then_fallback(is_input, sh
         return ([2048], np.float32, 8192)
 
     model.get_io_shape_and_dtype = binding
-    assert model._get_dflash_binding_shapes("features", is_input) == (
-        shapes or [[2048]]
-    )
+    assert model._get_binding_shapes("features", is_input) == (shapes or [[2048]])
     assert calls == ([] if shapes else [("features", is_input)])
     model.get_io_shape_and_dtype = lambda *a, **kw: None
-    assert model._get_dflash_binding_shapes("missing", is_input) == shapes
+    assert model._get_binding_shapes("missing", is_input) == shapes
 
 
 @pytest.mark.parametrize("shapes", [[], [[8]], [[1, 16, 8], [1, 128, 9]], [[1, 16, 8]]])
 def test_dflash_hidden_width_validation(shapes):
     model = _vlm_model()
-    model.dflash_hidden_name = "features"
+    model.tlm_hidden_states_name = "features"
     model.session.get_bindings_shapes = lambda names: {"features": shapes}
     if shapes == [[1, 16, 8]]:
-        assert QaicCausalLM._get_dflash_hidden_size(model) == 8
+        assert QaicCausalLM._get_tlm_hidden_size(model) == 8
     else:
         with pytest.raises(ValueError, match="hidden states"):
-            QaicCausalLM._get_dflash_hidden_size(model)
+            QaicCausalLM._get_tlm_hidden_size(model)
 
 
 @pytest.mark.parametrize("shapes", [[], [[1, 16]], [[1, 16, 1]], [[1, 16, 31]]])
@@ -223,7 +239,7 @@ def test_qwen35_requires_state_bindings_and_hidden_buffer(model_type, missing):
     model = _vlm_model(model_type)
     model.default_mm_kwargs = None
     if missing == "hidden-state buffer":
-        model._dflash_prefill_hidden_scratch = None
+        model._prefill_hidden_scratch = None
     else:
         model.session.input_names.remove(missing)
     with pytest.raises(ValueError, match=missing):

@@ -2,10 +2,6 @@
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 # ------------------------------------------------------------------
-"""Qwen3.5-4B DFlash image inference on QAIC (batch size 1).
-
-Run: TRITON_CPU_BACKEND=1 python examples/qaic_spd_dflash_vlm.py
-"""
 
 from contextlib import ExitStack
 

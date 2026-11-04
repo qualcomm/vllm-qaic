@@ -497,7 +497,8 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 "draft_override_qaic_config"
             )
             if _draft_override is not None:
-                _draft_override = dict(_draft_override)
+                # Copy so draft-only options do not modify the parent config.
+                _draft_override = _draft_override.copy()
                 if spec_cfg.use_dflash() and (
                     self.vllm_config.additional_config.get("override_qaic_config") or {}
                 ).get("compile_only"):
@@ -1203,12 +1204,12 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 padding_mask = decode_input_ids == -1
                 if self.speculative_config.use_dflash():
                     # Token-table padding may contain rejected or previous-request IDs.
-                    padding_mask |= self.query_pos.np[
-                        : self.num_decode_tokens
-                    ] >= np.repeat(
-                        self.signal_num_scheduled_tokens[: self.num_decodes],  # type: ignore[index]
-                        self.active_k + 1,
-                    )
+                    query_positions = self.query_pos.np[: self.num_decode_tokens]
+                    scheduled_tokens = self.signal_num_scheduled_tokens[  # type: ignore[index]
+                        : self.num_decodes
+                    ]
+                    decode_limits = np.repeat(scheduled_tokens, self.active_k + 1)
+                    padding_mask |= query_positions >= decode_limits
                 decode_positions[..., padding_mask] = -1
 
             # prefill arrays
@@ -1306,7 +1307,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 tlm_prefill_hidden_chunks = None
                 if _dflash_prefill:
                     _n_chunks = self.model.num_prefill_chunks(prefill_cum_sum)
-                    _hidden_size = self.model.dflash_hidden_size
+                    _hidden_size = self.model.tlm_hidden_size
                     _pfl = self.model.prefill_seq_len
                     # Must match the QPC's hidden_states binding dtype (float16 for
                     # mxfp6/mxint8 models) or setData rejects the buffer.
@@ -1559,6 +1560,8 @@ class QaicModelRunnerAoT(GPUModelRunner):
         )
 
         if getattr(self.model, "dflash_hybrid", False):
+            # Acceptance is now known: stage the inputs to commit during the
+            # next verification call, without running the target a second time.
             self.model.queue_dflash_prefix(valid_sampled_token_ids[: self.num_decodes])
 
         # DFlash: advance DLM KV cache for prefilled requests every step, even when
@@ -1663,10 +1666,10 @@ class QaicModelRunnerAoT(GPUModelRunner):
         the TLM decode hidden states into it via the bound output."""
         # Public num_speculative_tokens is block_size - 1, so block_size = K + 1.
         block_size = self.speculative_config.num_speculative_tokens + 1
-        hidden_size = self.model.dflash_hidden_size
+        hidden_size = self.model.tlm_hidden_size
         decode_bsz = self.model.decode_bsz
         _hs_info = self.model.get_io_shape_and_dtype(
-            self.model.dflash_hidden_name, is_input=False
+            self.model.tlm_hidden_states_name, is_input=False
         )
         if _hs_info is None:
             raise ValueError("DFlash target QPC is missing projected hidden states.")
@@ -1684,7 +1687,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
     def load_model(self, *args, **kwargs) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
         time_before_load = time.perf_counter()
-        from vllm_qaic.model_loader.qaic import load_qaic_model
+        from vllm_qaic.model_loader.qaic import QaicCompilationComplete, load_qaic_model
 
         has_dflash_draft = (
             self.speculative_config is not None
@@ -1695,11 +1698,22 @@ class QaicModelRunnerAoT(GPUModelRunner):
             speculative_model_type = "default"
             if self.num_spec_tokens:
                 speculative_model_type = "target"
-            self.model: nn.Module = load_qaic_model(
-                self.vllm_config,
-                speculative_model_type,
-                raise_on_compile_complete=not has_dflash_draft,
-            )
+            try:
+                self.model: nn.Module = load_qaic_model(
+                    self.vllm_config, speculative_model_type
+                )
+            except QaicCompilationComplete:
+                # Compile-only must build both models before exiting, without
+                # returning an unloaded target into the inference setup below.
+                if has_dflash_draft:
+                    target_config = self.vllm_config.additional_config[
+                        "override_qaic_config"
+                    ]
+                    self.drafter.tlm_prefill_seq_len = int(
+                        target_config["prefill_seq_len"]
+                    )
+                    self.drafter.load_model()
+                raise
             # FIXME load_lora_model parameters have changed in the mixin
             if self.lora_config:
                 self.model = self.load_lora_model(

@@ -259,8 +259,12 @@ class QaicPlatform(Platform):
             "LORA with Multi-modality is not yet supported for QAIC backend"
         )
         if spec_config and model_config.is_multimodal_model:
-            vlm_families = {"qwen3_5", "qwen3_5_moe", "qwen3_vl", "gemma4"}
-            if not is_dflash or model_config.hf_config.model_type not in vlm_families:
+            from vllm_qaic.utils.qaic_utils import DFLASH_VLM_MODEL_TYPES
+
+            if (
+                not is_dflash
+                or model_config.hf_config.model_type not in DFLASH_VLM_MODEL_TYPES
+            ):
                 raise ValueError(
                     "QAIC multimodal speculative decoding currently supports "
                     "DFlash with Qwen3.5, Qwen3.5-MoE, Qwen3-VL, and Gemma4 only."

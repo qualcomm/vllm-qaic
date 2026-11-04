@@ -136,8 +136,10 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
             self.decode_batch_inputs.update(self.default_mm_kwargs)
 
         if self.is_dflash_vlm:
+            # Reject stale QPCs: verification needs B tokens, or 2B for
+            # Qwen3.5's accepted-prefix commit plus new verification block.
             block_size = self.num_spec_tokens + 1
-            input_shapes = self._get_dflash_binding_shapes("input_ids")
+            input_shapes = self._get_binding_shapes("input_ids")
             sequence_lengths = {
                 shape[1]
                 for shape in input_shapes
@@ -150,7 +152,9 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
                     f"DFlash VLM QPC needs input lengths {sorted(required_lengths)} "
                     f"at batch_size={self.decode_bsz} required; found {input_shapes}."
                 )
-            logits_shapes = self._get_dflash_binding_shapes("logits", is_input=False)
+            logits_shapes = self._get_binding_shapes("logits", is_input=False)
+            # Rejection sampling needs full vocabulary logits, not token IDs
+            # from a QPC compiled with greedy sampling.
             if not logits_shapes or any(
                 len(shape) != 3 or shape[-1] != self.vocab_size
                 for shape in logits_shapes
@@ -181,7 +185,7 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
                         ),
                         name,
                     )
-                    shapes = self._get_dflash_binding_shapes(name)
+                    shapes = self._get_binding_shapes(name)
                     if not shapes or any(
                         len(shape) != 4 or shape[2] < capacity for shape in shapes
                     ):
@@ -191,38 +195,7 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
                         )
 
         if self.dflash_hybrid:
-            from QEfficient.generation.dflash_generation import (
-                get_qwen35_target_seq_len,
-            )
-
-            get_qwen35_target_seq_len(self.session, block_size)
-            if "cache_commit" not in self.session.input_names:
-                raise ValueError("Qwen3.5 DFlash target QPC must expose cache_commit.")
-            if self.default_mm_kwargs is None:
-                raise ValueError("Qwen3.5 DFlash target QPC must expose image_idx.")
-            if self._dflash_prefill_hidden_scratch is None:
-                raise ValueError("Qwen3.5 DFlash needs a prefill hidden-state buffer.")
-            self.default_mm_kwargs["cache_commit"] = np.ones((1,), dtype=np.int64)
-            for inputs in self.decode_batch_inputs_by_k.values():
-                inputs["cache_commit"] = np.zeros((1,), dtype=np.int64)
-                inputs["input_ids"] = np.zeros(
-                    (self.decode_bsz, decode_width), dtype=np.int64
-                )
-                inputs["position_ids"] = np.full(
-                    (4, self.decode_bsz, decode_width), -1, dtype=np.int64
-                )
-                if "mm_token_type_ids" in inputs:
-                    inputs["mm_token_type_ids"] = np.zeros_like(inputs["input_ids"])
-            self._dflash_prefix_ids = np.zeros(
-                (self.full_batch_size, block_size), dtype=np.int64
-            )
-            self._dflash_prefix_positions = np.full(
-                (4, self.full_batch_size, block_size), -1, dtype=np.int64
-            )
-            self._dflash_decode_hidden = np.empty(
-                (self.decode_bsz, decode_width, self.dflash_hidden_size),
-                dtype=self._dflash_prefill_hidden_scratch.dtype,
-            )
+            self._load_multimodal_dflash_hybrid(self.num_spec_tokens + 1)
 
         if self.config.model_type == "whisper":
             self.default_mm_kwargs = {}
@@ -235,6 +208,44 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
                     )
             self.decode_batch_inputs.update(self.default_mm_kwargs)
 
+    def _load_multimodal_dflash_hybrid(self, block_size: int) -> None:
+        """Initialize accepted-prefix commit and verification buffers for Qwen3.5."""
+        decode_width = 2 * block_size
+        from QEfficient.generation.dflash_generation import (
+            get_qwen35_target_seq_len,
+        )
+
+        get_qwen35_target_seq_len(self.session, block_size)
+        if "cache_commit" not in self.session.input_names:
+            raise ValueError("Qwen3.5 DFlash target QPC must expose cache_commit.")
+        if self.default_mm_kwargs is None:
+            raise ValueError("Qwen3.5 DFlash target QPC must expose image_idx.")
+        if self._prefill_hidden_scratch is None:
+            raise ValueError("Qwen3.5 DFlash needs a prefill hidden-state buffer.")
+        # Prefill commits all valid tokens. Concatenated decode commits only
+        # the accepted prefix in its first block, not the verification suffix.
+        self.default_mm_kwargs["cache_commit"] = np.ones((1,), dtype=np.int64)
+        for inputs in self.decode_batch_inputs_by_k.values():
+            inputs["cache_commit"] = np.zeros((1,), dtype=np.int64)
+            inputs["input_ids"] = np.zeros(
+                (self.decode_bsz, decode_width), dtype=np.int64
+            )
+            inputs["position_ids"] = np.full(
+                (4, self.decode_bsz, decode_width), -1, dtype=np.int64
+            )
+            if "mm_token_type_ids" in inputs:
+                inputs["mm_token_type_ids"] = np.zeros_like(inputs["input_ids"])
+        self._dflash_prefix_ids = np.zeros(
+            (self.full_batch_size, block_size), dtype=np.int64
+        )
+        self._dflash_prefix_positions = np.full(
+            (4, self.full_batch_size, block_size), -1, dtype=np.int64
+        )
+        self._dflash_decode_hidden = np.empty(
+            (self.decode_bsz, decode_width, self.tlm_hidden_size),
+            dtype=self._prefill_hidden_scratch.dtype,
+        )
+
     def _run_decode(
         self,
         input_ids: np.ndarray,
@@ -245,6 +256,13 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
         callback: Callable | None = None,
         dflash_decode_hidden_buf: np.ndarray | None = None,
     ) -> None:
+        """Commit accepted tokens and verify new drafts in one hybrid TLM call.
+
+        Qwen3.5's recurrent state must advance only through accepted tokens.
+        Input: [previous accepted prefix padded to B | current B-token block].
+        Invalid prefix positions are -1 and do not update retained state.
+        Non-hybrid models use the base decode path.
+        """
         if not self.dflash_hybrid:
             return super()._run_decode(
                 input_ids,
@@ -255,9 +273,11 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
                 callback,
                 dflash_decode_hidden_buf,
             )
+        # Fixed DLM checkpoint block size, validated during loading.
         block_size = self.num_spec_tokens + 1
         rows = input_ids.size // block_size
         slots = np.asarray(batch_indices[:rows], dtype=np.int64)
+        # Keep the row-to-cache-slot mapping until rejection sampling finishes.
         self._dflash_decode_slots = slots.copy()
         input_ids = np.concatenate(
             [self._dflash_prefix_ids[slots], input_ids.reshape(rows, block_size)],
@@ -288,9 +308,11 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
             if 0 < count < block_size:
                 logits[row, :count] = logits[row, -count:].copy()
         if dflash_decode_hidden_buf is not None:
+            # The drafter needs the new block's hidden states, not the commit prefix.
             dflash_decode_hidden_buf[:] = self._dflash_decode_hidden[:, -block_size:]
 
     def queue_dflash_prefix(self, sampled_token_ids: list[list[int]]) -> None:
+        """Stage the accepted prefix after sampling; the next decode commits it."""
         slots = self._dflash_decode_slots
         self._dflash_decode_slots = None
         if slots is None:
