@@ -511,11 +511,11 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             self.prefill_num_logits_buffer = dict(
                 num_logits_to_keep=np.empty((1, 1), dtype=np.int64)
             )
-        # CCL state for prefill: dict keyed by prefill exec-object slot id, value
+        # CCL state for disaggregated prefill: dict keyed by exec-object slot id, value
         # is the bucket currently in flight on that slot (0 = idle). Used by
         # _run_pipeline_prefill to pick one CCL per batch =
         # max(needed-by-this-batch, max-in-flight).
-        if self.comp_ctx_lengths_prefill:
+        if self.disagg_producer_en and self.comp_ctx_lengths_prefill:
             prefill_start = self.session.decode_num_execObj
             self.active_ccl: dict[int, int] = {
                 i: 0
@@ -714,7 +714,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                         "completion."
                     )
                     eid = pending_exec_queue.get(timeout=120)
-                    self.complete_inf(eid, True, pipeline_prefill_en=True)
+                    self.complete_inf(eid, True)
                 # Submit Chunk to LRT Queue
                 exec_obj_idx = self.session.np_run_pipeline(
                     inputs=chunk_inputs,
@@ -733,7 +733,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 exec_obj_idx = pending_exec_queue.get(timeout=120)
                 if callback:
                     callback()
-                self.complete_inf(exec_obj_idx, True, pipeline_prefill_en=True)
+                self.complete_inf(exec_obj_idx, True)
         elif callback:
             # async path: free shm buffers, overlapping cleanup with device execution
             callback(self.stages)
@@ -1060,9 +1060,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 output_tensor = F.softmax(output_tensor, dim=1)
         return output_tensor
 
-    def complete_inf(
-        self, index: int, is_prefill: bool, pipeline_prefill_en: bool = False
-    ):
+    def complete_inf(self, index: int, is_prefill: bool):
         """Complete the inference execution for the given execution object index.
 
         Args:
@@ -1070,7 +1068,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             is_prefill: True if completing a prefill inference, False for decode.
         """
         self.session.complete_inf(index, is_prefill)
-        if pipeline_prefill_en and self.comp_ctx_lengths_prefill is not None:
+        if is_prefill and self.disagg_producer_en and self.comp_ctx_lengths_prefill:
             # Slot is no longer in flight; drop its CCL so max(active_ccl)
             # reflects only what's still running.
             self.active_ccl[index] = 0
