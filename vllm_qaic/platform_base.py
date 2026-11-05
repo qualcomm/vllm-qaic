@@ -86,6 +86,11 @@ class QaicPlatform(Platform):
     def get_supported_quantization(cls):
         return cls.supported_quantization
 
+    @classmethod
+    def discover_numa_topology(cls):
+        # vLLM's NIXL worker calls this; QAIC has no NUMA topology to report.
+        return []
+
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
         # check_and_update_config restricts native BF16 to AI200 configurations.
@@ -454,13 +459,6 @@ class QaicPlatform(Platform):
                 "PLD and DLM based SPD Types are supported with Disaggregated "
                 "serving, other SPD types such as Turbo is not yet supported "
                 "with Disaggregated serving for QAIC backend"
-            )
-            assert not (
-                vllm_config.kv_transfer_config.kv_role != "kv_producer"
-                and vllm_config.cache_config.enable_prefix_caching
-            ), (
-                "Prefix caching with KV-role 'kv_consumer' or 'kv_both' not "
-                "yet supported for QAIC backend"
             )
             if (
                 on_device_sampling_en
