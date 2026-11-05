@@ -159,7 +159,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self.ctx_len = model_config.max_model_len
         self.decode_bsz = vllm_config.scheduler_config.max_num_seqs
         self.full_batch_size = vllm_config.scheduler_config.max_num_seqs
-        self.paged_attention = bool(vllm_config.cache_config.enable_prefix_caching)
         self._cache_config = vllm_config.cache_config
         self.prefill_bsz = 1
         self.lora_mode = bool(vllm_config.lora_config)
@@ -432,14 +431,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self.num_gpu_blocks_per_batch = cdiv(
             self.ctx_len, self._cache_config.block_size
         )
-        if self.paged_attention:
-            self.num_gpu_blocks = (
-                self._cache_config.num_gpu_blocks_override
-                if self._cache_config.num_gpu_blocks_override
-                else cdiv(self.ctx_len, self._cache_config.block_size)
-            )
-        else:
-            self.num_gpu_blocks = self.decode_bsz
 
         logger.info("Loading QPC...")
         logger.info(
@@ -470,7 +461,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             np.dtype(_logits_info[1]) if _logits_info is not None else np.float32
         )
 
-        if "block_table" in self.session.input_names and self.paged_attention:
+        if "block_table" in self.session.input_names:
             self.decode_batch_inputs["block_table"] = np.full(
                 (self.decode_bsz, self.num_gpu_blocks_per_batch), -1, dtype=np.int64
             )
@@ -991,7 +982,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             if num_decodes < self.decode_bsz:
                 batch_inputs["lora_ids"][num_decodes:] = -1
 
-        if self.paged_attention and block_table is not None and slot_id is not None:
+        if block_table is not None and slot_id is not None:
             batch_inputs["block_table"][:num_decodes] = block_table[:num_decodes]
             batch_inputs["slot_id"][:num_decodes] = slot_id[:num_decodes]
             if num_decodes < self.decode_bsz:
@@ -1279,7 +1270,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             # Paged attention: the dict rebuilt here replaces the one created in
             # load_model(), so block_table/slot_id must be added again. All rows
             # are padding (position_ids == -1), so -1 / 0 matches load_model().
-            if self.paged_attention:
+            if "block_table" in self.session.input_names:
                 decode_single_inputs["block_table"] = np.full(
                     (1, self.num_gpu_blocks_per_batch),
                     -1,
