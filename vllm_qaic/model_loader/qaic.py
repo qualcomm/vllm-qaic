@@ -2133,22 +2133,10 @@ def _get_qaic_compile_config(
         from qaicrt import QStatus
 
         if cfg["device_group"] is not None:
-            # qaicrt uses virtual device IDs (0-based within QAIC_VISIBLE_DEVICES).
-            # Physical device IDs from device_group must be translated to virtual
-            # IDs before calling getResourceInfo.
-            _visible = os.environ.get(current_platform.device_control_env_var)
-            if _visible is not None:
-                _visible_ids = [int(x) for x in _visible.replace(",", " ").split()]
-                _phys_to_virt = {phys: virt for virt, phys in enumerate(_visible_ids)}
-            else:
-                _phys_to_virt = {}
             for id in cfg["device_group"]:
-                virt_id = _phys_to_virt.get(id, id)
-                _nsp_info = qaic_util().getResourceInfo(virt_id)
+                _nsp_info = qaic_util().getResourceInfo(id)
                 if _nsp_info[0] != QStatus.QS_SUCCESS:
-                    raise ValueError(
-                        f"device_id {id} (virtual {virt_id}) is not available !!"
-                    )
+                    raise ValueError(f"device_id {id} is not available !!")
                 _hw_num_cores = min(_hw_num_cores, _nsp_info[1].nspTotal)
         cfg["num_cores"] = _hw_num_cores
         # Applicable for draft-target spd scheme
