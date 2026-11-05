@@ -154,7 +154,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self.ctx_len = model_config.max_model_len
         self.decode_bsz = vllm_config.scheduler_config.max_num_seqs
         self.full_batch_size = vllm_config.scheduler_config.max_num_seqs
-        self._cache_config = vllm_config.cache_config
         self.prefill_bsz = 1
         self.lora_mode = bool(vllm_config.lora_config)
         self.last_decode = False
@@ -346,6 +345,12 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             }
         return comp_ctx_lengths_prefill or None, comp_ctx_lengths_decode or None
 
+    def get_num_kv_blocks_per_batch(self):
+        if "block_table" not in self.session.input_names:
+            return None
+        block_table_idx = self.session.binding_index_map["block_table"]
+        return self.session.allowed_shapes[0][block_table_idx][1][1]
+
     def _decode_ks_from_session(self) -> list[int]:
         """Derive which K values are compiled in this QPC from session.allowed_shapes.
 
@@ -387,9 +392,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self.stages: int = stages if stages is not None else 1
         self.disagg_serving_en = kv_transfer_role is not None
         self.disagg_producer_en = kv_transfer_role == "kv_producer"
-        self.num_gpu_blocks_per_batch = cdiv(
-            self.ctx_len, self._cache_config.block_size
-        )
 
         logger.info("Loading QPC...")
         logger.info(
@@ -421,8 +423,13 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         )
 
         if "block_table" in self.session.input_names:
+            self.num_gpu_blocks_per_batch = self.get_num_kv_blocks_per_batch()
+            logger.info("Num GPU blocks per batch: %s", self.num_gpu_blocks_per_batch)
+            # Set block table to INT64_MAX
             self.decode_batch_inputs["block_table"] = np.full(
-                (self.decode_bsz, self.num_gpu_blocks_per_batch), -1, dtype=np.int64
+                (self.decode_bsz, self.num_gpu_blocks_per_batch),
+                np.iinfo(np.int64).max,
+                dtype=np.int64,
             )
             self.decode_batch_inputs["slot_id"] = np.full(
                 (self.decode_bsz,), 0, dtype=np.int64
@@ -955,7 +962,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             batch_inputs["block_table"][:num_decodes] = block_table[:num_decodes]
             batch_inputs["slot_id"][:num_decodes] = slot_id[:num_decodes]
             if num_decodes < self.decode_bsz:
-                batch_inputs["block_table"][num_decodes:] = -1
+                batch_inputs["block_table"][num_decodes:] = np.iinfo(np.int64).max
                 batch_inputs["slot_id"][num_decodes:] = 0
 
         # For spec-decode target: include num_logits_to_keep in batch_inputs
@@ -1268,13 +1275,13 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             if "block_table" in self.session.input_names:
                 decode_single_inputs["block_table"] = np.full(
                     (1, self.num_gpu_blocks_per_batch),
-                    -1,
+                    np.iinfo(np.int64).max,
                     dtype=np.int64,
                 )
                 decode_single_inputs["slot_id"] = np.zeros((1,), dtype=np.int64)
                 decode_batch_inputs["block_table"] = np.full(
                     (self.decode_bsz, self.num_gpu_blocks_per_batch),
-                    -1,
+                    np.iinfo(np.int64).max,
                     dtype=np.int64,
                 )
                 decode_batch_inputs["slot_id"] = np.zeros(
@@ -1360,10 +1367,12 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                         ).reshape(-1, 1)
                     if self.is_multimodal_model and self.default_mm_kwargs:
                         prefill_inputs.update(self.default_mm_kwargs)
-                    if self.paged_attention:
-                        prefill_inputs["block_table"] = np.arange(
-                            self.num_gpu_blocks_per_batch, dtype=np.int64
-                        ).reshape(1, self.num_gpu_blocks_per_batch)
+                    if "block_table" in self.session.input_names:
+                        prefill_inputs["block_table"] = np.full(
+                            (1, self.num_gpu_blocks_per_batch),
+                            np.iinfo(np.int64).max,
+                            dtype=np.int64,
+                        )
                         prefill_inputs["slot_id"] = np.zeros(1, dtype=np.int64)
                     KvCache_buff = []
                     for kv_shape, kv_type, _ in self.kv_cache_info:
@@ -2310,26 +2319,16 @@ def _get_qaic_compile_config(
                 if (len(cfg.get("comp_ctx_lengths_decode", [])) == 0)
                 else cfg.get("comp_ctx_lengths_decode")
             )
-    # For disaggregated serving, the KV cache block size must match the
-    # prefill chunk size actually compiled into the QPC (post-override), not
-    # just the scheduler's long_prefill_token_threshold, so KV blocks handed
-    # off between producer and consumer stay aligned. Written here, before
-    # get_kv_cache_spec() is queried, so the updated value is picked up when
-    # the KV cache is sized.
 
     if vllm_config.cache_config.enable_prefix_caching:
-        # Add num_kv_blocks through qaic_config
-        if vllm_config.kv_transfer_config:
-            kv_block_size = cfg.pop("kv_block_size")
-            num_kv_blocks = cdiv(vllm_config.model_config.max_model_len, kv_block_size)
-            vllm_config.cache_config.block_size = kv_block_size
-        else:
-            num_kv_blocks = cdiv(
-                vllm_config.model_config.max_model_len, cfg["prefill_seq_len"]
-            )
-            vllm_config.cache_config.block_size = cfg["prefill_seq_len"]
-        logger.info("Num KV Blocks: %s", num_kv_blocks)
-        qaic_config["num_kv_blocks"] = num_kv_blocks
+        logger.info(
+            "Num KV Blocks: %s",
+            (vllm_config.cache_config.num_gpu_blocks_override - 1)
+            // vllm_config.scheduler_config.max_num_seqs,
+        )
+        qaic_config["num_kv_blocks"] = (
+            vllm_config.cache_config.num_gpu_blocks_override - 1
+        ) // vllm_config.scheduler_config.max_num_seqs
         qaic_config["blocking_mode"] = "kv_paged"
     else:
         qaic_config["blocking_mode"] = ""
@@ -2366,6 +2365,8 @@ def _get_qaic_compile_config(
         del cfg["softmax"]
     if "task" in cfg:
         del cfg["task"]
+    if "kv_block_size" in cfg:
+        del cfg["kv_block_size"]
     # Add kv_cache_prefix for disagg only
     if vllm_config.kv_transfer_config:
         from .qaic_session_np import VLLM_KV_CACHE_PREFIX
