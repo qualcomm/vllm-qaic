@@ -1300,8 +1300,12 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 else self.batch_indices[:num_scheduled_tokens]
             )
             if "block_table" in self.model.session.input_names:
-                decode_block_table: np.ndarray = self.block_table[: self.num_decodes]
-                decode_slot_ids: np.ndarray = self.slot_id[: self.num_decodes]
+                # Match block-table rows to the decode inputs. A KV consumer runs
+                # every scheduled token through decode, including a request that
+                # vLLM's reorder puts in the short_extend bucket after a remote load.
+                num_decode_rows = decode_block_ids.shape[0]
+                decode_block_table: np.ndarray = self.block_table[:num_decode_rows]
+                decode_slot_ids: np.ndarray = self.slot_id[:num_decode_rows]
             else:
                 decode_block_table, decode_slot_ids = None, None
 
