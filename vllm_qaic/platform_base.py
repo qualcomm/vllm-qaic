@@ -421,11 +421,11 @@ class QaicPlatform(Platform):
             )
             assert (
                 not vllm_config.speculative_config
-                or vllm_config.speculative_config.method in ["ngram", "draft_model"]
+                or vllm_config.speculative_config.method
+                in ["ngram", "draft_model", "suffix"]
             ), (
-                "PLD and DLM based SPD Types are supported with Disaggregated "
-                "serving, other SPD types such as Turbo is not yet supported "
-                "with Disaggregated serving for QAIC backend"
+                "Only ngram, suffix, and draft_model based SPD types are "
+                "supported with Disaggregated serving for QAIC backend"
             )
             assert not (
                 vllm_config.kv_transfer_config.kv_role != "kv_producer"
