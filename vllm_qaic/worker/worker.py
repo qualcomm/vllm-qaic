@@ -633,8 +633,9 @@ class QaicWorkerPyt(QaicWorker):
 
 class QaicWorkerAoT(QaicWorker):
     def _compute_num_gpu_blocks(self) -> int:
+        # FIXME : Needs to be computed based on available memory and block size.
         if self.cache_config.enable_prefix_caching:
-            blocks_per_seq = self.cache_config.num_gpu_blocks_override or cdiv(
+            blocks_per_seq = cdiv(
                 self.model_config.max_model_len, self.cache_config.block_size
             )
             return self.scheduler_config.max_num_seqs * blocks_per_seq + 1
@@ -646,13 +647,10 @@ class QaicWorkerAoT(QaicWorker):
         self.cache_config.sliding_window = None
 
         assert num_cpu_blocks == 0
-        if self.model_config.enforce_eager:
-            # adapted from gpu_worker.py
-            self.cache_config.num_gpu_blocks = num_gpu_blocks
-            return
 
         if not self.cache_config.enable_prefix_caching:
             self.cache_config.num_gpu_blocks = num_gpu_blocks
+            # Sanity check: AOT requires exact block count; eager is flexible
             assert num_gpu_blocks == self.scheduler_config.max_num_seqs + 1
             return
         else:
