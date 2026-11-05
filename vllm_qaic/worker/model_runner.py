@@ -386,7 +386,7 @@ class QaicModelRunnerPyt(GPUModelRunner):
             profiling_dir=envs.VLLM_TORCH_QAIC_PROFILER_DIR,
             profiling_wrapper=qaic_profile.ProfileForwardWithSampling,
             model=self.model,  # type: ignore[has-type]
-            n_samples=10,
+            n_samples=1,
             skip_first_n=0,
             device_name=str(self.device),
             profiling_iter=self.profiling_iter,
