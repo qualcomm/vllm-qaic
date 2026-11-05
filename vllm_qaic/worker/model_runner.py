@@ -31,6 +31,7 @@ from vllm_qaic.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, SupportedTask
+from vllm.utils.func_utils import supports_kw
 from vllm.utils.import_utils import PlaceholderModule
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (
@@ -399,6 +400,36 @@ class QaicModelRunnerPyt(GPUModelRunner):
         return output
 
 
+class QaicPrefillBank:
+    """Guards Nixl-Pull connector from early kv$ release"""
+
+    def __init__(self, num_blocks: int) -> None:
+        self.busy = [False] * num_blocks
+        self.owner: dict[str, set[int]] = {}
+
+    def reserve(self, physical_blocks: list[int], req_id: str, drain) -> None:
+        if not physical_blocks:
+            return
+        owned_blocks = self.owner.setdefault(req_id, set())
+        for physical_block in physical_blocks:
+            if physical_block in owned_blocks:
+                continue
+            while self.busy[physical_block]:
+                drain()
+                if not self.busy[physical_block]:
+                    break
+            self.busy[physical_block] = True
+            owned_blocks.add(physical_block)
+
+    def mark_finished(self, req_ids) -> None:
+        for req_id in req_ids:
+            physical_blocks = self.owner.pop(req_id, None)
+            if physical_blocks is None:
+                continue
+            for physical_block in physical_blocks:
+                self.busy[physical_block] = False
+
+
 class QaicModelRunnerAoT(GPUModelRunner):
     """AoT (Ahead-of-Time) compiled model runner for QAIC.
 
@@ -449,6 +480,18 @@ class QaicModelRunnerAoT(GPUModelRunner):
         self.is_kv_consumer: bool = bool(
             vllm_config.kv_transfer_config
             and vllm_config.kv_transfer_config.kv_role == "kv_consumer"
+        )
+        # NIXL/Mooncake connector state; see _build_paged_torch_view_kv_caches.
+        self._paged_kv_cache_buffers: list[np.ndarray] = []
+        self._canon_by_idx: dict[int, torch.Tensor] = {}
+        self._qpc_plane_layout: list[tuple[int, int]] = []
+        self._kv_publish_pending_vids: np.ndarray | None = None
+        self.prefill_bank: QaicPrefillBank | None = None
+        self._pending_finished_sending: set[str] = set()
+        self._kv_connector_name: str | None = (
+            vllm_config.kv_transfer_config.kv_connector
+            if vllm_config.kv_transfer_config
+            else None
         )
         self.is_async_kv_producer: bool = (
             self.is_kv_producer and self.use_async_scheduling
@@ -863,6 +906,17 @@ class QaicModelRunnerAoT(GPUModelRunner):
             self.input_batch.block_table[0].get_numpy_array()[:num_reqs, 0] - 1
         )
 
+        if self.model.paged_attention:
+            # Compute block_table and slot_mapping from vLLM's block management
+            # block_table: (num_reqs, max_num_blocks_per_req)
+            self.block_table = (
+                self.input_batch.block_table[0].get_numpy_array()[:num_reqs].copy() - 1
+            )
+            block_size = self.cache_config.block_size
+            # Compute per-request slot_id:
+            num_computed = self.input_batch.num_computed_tokens_cpu[:num_reqs]
+            self.slot_id = (num_computed % block_size).astype(np.int64)
+
         torch.add(
             self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs],
             torch.from_numpy(num_scheduled_tokens),
@@ -1005,6 +1059,9 @@ class QaicModelRunnerAoT(GPUModelRunner):
         # kv_consumer runs decode on last prompt token as well
         if (num_decodes is not None and num_decodes > 0) or self.is_kv_consumer:
             self.model.complete_inf(self.model.decode_execObj_idx, False)  # type: ignore
+        if self._kv_publish_pending_vids is not None:
+            self._kv_staging_copy(self._kv_publish_pending_vids, to_canonical=True)
+            self._kv_publish_pending_vids = None
 
     def _compute_hidden_states_and_logits(
         self,
@@ -1215,6 +1272,15 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 if not self.is_kv_consumer
                 else self.batch_indices[:num_scheduled_tokens]
             )
+            if self.model.paged_attention:
+                # Same row count as decode_block_ids. A KV consumer decodes every
+                # scheduled row, including a request that vLLM's reorder puts in the
+                # short_extend bucket (last prompt token after a remote load).
+                num_decode_rows = decode_block_ids.shape[0]
+                decode_block_table: np.ndarray = self.block_table[:num_decode_rows]
+                decode_slot_ids: np.ndarray = self.slot_id[:num_decode_rows]
+            else:
+                decode_block_table, decode_slot_ids = None, None
 
             if self.max_decode_tokens > 1:
                 # mark padded positions as -1 so QAIC hardware ignores them
@@ -1251,6 +1317,15 @@ class QaicModelRunnerAoT(GPUModelRunner):
             discard_request_mask_np = self.discard_request_mask.np[
                 : self.input_batch.num_reqs
             ].copy()
+            if self.model.paged_attention:
+                prefill_block_table: np.ndarray = self.block_table[
+                    self.num_decodes : self.input_batch.num_reqs
+                ]
+                prefill_slot_ids: np.ndarray = self.slot_id[
+                    self.num_decodes : self.input_batch.num_reqs
+                ]
+            else:
+                prefill_block_table, prefill_slot_ids = None, None
 
             # mm_kwargs_list is only needed for prefill requests; skip preprocessing
             # entirely when there are no prefills or the model has no mm inputs.
@@ -1261,6 +1336,8 @@ class QaicModelRunnerAoT(GPUModelRunner):
             else:
                 mm_kwargs_list = None
 
+        if self._canon_by_idx:
+            self._kv_staging_copy(self._kv_fetch_vids(scheduler_output), to_canonical=False)
         with (
             set_forward_context(
                 None,
@@ -1325,6 +1402,13 @@ class QaicModelRunnerAoT(GPUModelRunner):
                             np.zeros((1, _pfl, _hidden_size), dtype=_hs_dtype)
                         )
                     tlm_prefill_hidden_chunks = self._tlm_prefill_hidden_chunks
+                prefill_req_ids = self.input_batch.req_ids[self.num_decodes : num_reqs]
+                prefill_reservation_ids = (
+                    prefill_block_table
+                    if prefill_block_table is not None
+                    else prefill_block_ids
+                )
+                self._reserve_prefill_bank(prefill_reservation_ids, prefill_req_ids)
                 pending_prefill_exec_queue = self.model(
                     input_ids=prefill_input_ids,
                     positions=prefill_positions,
@@ -1336,6 +1420,8 @@ class QaicModelRunnerAoT(GPUModelRunner):
                     logits=hidden_states_prefill,
                     kv_caches=self.kv_caches,
                     callback=callback,
+                    block_table=prefill_block_table,
+                    slot_id=prefill_slot_ids,
                     lora_ids=prefill_lora_ids,
                     num_prompt_tokens_prefill=num_prompt_tokens_prefill,
                     tlm_prefill_hidden_chunks=tlm_prefill_hidden_chunks,
@@ -1369,9 +1455,15 @@ class QaicModelRunnerAoT(GPUModelRunner):
                     is_prompt=False,
                     logits=hidden_states_decode,
                     callback=callback,
+                    block_table=decode_block_table,
+                    slot_id=decode_slot_ids,
                     lora_ids=decode_lora_ids,
                     dflash_decode_hidden_buf=getattr(self, "_tlm_hidden_buf", None),
                 )
+            self._kv_publish_after_forward(scheduler_output)
+        if self.prefill_bank is not None and kv_connector_output is not None:
+            self._merge_pending_finished_sending(kv_connector_output)
+            self.prefill_bank.mark_finished(kv_connector_output.finished_sending or ())
 
         hidden_states, logits = None, None
         num_decodes_executed = (
@@ -1732,6 +1824,278 @@ class QaicModelRunnerAoT(GPUModelRunner):
             time_after_load - time_before_load,
         )
 
+    def _qaic_warm_up_drafter(self) -> None:
+        # Runs outside _qaic_dummy_run so disagg decode nodes (which return
+        # early there) still compile the ngram kernel at start-up.
+        from vllm_qaic.spec_decode.ngram_warmup import (  # noqa: PLC0415
+            maybe_warm_up_ngram_proposer,
+        )
+
+        # The parent only sets self.drafter when speculative decoding is on.
+        maybe_warm_up_ngram_proposer(
+            self.speculative_config,
+            getattr(self, "drafter", None),
+            self.input_batch,
+        )
+    def _make_pa_warmup_arrays(
+        self, bsz: int
+    ) -> tuple[np.ndarray | None, np.ndarray | None]:
+        if not self.model.paged_attention:
+            return None, None
+        block_table = np.arange(
+            bsz * self.model.num_gpu_blocks_per_batch, dtype=np.int64
+        ).reshape(bsz, self.model.num_gpu_blocks_per_batch)
+        slot_ids = np.zeros(bsz, dtype=np.int64)
+        return block_table, slot_ids
+
+    def kv_connector_no_forward(
+        self,
+        scheduler_output: SchedulerOutput,
+        vllm_config: VllmConfig,
+    ) -> ModelRunnerOutput:
+        """Connector-only step without a forward pass.
+
+        Overrides the mixin version so the NIXL-Pull prefill bank is honored.
+        """
+        with (
+            set_forward_context(None, vllm_config),
+            self.maybe_get_kv_connector_output(
+                scheduler_output, wait_for_save=False
+            ) as kv_connector_output,
+        ):
+            pass
+
+        if self.prefill_bank is not None and kv_connector_output is not None:
+            self._merge_pending_finished_sending(kv_connector_output)
+            self.prefill_bank.mark_finished(kv_connector_output.finished_sending or ())
+
+        return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
+
+    def _use_torch_view_kv_connector(self) -> bool:
+        return self._kv_connector_name in (
+            "NixlConnector",
+            "NixlPullConnector",
+            "NixlPushConnector",
+            "MooncakeConnector",
+            "MooncakeStoreConnector",
+        )
+
+    def _use_prefill_bank(self) -> bool:
+        return self._kv_connector_name == "NixlConnector" and self.is_kv_producer
+
+    @staticmethod
+    def _parse_kv_layer_idx(layer_name: str) -> int:
+        if layer_name.startswith("layer_"):
+            return int(layer_name.split("_", 1)[1])
+        for part in layer_name.replace(".", "_").split("_"):
+            if part.isdigit():
+                return int(part)
+        raise ValueError(f"cannot parse KV layer index from {layer_name!r}")
+
+    @staticmethod
+    def _qpc_attention_kv_idx(name: str) -> int | None:
+        if name.startswith("past_key"):
+            return 0
+        if name.startswith("past_value"):
+            return 1
+        return None
+
+    def _collect_qpc_kv_binding_info(
+        self,
+    ) -> tuple[
+        list[tuple[str, int]],
+        dict[str, tuple[int, int]],
+        dict[str, tuple[int, ...]],
+        torch.dtype | None,
+    ]:
+        decode_buffer_map = self.model.session.decode_buff_map
+        binding_info: dict[str, tuple[int, int]] = {}
+        qpc_shapes: dict[str, tuple[int, ...]] = {}
+        torch_dtype: torch.dtype | None = None
+
+        for name, _ in decode_buffer_map:
+            kv_idx = self._qpc_attention_kv_idx(name)
+            shape, np_dtype, _ = self.model.get_io_shape_and_dtype(name)
+            qpc_shape = tuple(shape)
+            if len(qpc_shape) != 4:
+                raise NotImplementedError(
+                    "QAIC NIXL/Mooncake does not support rank-3 KV caches"
+                )
+            if kv_idx is None:
+                raise NotImplementedError(f"Unexpected QPC KV buffer: {name}")
+            if torch_dtype is None:
+                torch_dtype = torch.from_numpy(np.empty(0, dtype=np_dtype)).dtype
+            layer_idx = self._parse_kv_layer_idx(name)
+            binding_info[name] = (layer_idx, kv_idx)
+            qpc_shapes[name] = qpc_shape
+        return decode_buffer_map, binding_info, qpc_shapes, torch_dtype
+
+    def _build_paged_torch_view_kv_caches(
+        self,
+        kv_cache_config: KVCacheConfig,
+        decode_buff_map: list[tuple[str, int]],
+        binding_info: dict[str, tuple[int, int]],
+        qpc_shapes: dict[str, tuple[int, ...]],
+        torch_dtype: torch.dtype,
+    ) -> dict[str, torch.Tensor]:
+        """Return the connector-facing KV tensors, keyed by vLLM layer name.
+
+        Connector side: one block-major tensor per layer, (num_blocks, 2, heads,
+        block, dim), so K and V of a block are adjacent.
+        QPC side: one contiguous plane per K/V buffer. _kv_staging_copy moves
+        data between the two.
+        """
+        num_blocks = int(kv_cache_config.num_blocks)  # includes null block 0
+
+        # QPC side, in binding order.
+        self._paged_kv_cache_buffers = [
+            torch.zeros(qpc_shapes[name], dtype=torch_dtype).numpy()
+            for name, _ in decode_buff_map
+        ]
+        self._qpc_plane_layout = [binding_info[name] for name, _ in decode_buff_map]
+
+        # Connector side: one tensor per layer index.
+        self._canon_by_idx = {}
+        for name, (layer_idx, _) in binding_info.items():
+            if layer_idx not in self._canon_by_idx:
+                page_shape = qpc_shapes[name][1:]
+                self._canon_by_idx[layer_idx] = torch.zeros(
+                    (num_blocks, 2, *page_shape), dtype=torch_dtype
+                )
+
+        # Connector registration is keyed by vLLM layer name.
+        kv_cache_layers: dict[str, torch.Tensor] = {}
+        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+            for layer_name in kv_cache_tensor.layers:
+                layer_idx = self._parse_kv_layer_idx(layer_name)
+                if layer_idx in self._canon_by_idx:
+                    kv_cache_layers[layer_name] = self._canon_by_idx[layer_idx]
+
+        # Every physical block id refers to the same QPC buffer list.
+        self.kv_caches = [self._paged_kv_cache_buffers] * num_blocks
+        self.prefill_bank = (
+            QaicPrefillBank(2 * num_blocks + 1) if self._use_prefill_bank() else None
+        )
+        return kv_cache_layers
+
+    def _build_torch_view_kv_caches(
+        self,
+        kv_cache_config: KVCacheConfig,
+    ) -> dict[str, torch.Tensor]:
+        if not getattr(self.model, "paged_attention", False):
+            raise RuntimeError(
+                "QAIC NIXL/Mooncake torch-view KV registration requires paged "
+                "attention. Non-paged KV registration is intentionally unsupported."
+            )
+        decode_buff_map, binding_info, qpc_shapes, torch_dtype = (
+            self._collect_qpc_kv_binding_info()
+        )
+        return self._build_paged_torch_view_kv_caches(
+            kv_cache_config, decode_buff_map, binding_info, qpc_shapes, torch_dtype
+        )
+
+    def _kv_staging_copy(self, vids: np.ndarray | None, to_canonical: bool) -> None:
+        """Copy vLLM block ids between QPC planes and canonical tensors.
+
+        vLLM block id ``v`` is canonical row ``v``; the QPC row is ``v - 1``
+        (the null block 0 is not in the QPC, matching ``block_table - 1``).
+        """
+        if not self._canon_by_idx or vids is None or vids.size == 0:
+            return
+        vid_t = torch.from_numpy(np.asarray(vids, dtype=np.int64))
+        row_t = vid_t - 1
+        for plane, (layer_idx, kv_idx) in zip(
+            self._paged_kv_cache_buffers, self._qpc_plane_layout, strict=True
+        ):
+            canon = self._canon_by_idx[layer_idx]
+            qpc = torch.from_numpy(plane)
+            if to_canonical:
+                canon[vid_t, kv_idx] = qpc[row_t]
+            else:
+                qpc[row_t] = canon[vid_t, kv_idx]
+
+    def _kv_publish_vids(self, scheduler_output: SchedulerOutput) -> np.ndarray:
+        """Block ids written by this step (blocks covering the newly computed tokens)."""
+        bs = self.cache_config.block_size
+        block_table = self.input_batch.block_table[0].get_numpy_array()
+        chunks = []
+        for req_id, n in scheduler_output.num_scheduled_tokens.items():
+            idx = self.input_batch.req_id_to_index.get(req_id)
+            if idx is None or n <= 0:
+                continue
+            start = int(self.input_batch.num_computed_tokens_cpu[idx])
+            chunks.append(block_table[idx, start // bs : (start + n - 1) // bs + 1])
+        if not chunks:
+            return np.empty(0, dtype=np.int64)
+        vids = np.concatenate(chunks)
+        return np.unique(vids[vids > 0]).astype(np.int64)
+
+    def _kv_fetch_vids(self, scheduler_output: SchedulerOutput) -> np.ndarray:
+        """Block ids of newly scheduled requests that already have computed tokens.
+
+        These blocks were loaded by the connector (remote KV) or are local
+        prefix-cache hits; in both cases the canonical copy is current.
+        """
+        bs = self.cache_config.block_size
+        ids: list[int] = []
+        for new_req in scheduler_output.scheduled_new_reqs:
+            nct = int(new_req.num_computed_tokens)
+            if nct <= 0 or not new_req.block_ids:
+                continue
+            ids.extend(new_req.block_ids[0][: -(-nct // bs)])
+        vids = np.asarray(ids, dtype=np.int64)
+        return np.unique(vids[vids > 0])
+
+    def _kv_publish_after_forward(self, scheduler_output: SchedulerOutput) -> None:
+        if not self._canon_by_idx:
+            return
+        vids = self._kv_publish_vids(scheduler_output)
+        if self.use_async_scheduling:
+            # QPC completion is deferred; publish in complete_all_inf().
+            self._kv_publish_pending_vids = vids
+        else:
+            # Sync mode: the QPC calls above have already completed.
+            self._kv_staging_copy(vids, to_canonical=True)
+
+    def _reserve_prefill_bank(self, block_ids: np.ndarray, req_ids: list[str]) -> None:
+        if not self._use_prefill_bank() or block_ids.size == 0:
+            return
+        if len(req_ids) != block_ids.shape[0]:
+            raise RuntimeError(
+                "QAIC prefill bank needs one request id per prefill slot: "
+                f"num_req_ids={len(req_ids)}, num_slots={block_ids.shape[0]}"
+            )
+        # Paged mode only: the builder rejects non-paged NIXL/Mooncake configs.
+        for row, req_id in zip(block_ids, req_ids, strict=True):
+            physical_blocks = (np.unique(row[row >= 0]) + 1).astype(np.int64)
+            if self.prefill_bank is not None:
+                self.prefill_bank.reserve(
+                    physical_blocks.tolist(), req_id, self._drain_prefill_bank
+                )
+
+    def _drain_prefill_bank(self) -> None:
+        if (
+            self.prefill_bank is None
+            or not self.is_kv_producer
+            or not has_kv_transfer_group()
+        ):
+            return
+        finished_sending, _ = get_kv_transfer_group().get_finished(set())
+        if not finished_sending:
+            return
+        self.prefill_bank.mark_finished(finished_sending)
+        self._pending_finished_sending.update(finished_sending)
+
+    def _merge_pending_finished_sending(
+        self, kv_connector_output: KVConnectorOutput | None
+    ) -> None:
+        if kv_connector_output is None or not self._pending_finished_sending:
+            return
+        if kv_connector_output.finished_sending is None:
+            kv_connector_output.finished_sending = set()
+        kv_connector_output.finished_sending.update(self._pending_finished_sending)
+        self._pending_finished_sending.clear()
+
     def _qaic_dummy_run(self) -> None:
         if self.is_pooling_model:
             # TODO: check if pooler dummy run can be added
@@ -1753,6 +2117,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
         else:
             decode_positions = np.array([0] * decode_num_tokens, dtype=np.int64)
         decode_block_ids = np.arange(decode_bsz, dtype=np.int64)
+        decode_block_table, decode_slot_ids = self._make_pa_warmup_arrays(decode_bsz)
         decode_lora_ids = None
         if self.lora_config:
             decode_lora_ids = np.arange(decode_bsz, dtype=np.int64)
@@ -1773,6 +2138,8 @@ class QaicModelRunnerAoT(GPUModelRunner):
             logits=decode_logits,
             mm_kwargs_list=decode_mm_kwargs_list,
             dflash_decode_hidden_buf=getattr(self, "_tlm_hidden_buf", None),
+            block_table=decode_block_table,
+            slot_id=decode_slot_ids,
         )
 
         # Prefill
@@ -1791,6 +2158,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
         prefill_cum_sum = np.array(
             [prefill_seq_len] * prefill_bsz, dtype=np.int64
         ).cumsum()
+        prefill_block_table, prefill_slot_ids = self._make_pa_warmup_arrays(prefill_bsz)
         prefill_lora_ids = None
         if self.lora_config:
             prefill_lora_ids = np.arange(prefill_bsz, dtype=np.int64)
@@ -1808,6 +2176,8 @@ class QaicModelRunnerAoT(GPUModelRunner):
             prefill_cum_sum=prefill_cum_sum,
             mm_kwargs_list=mm_kwargs_list,
             logits=prefill_logits,
+            block_table=prefill_block_table,
+            slot_id=prefill_slot_ids,
         )
 
         if self.use_async_scheduling:
@@ -1946,7 +2316,11 @@ class QaicModelRunnerAoT(GPUModelRunner):
         """
         self.kv_cache_config = kv_cache_config
         if has_kv_transfer_group():
-            get_kv_transfer_group().register_kv_caches(self.kv_caches)
+            if self._use_torch_view_kv_connector():
+                kv_cache_layers = self._build_torch_view_kv_caches(kv_cache_config)
+                get_kv_transfer_group().register_kv_caches(kv_cache_layers)
+            else:
+                get_kv_transfer_group().register_kv_caches(self.kv_caches)
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """
@@ -1990,7 +2364,11 @@ class QaicModelRunnerAoT(GPUModelRunner):
             **kwargs,
         )
         if wait_for_save:
-            kv_connector.wait_for_save(**kwargs)
+            # Older connectors take no kwargs; pass them only when supported.
+            if kwargs and supports_kw(kv_connector.wait_for_save, "kv_cache_info"):
+                kv_connector.wait_for_save(**kwargs)
+            else:
+                kv_connector.wait_for_save()
         output.finished_sending, output.finished_recving = kv_connector.get_finished(
             finished_req_ids
         )

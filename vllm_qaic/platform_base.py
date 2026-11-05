@@ -86,6 +86,11 @@ class QaicPlatform(Platform):
     def get_supported_quantization(cls):
         return cls.supported_quantization
 
+    @classmethod
+    def discover_numa_topology(cls):
+        # vLLM's NIXL worker calls this; QAIC has no NUMA topology to report.
+        return []
+
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
         # check_and_update_config restricts native BF16 to AI200 configurations.
@@ -315,16 +320,30 @@ class QaicPlatform(Platform):
                 cache_config.enable_prefix_caching = False
             else:
                 if cache_config.enable_prefix_caching:
-                    cache_config.enable_prefix_caching = False
                     cache_config.mamba_block_size = (
                         model_config.max_model_len
                     )  # reset to "no-op" default
                     cache_config.mamba_cache_mode = "none"  # reset to disabled
-                    logger.warning_once(
-                        "Prefix caching is not yet supported on v1 Engine. "
-                        "Will automatically disable it."
-                    )
-                cache_config.block_size = model_config.max_model_len  # ctx_len
+                    if vllm_config.kv_transfer_config:
+                        cache_config.block_size = override_qaic_config.get(
+                            "kv_block_size"
+                        )
+                    else:
+                        if override_qaic_config.get("prefill_seq_len") is not None:
+                            cache_config.block_size = override_qaic_config.get(
+                                "prefill_seq_len"
+                            )
+                        else:
+                            # If prefill_seq_len is not set, it defaults to 128 @qaic.py
+                            cache_config.block_size = min(
+                                128, model_config.max_model_len
+                            )
+                elif (
+                    model_config.is_multimodal_model and model_config.is_encoder_decoder
+                ):
+                    cache_config.block_size = 100000
+                else:
+                    cache_config.block_size = model_config.max_model_len  # ctx_len
 
         if cls.is_aot:
             if model_config.hf_config.model_type == "whisper":
@@ -440,13 +459,6 @@ class QaicPlatform(Platform):
                 "PLD and DLM based SPD Types are supported with Disaggregated "
                 "serving, other SPD types such as Turbo is not yet supported "
                 "with Disaggregated serving for QAIC backend"
-            )
-            assert not (
-                vllm_config.kv_transfer_config.kv_role != "kv_producer"
-                and vllm_config.cache_config.enable_prefix_caching
-            ), (
-                "Prefix caching with KV-role 'kv_consumer' or 'kv_both' not "
-                "yet supported for QAIC backend"
             )
             if (
                 on_device_sampling_en

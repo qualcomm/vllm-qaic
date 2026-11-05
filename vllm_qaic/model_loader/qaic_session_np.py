@@ -686,9 +686,16 @@ class QAICInferenceSession:
                 "Found None KV buffer to load KV caches"
             )
             batch_index = int(inputs["batch_index"].item())
+            # Paged KV buffers are whole per-layer planes (one row per block), so
+            # they are not indexed by batch slot.
+            kv_slice = (
+                0
+                if self._has_full_paged_kv_buffers(kv_cache_buffers)
+                else batch_index % self.full_batch_size
+            )
             self.set_data_for_kv_handoff(
                 kv_cache_buffers,
-                [("batch_index", batch_index % self.full_batch_size), ("ctx_start", 0)],
+                [("batch_index", kv_slice), ("ctx_start", 0)],
                 exec_obj_idx,
                 self.prefill_buff_map[:-1],
             )
@@ -710,6 +717,14 @@ class QAICInferenceSession:
         ), "Failed to enqueue"
 
         return exec_obj_idx
+
+    def _has_full_paged_kv_buffers(self, kv_cache_buffers) -> bool:
+        if not isinstance(kv_cache_buffers, list):
+            return False
+        return any(
+            isinstance(buffer, np.ndarray) and buffer.ndim > 0 and buffer.shape[0] > 1
+            for buffer in kv_cache_buffers
+        )
 
     def complete_inf(self, index: int, is_prefill: bool):
         if self.execObj[index].waitForCompletion() != qaicrt.QStatus.QS_SUCCESS:
