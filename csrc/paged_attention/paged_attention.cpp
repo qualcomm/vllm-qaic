@@ -517,11 +517,96 @@ struct CacheStrides {
   int32_t token;
 };
 
+// Launcher argument slots of the attention entry points. Every tensor comes
+// before any scalar, and the order must match the launches in
+// vllm_qaic/_custom_ops.py. CachedArgs is the layout of the kernels that read
+// only the cache; DirectArgs adds the new K/V rows and their slots, which the
+// fused-store kernels write into the cache first.
+struct CachedArgs {
+  enum : int32_t {
+    kQuery,
+    kKeyCache,
+    kValueCache,
+    kOutput,
+    kBlockTable,
+    kQueryStartLoc,
+    kSeqLens,
+    kSinks,
+    kNumReqs,
+    kNumTokens,
+    kNumHeads,
+    kNumKvHeads,
+    kHeadDim,
+    kBlockSize,
+    kMaxBlocksPerSeq,
+    kCausal,
+    kScale,
+    kCacheStrides,  // block, head and token strides, in elements
+    kHasSinks = kCacheStrides + 3,
+    kWindowLeft,
+  };
+};
+
+struct DirectArgs {
+  enum : int32_t {
+    kQuery,
+    kKey,
+    kValue,
+    kKeyCache,
+    kValueCache,
+    kSlotMapping,
+    kOutput,
+    kBlockTable,
+    kQueryStartLoc,
+    kSeqLens,
+    kSinks,
+    kNumReqs,
+    kNumTokens,
+    kNumHeads,
+    kNumKvHeads,
+    kHeadDim,
+    kBlockSize,
+    kMaxBlocksPerSeq,
+    kCausal,
+    kScale,
+    kCacheStrides,  // block, head and token strides, in elements
+    kHasSinks = kCacheStrides + 3,
+    kWindowLeft,
+  };
+};
+
 static inline CacheStrides read_cache_strides(const AicJitPointerArray* ptrs,
                                               int32_t start) {
   return {*(const int32_t*)ptrs->pointers[start],
           *(const int32_t*)ptrs->pointers[start + 1],
           *(const int32_t*)ptrs->pointers[start + 2]};
+}
+
+// Attention sinks (one fp32 logit per query head, joining the softmax
+// denominator with no value row) and a causal sliding window. A key at kv_pos
+// is visible to the query at q_pos iff q_pos - kv_pos <= window_left; a
+// negative window_left disables the window.
+struct SinkWindowParams {
+  const float* sinks;
+  int32_t window_left;
+};
+
+// The launcher always passes a sinks tensor; has_sinks says whether it holds
+// real logits or is a placeholder.
+static inline SinkWindowParams read_sink_window_params(
+    const AicJitPointerArray* ptrs, int32_t sinks_index,
+    int32_t has_sinks_index, int32_t window_left_index) {
+  const int32_t has_sinks = *(const int32_t*)ptrs->pointers[has_sinks_index];
+  return {has_sinks != 0 ? (const float*)ptrs->pointers[sinks_index] : NULL,
+          *(const int32_t*)ptrs->pointers[window_left_index]};
+}
+
+static inline int32_t window_kv_begin(int32_t q_pos, int32_t window_left) {
+  if (window_left < 0) {
+    return 0;
+  }
+  const int32_t begin = q_pos - window_left;
+  return begin > 0 ? begin : 0;
 }
 
 static inline int64_t cache_offset(int32_t block_id, int32_t kv_head,
@@ -991,6 +1076,27 @@ static inline void store_normalized_hvx(float16* output, const float* acc,
   }
 }
 
+// Reciprocal softmax denominator for a row whose online state is (row_max,
+// row_sum) and whose accumulator is scaled relative to row_max. A sink adds
+// exp(sink - row_max) to the denominator. When the sink dominates, rebase onto
+// it instead so the exponent never overflows.
+static inline float softmax_inv_denom(float row_max, float row_sum,
+                                      const float* sinks, int32_t head) {
+  if (sinks == NULL) {
+    return row_sum == 0.0f ? 0.0f : 1.0f / row_sum;
+  }
+  if (row_max == -FLT_MAX) {
+    // No visible keys: the accumulator is zero, so the output is zero.
+    return 0.0f;
+  }
+  const float sink = sinks[head];
+  if (sink <= row_max) {
+    return 1.0f / (row_sum + expf(sink - row_max));
+  }
+  const float rescale = expf(row_max - sink);
+  return rescale / (row_sum * rescale + 1.0f);
+}
+
 static inline int32_t hmx_prepare_lhs_crouton_16b(
     uint32_t thread_id, int64_t hmx_thread_id, float16* lhs_rm,
     float16* lhs_crouton, int32_t* shared_status, int32_t m, int32_t k) {
@@ -1240,7 +1346,8 @@ static inline int32_t paged_attention_hmx_prefill(
     const int32_t* query_start_loc, const int32_t* seq_lens, int32_t num_reqs,
     int32_t num_tokens, int32_t num_heads, int32_t num_kv_heads,
     int32_t head_dim, int32_t block_size, int32_t max_blocks_per_seq,
-    bool causal, float scale, const CacheStrides& cache_strides) {
+    bool causal, float scale, const CacheStrides& cache_strides,
+    const SinkWindowParams& sink_window) {
   if (head_dim <= 0 || num_kv_heads <= 0 || num_heads % num_kv_heads != 0) {
     return JIT_DEV_ERROR_INVALID_PARAMETER;
   }
@@ -1366,6 +1473,10 @@ static inline int32_t paged_attention_hmx_prefill(
                   : seq_len;
         }
         const int32_t kv_end = kv_ends[pair_count - 1];
+        // The first query row of the task has the earliest window start.
+        const int32_t kv_first = min_i32(
+            window_kv_begin(prefix_len + q_blocks[0], sink_window.window_left),
+            kv_end);
 
         float16* q_rm_buffers[2] = {scratch.q_rm, pair_q_rm};
         float16* p_rm_buffers[2] = {scratch.p_rm, pair_p_rm};
@@ -1377,18 +1488,18 @@ static inline int32_t paged_attention_hmx_prefill(
 
         if (is_hmx_thread) {
           *scratch.hmx_status = JIT_DEV_STATUS_SUCCESS;
-          if (kv_end > 0) {
+          if (kv_end > kv_first) {
             const int32_t first_kv_rows =
-                kv_end < kv_block_tile ? kv_end : kv_block_tile;
+                min_i32(kv_end - kv_first, kv_block_tile);
             *scratch.hmx_status = submit_prefill_v_dma(
                 thread_id, key, key_cache, scratch.k_rhs_rm[0], block_table,
-                req, req_q_start, prefix_len, kv_head, 0, first_kv_rows,
+                req, req_q_start, prefix_len, kv_head, kv_first, first_kv_rows,
                 num_kv_heads, block_size, head_dim, max_blocks_per_seq,
                 cache_strides, k_dma_handles[0], &k_dma_count[0]);
             if (*scratch.hmx_status == JIT_DEV_STATUS_SUCCESS) {
               *scratch.hmx_status = submit_prefill_v_dma(
                   thread_id, value, value_cache, scratch.v_rhs_rm[0],
-                  block_table, req, req_q_start, prefix_len, kv_head, 0,
+                  block_table, req, req_q_start, prefix_len, kv_head, kv_first,
                   first_kv_rows, num_kv_heads, block_size, head_dim,
                   max_blocks_per_seq, cache_strides, v_dma_handles[0],
                   &v_dma_count[0]);
@@ -1435,12 +1546,12 @@ static inline int32_t paged_attention_hmx_prefill(
           }
         }
 
-        for (int32_t kv_start = 0; kv_start < kv_end;
+        for (int32_t kv_start = kv_first; kv_start < kv_end;
              kv_start += kv_block_tile) {
           const int32_t kv_rows = (kv_end - kv_start) < kv_block_tile
                                       ? (kv_end - kv_start)
                                       : kv_block_tile;
-          const int32_t kv_buf = ((kv_start / kv_block_tile) & 1);
+          const int32_t kv_buf = (((kv_start - kv_first) / kv_block_tile) & 1);
 
           if (is_hmx_thread) {
             int32_t dma_status =
@@ -1495,10 +1606,16 @@ static inline int32_t paged_attention_hmx_prefill(
                   kv_limit = seq_len;
                 }
 
-                int32_t valid_count = kv_limit - kv_start;
-                if (valid_count > kv_rows) {
-                  valid_count = kv_rows;
+                int32_t valid_end = kv_limit - kv_start;
+                if (valid_end > kv_rows) {
+                  valid_end = kv_rows;
                 }
+                int32_t valid_begin =
+                    window_kv_begin(q_pos, sink_window.window_left) - kv_start;
+                if (valid_begin < 0) {
+                  valid_begin = 0;
+                }
+                const int32_t valid_count = valid_end - valid_begin;
                 float16* p_row = p_rm_buffers[pair] + r * kv_rows;
                 if (valid_count <= 0) {
                   zero_f16_row_hvx(p_row, kv_rows);
@@ -1509,8 +1626,8 @@ static inline int32_t paged_attention_hmx_prefill(
                 float block_max = -FLT_MAX;
                 float block_sum = 0.0f;
                 online_softmax_block_hvx(scratch.s_rm + r * kv_rows, p_row,
-                                         kv_rows, 0, valid_count, scale,
-                                         &block_max, &block_sum);
+                                         kv_rows, valid_begin, valid_count,
+                                         scale, &block_max, &block_sum);
                 const float new_max = block_max > old_max ? block_max : old_max;
                 float prev_rescale = 1.0f;
                 float curr_rescale = 1.0f;
@@ -1527,7 +1644,8 @@ static inline int32_t paged_attention_hmx_prefill(
                                         head_dim, prev_rescale);
                 }
                 if (curr_rescale != 1.0f) {
-                  scale_f16_row_hvx(p_row, valid_count, curr_rescale);
+                  scale_f16_row_hvx(p_row + valid_begin, valid_count,
+                                    curr_rescale);
                 }
 
                 row_max_buffers[pair][r] = new_max;
@@ -1605,8 +1723,9 @@ static inline int32_t paged_attention_hmx_prefill(
               const int32_t head = kv_head * gqa + h_in_group;
               float16* out_row =
                   output + flat_q_offset(token, head, 0, num_heads, head_dim);
-              const float denom = row_sum_buffers[pair][r];
-              const float inv_denom = denom == 0.0f ? 0.0f : 1.0f / denom;
+              const float inv_denom = softmax_inv_denom(
+                  row_max_buffers[pair][r], row_sum_buffers[pair][r],
+                  sink_window.sinks, head);
               store_normalized_hvx(out_row, acc_buffers[pair] + r * head_dim,
                                    head_dim, inv_denom);
             }
@@ -1634,7 +1753,7 @@ static inline int32_t paged_attention_hmx_decode(
     const int32_t* query_start_loc, const int32_t* seq_lens, int32_t num_reqs,
     int32_t num_heads, int32_t num_kv_heads, int32_t head_dim,
     int32_t block_size, int32_t max_blocks_per_seq, bool causal, float scale,
-    const CacheStrides& cache_strides) {
+    const CacheStrides& cache_strides, const SinkWindowParams& sink_window) {
   (void)causal;
   if (head_dim <= 0 || num_kv_heads <= 0 || num_heads % num_kv_heads != 0) {
     return JIT_DEV_ERROR_INVALID_PARAMETER;
@@ -1712,10 +1831,22 @@ static inline int32_t paged_attention_hmx_decode(
       const int32_t m = gqa * req_tile;
       const int32_t n_cols = req_tile * kv_block_tile;
 
+      // Start the KV sweep at the earliest window start of any request in the
+      // tile; later-starting requests mask their leading columns. A tile of
+      // empty requests has no window start and sweeps from 0, which is a no-op
+      // because max_seq_len is 0.
       int32_t max_seq_len = 0;
+      int32_t kv_first = INT32_MAX;
       for (int32_t rb = 0; rb < req_tile; ++rb) {
         const int32_t seq_len = seq_lens[req_base + rb];
         max_seq_len = seq_len > max_seq_len ? seq_len : max_seq_len;
+        if (seq_len > 0) {
+          kv_first = min_i32(
+              kv_first, window_kv_begin(seq_len - 1, sink_window.window_left));
+        }
+      }
+      if (kv_first == INT32_MAX) {
+        kv_first = 0;
       }
 
       if (!is_hmx_thread) {
@@ -1760,18 +1891,18 @@ static inline int32_t paged_attention_hmx_decode(
 
       if (is_hmx_thread) {
         *scratch.hmx_status = JIT_DEV_STATUS_SUCCESS;
-        if (max_seq_len > 0) {
+        if (max_seq_len > kv_first) {
           *scratch.hmx_status = submit_decode_v_dma(
               thread_id, key_cache, scratch.k_rhs_rm[0], block_table, req_base,
-              req_tile, kv_head, 0, kv_block_tile, n_cols, seq_lens, block_size,
-              head_dim, max_blocks_per_seq, cache_strides, k_dma_handles[0],
-              &k_dma_count[0]);
+              req_tile, kv_head, kv_first, kv_block_tile, n_cols, seq_lens,
+              block_size, head_dim, max_blocks_per_seq, cache_strides,
+              k_dma_handles[0], &k_dma_count[0]);
           if (*scratch.hmx_status == JIT_DEV_STATUS_SUCCESS) {
             *scratch.hmx_status = submit_decode_v_dma(
                 thread_id, value_cache, scratch.v_rhs_rm[0], block_table,
-                req_base, req_tile, kv_head, 0, kv_block_tile, n_cols, seq_lens,
-                block_size, head_dim, max_blocks_per_seq, cache_strides,
-                v_dma_handles[0], &v_dma_count[0]);
+                req_base, req_tile, kv_head, kv_first, kv_block_tile, n_cols,
+                seq_lens, block_size, head_dim, max_blocks_per_seq,
+                cache_strides, v_dma_handles[0], &v_dma_count[0]);
           }
         }
       }
@@ -1788,9 +1919,9 @@ static inline int32_t paged_attention_hmx_decode(
         return ret;
       }
 
-      for (int32_t kv_start = 0; kv_start < max_seq_len;
+      for (int32_t kv_start = kv_first; kv_start < max_seq_len;
            kv_start += kv_block_tile) {
-        const int32_t kv_buf = ((kv_start / kv_block_tile) & 1);
+        const int32_t kv_buf = (((kv_start - kv_first) / kv_block_tile) & 1);
 
         if (is_hmx_thread) {
           int32_t dma_status =
@@ -1831,11 +1962,18 @@ static inline int32_t paged_attention_hmx_decode(
             const int32_t req = req_base + req_lane;
             const int32_t seq_len = seq_lens[req];
 
-            int32_t valid_count = seq_len - kv_start;
-            if (valid_count > kv_block_tile) {
-              valid_count = kv_block_tile;
+            int32_t valid_end = seq_len - kv_start;
+            if (valid_end > kv_block_tile) {
+              valid_end = kv_block_tile;
             }
-            const int32_t valid_begin = req_lane * kv_block_tile;
+            int32_t local_begin =
+                window_kv_begin(seq_len - 1, sink_window.window_left) -
+                kv_start;
+            if (local_begin < 0) {
+              local_begin = 0;
+            }
+            const int32_t valid_count = valid_end - local_begin;
+            const int32_t valid_begin = req_lane * kv_block_tile + local_begin;
             if (valid_count <= 0) {
               zero_f16_row_hvx(scratch.p_rm + r * n_cols, n_cols);
               continue;
@@ -1925,8 +2063,8 @@ static inline int32_t paged_attention_hmx_decode(
           const int32_t head = kv_head * gqa + h;
           float16* out_row =
               output + flat_q_offset(token, head, 0, num_heads, head_dim);
-          const float denom = scratch.row_sum[r];
-          const float inv_denom = denom == 0.0f ? 0.0f : 1.0f / denom;
+          const float inv_denom = softmax_inv_denom(
+              scratch.row_max[r], scratch.row_sum[r], sink_window.sinks, head);
           store_normalized_hvx(out_row, scratch.out_acc + r * head_dim,
                                head_dim, inv_denom);
         }
@@ -1987,22 +2125,32 @@ QAIC_KERNEL_API int32_t multinsp_multithreaded_paged_attention_store(
 
 QAIC_KERNEL_API int32_t multinsp_multithreaded_paged_attention_hmx_prefill(
     const AicJitEntryPointConfig* cfg, const AicJitPointerArray* ptrs) {
-  const float16* query = (const float16*)ptrs->pointers[0];
-  float16* key_cache = (float16*)ptrs->pointers[1];
-  float16* value_cache = (float16*)ptrs->pointers[2];
-  float16* output = (float16*)ptrs->pointers[3];
-  const int32_t* block_table = (const int32_t*)ptrs->pointers[4];
-  const int32_t* query_start_loc = (const int32_t*)ptrs->pointers[5];
-  const int32_t* seq_lens = (const int32_t*)ptrs->pointers[6];
-  const int32_t num_reqs = *(const int32_t*)ptrs->pointers[7];
-  const int32_t num_tokens = *(const int32_t*)ptrs->pointers[8];
-  const int32_t num_heads = *(const int32_t*)ptrs->pointers[9];
-  const int32_t num_kv_heads = *(const int32_t*)ptrs->pointers[10];
-  const int32_t head_dim = *(const int32_t*)ptrs->pointers[11];
-  const int32_t block_size = *(const int32_t*)ptrs->pointers[12];
-  const int32_t max_blocks_per_seq = *(const int32_t*)ptrs->pointers[13];
-  const int32_t causal = *(const int32_t*)ptrs->pointers[14];
-  const float scale = *(const float*)ptrs->pointers[15];
+  const float16* query = (const float16*)ptrs->pointers[CachedArgs::kQuery];
+  float16* key_cache = (float16*)ptrs->pointers[CachedArgs::kKeyCache];
+  float16* value_cache = (float16*)ptrs->pointers[CachedArgs::kValueCache];
+  float16* output = (float16*)ptrs->pointers[CachedArgs::kOutput];
+  const int32_t* block_table =
+      (const int32_t*)ptrs->pointers[CachedArgs::kBlockTable];
+  const int32_t* query_start_loc =
+      (const int32_t*)ptrs->pointers[CachedArgs::kQueryStartLoc];
+  const int32_t* seq_lens =
+      (const int32_t*)ptrs->pointers[CachedArgs::kSeqLens];
+  const int32_t num_reqs =
+      *(const int32_t*)ptrs->pointers[CachedArgs::kNumReqs];
+  const int32_t num_tokens =
+      *(const int32_t*)ptrs->pointers[CachedArgs::kNumTokens];
+  const int32_t num_heads =
+      *(const int32_t*)ptrs->pointers[CachedArgs::kNumHeads];
+  const int32_t num_kv_heads =
+      *(const int32_t*)ptrs->pointers[CachedArgs::kNumKvHeads];
+  const int32_t head_dim =
+      *(const int32_t*)ptrs->pointers[CachedArgs::kHeadDim];
+  const int32_t block_size =
+      *(const int32_t*)ptrs->pointers[CachedArgs::kBlockSize];
+  const int32_t max_blocks_per_seq =
+      *(const int32_t*)ptrs->pointers[CachedArgs::kMaxBlocksPerSeq];
+  const int32_t causal = *(const int32_t*)ptrs->pointers[CachedArgs::kCausal];
+  const float scale = *(const float*)ptrs->pointers[CachedArgs::kScale];
 
   if (all_requests_are_decode(query_start_loc, num_reqs) ||
       num_tokens <= num_reqs) {
@@ -2013,31 +2161,44 @@ QAIC_KERNEL_API int32_t multinsp_multithreaded_paged_attention_hmx_prefill(
       cfg, query, NULL, NULL, key_cache, value_cache, NULL, output, block_table,
       query_start_loc, seq_lens, num_reqs, num_tokens, num_heads, num_kv_heads,
       head_dim, block_size, max_blocks_per_seq, causal != 0, scale,
-      read_cache_strides(ptrs, 16));
+      read_cache_strides(ptrs, CachedArgs::kCacheStrides),
+      read_sink_window_params(ptrs, CachedArgs::kSinks, CachedArgs::kHasSinks,
+                              CachedArgs::kWindowLeft));
 }
 
 QAIC_KERNEL_API int32_t
 multinsp_multithreaded_paged_attention_hmx_prefill_direct(
     const AicJitEntryPointConfig* cfg, const AicJitPointerArray* ptrs) {
-  const float16* query = (const float16*)ptrs->pointers[0];
-  const float16* key = (const float16*)ptrs->pointers[1];
-  const float16* value = (const float16*)ptrs->pointers[2];
-  float16* key_cache = (float16*)ptrs->pointers[3];
-  float16* value_cache = (float16*)ptrs->pointers[4];
-  const int32_t* slot_mapping = (const int32_t*)ptrs->pointers[5];
-  float16* output = (float16*)ptrs->pointers[6];
-  const int32_t* block_table = (const int32_t*)ptrs->pointers[7];
-  const int32_t* query_start_loc = (const int32_t*)ptrs->pointers[8];
-  const int32_t* seq_lens = (const int32_t*)ptrs->pointers[9];
-  const int32_t num_reqs = *(const int32_t*)ptrs->pointers[10];
-  const int32_t num_tokens = *(const int32_t*)ptrs->pointers[11];
-  const int32_t num_heads = *(const int32_t*)ptrs->pointers[12];
-  const int32_t num_kv_heads = *(const int32_t*)ptrs->pointers[13];
-  const int32_t head_dim = *(const int32_t*)ptrs->pointers[14];
-  const int32_t block_size = *(const int32_t*)ptrs->pointers[15];
-  const int32_t max_blocks_per_seq = *(const int32_t*)ptrs->pointers[16];
-  const int32_t causal = *(const int32_t*)ptrs->pointers[17];
-  const float scale = *(const float*)ptrs->pointers[18];
+  const float16* query = (const float16*)ptrs->pointers[DirectArgs::kQuery];
+  const float16* key = (const float16*)ptrs->pointers[DirectArgs::kKey];
+  const float16* value = (const float16*)ptrs->pointers[DirectArgs::kValue];
+  float16* key_cache = (float16*)ptrs->pointers[DirectArgs::kKeyCache];
+  float16* value_cache = (float16*)ptrs->pointers[DirectArgs::kValueCache];
+  const int32_t* slot_mapping =
+      (const int32_t*)ptrs->pointers[DirectArgs::kSlotMapping];
+  float16* output = (float16*)ptrs->pointers[DirectArgs::kOutput];
+  const int32_t* block_table =
+      (const int32_t*)ptrs->pointers[DirectArgs::kBlockTable];
+  const int32_t* query_start_loc =
+      (const int32_t*)ptrs->pointers[DirectArgs::kQueryStartLoc];
+  const int32_t* seq_lens =
+      (const int32_t*)ptrs->pointers[DirectArgs::kSeqLens];
+  const int32_t num_reqs =
+      *(const int32_t*)ptrs->pointers[DirectArgs::kNumReqs];
+  const int32_t num_tokens =
+      *(const int32_t*)ptrs->pointers[DirectArgs::kNumTokens];
+  const int32_t num_heads =
+      *(const int32_t*)ptrs->pointers[DirectArgs::kNumHeads];
+  const int32_t num_kv_heads =
+      *(const int32_t*)ptrs->pointers[DirectArgs::kNumKvHeads];
+  const int32_t head_dim =
+      *(const int32_t*)ptrs->pointers[DirectArgs::kHeadDim];
+  const int32_t block_size =
+      *(const int32_t*)ptrs->pointers[DirectArgs::kBlockSize];
+  const int32_t max_blocks_per_seq =
+      *(const int32_t*)ptrs->pointers[DirectArgs::kMaxBlocksPerSeq];
+  const int32_t causal = *(const int32_t*)ptrs->pointers[DirectArgs::kCausal];
+  const float scale = *(const float*)ptrs->pointers[DirectArgs::kScale];
 
   if (all_requests_are_decode(query_start_loc, num_reqs) ||
       num_tokens <= num_reqs) {
@@ -2048,30 +2209,43 @@ multinsp_multithreaded_paged_attention_hmx_prefill_direct(
       cfg, query, key, value, key_cache, value_cache, slot_mapping, output,
       block_table, query_start_loc, seq_lens, num_reqs, num_tokens, num_heads,
       num_kv_heads, head_dim, block_size, max_blocks_per_seq, causal != 0,
-      scale, read_cache_strides(ptrs, 19));
+      scale, read_cache_strides(ptrs, DirectArgs::kCacheStrides),
+      read_sink_window_params(ptrs, DirectArgs::kSinks, DirectArgs::kHasSinks,
+                              DirectArgs::kWindowLeft));
 }
 
 QAIC_KERNEL_API int32_t multinsp_multithreaded_paged_attention_hmx_decode(
     const AicJitEntryPointConfig* cfg, const AicJitPointerArray* ptrs) {
-  const float16* query = (const float16*)ptrs->pointers[0];
-  const float16* key = (const float16*)ptrs->pointers[1];
-  const float16* value = (const float16*)ptrs->pointers[2];
-  float16* key_cache = (float16*)ptrs->pointers[3];
-  float16* value_cache = (float16*)ptrs->pointers[4];
-  const int32_t* slot_mapping = (const int32_t*)ptrs->pointers[5];
-  float16* output = (float16*)ptrs->pointers[6];
-  const int32_t* block_table = (const int32_t*)ptrs->pointers[7];
-  const int32_t* query_start_loc = (const int32_t*)ptrs->pointers[8];
-  const int32_t* seq_lens = (const int32_t*)ptrs->pointers[9];
-  const int32_t num_reqs = *(const int32_t*)ptrs->pointers[10];
-  const int32_t num_tokens = *(const int32_t*)ptrs->pointers[11];
-  const int32_t num_heads = *(const int32_t*)ptrs->pointers[12];
-  const int32_t num_kv_heads = *(const int32_t*)ptrs->pointers[13];
-  const int32_t head_dim = *(const int32_t*)ptrs->pointers[14];
-  const int32_t block_size = *(const int32_t*)ptrs->pointers[15];
-  const int32_t max_blocks_per_seq = *(const int32_t*)ptrs->pointers[16];
-  const int32_t causal = *(const int32_t*)ptrs->pointers[17];
-  const float scale = *(const float*)ptrs->pointers[18];
+  const float16* query = (const float16*)ptrs->pointers[DirectArgs::kQuery];
+  const float16* key = (const float16*)ptrs->pointers[DirectArgs::kKey];
+  const float16* value = (const float16*)ptrs->pointers[DirectArgs::kValue];
+  float16* key_cache = (float16*)ptrs->pointers[DirectArgs::kKeyCache];
+  float16* value_cache = (float16*)ptrs->pointers[DirectArgs::kValueCache];
+  const int32_t* slot_mapping =
+      (const int32_t*)ptrs->pointers[DirectArgs::kSlotMapping];
+  float16* output = (float16*)ptrs->pointers[DirectArgs::kOutput];
+  const int32_t* block_table =
+      (const int32_t*)ptrs->pointers[DirectArgs::kBlockTable];
+  const int32_t* query_start_loc =
+      (const int32_t*)ptrs->pointers[DirectArgs::kQueryStartLoc];
+  const int32_t* seq_lens =
+      (const int32_t*)ptrs->pointers[DirectArgs::kSeqLens];
+  const int32_t num_reqs =
+      *(const int32_t*)ptrs->pointers[DirectArgs::kNumReqs];
+  const int32_t num_tokens =
+      *(const int32_t*)ptrs->pointers[DirectArgs::kNumTokens];
+  const int32_t num_heads =
+      *(const int32_t*)ptrs->pointers[DirectArgs::kNumHeads];
+  const int32_t num_kv_heads =
+      *(const int32_t*)ptrs->pointers[DirectArgs::kNumKvHeads];
+  const int32_t head_dim =
+      *(const int32_t*)ptrs->pointers[DirectArgs::kHeadDim];
+  const int32_t block_size =
+      *(const int32_t*)ptrs->pointers[DirectArgs::kBlockSize];
+  const int32_t max_blocks_per_seq =
+      *(const int32_t*)ptrs->pointers[DirectArgs::kMaxBlocksPerSeq];
+  const int32_t causal = *(const int32_t*)ptrs->pointers[DirectArgs::kCausal];
+  const float scale = *(const float*)ptrs->pointers[DirectArgs::kScale];
 
   if (!all_requests_are_decode(query_start_loc, num_reqs) ||
       num_tokens != num_reqs) {
@@ -2082,27 +2256,39 @@ QAIC_KERNEL_API int32_t multinsp_multithreaded_paged_attention_hmx_decode(
       cfg, query, key, value, key_cache, value_cache, slot_mapping, output,
       block_table, query_start_loc, seq_lens, num_reqs, num_heads, num_kv_heads,
       head_dim, block_size, max_blocks_per_seq, causal != 0, scale,
-      read_cache_strides(ptrs, 19));
+      read_cache_strides(ptrs, DirectArgs::kCacheStrides),
+      read_sink_window_params(ptrs, DirectArgs::kSinks, DirectArgs::kHasSinks,
+                              DirectArgs::kWindowLeft));
 }
 
 QAIC_KERNEL_API int32_t multinsp_multithreaded_paged_attention_hmx_decode_cache(
     const AicJitEntryPointConfig* cfg, const AicJitPointerArray* ptrs) {
-  const float16* query = (const float16*)ptrs->pointers[0];
-  float16* key_cache = (float16*)ptrs->pointers[1];
-  float16* value_cache = (float16*)ptrs->pointers[2];
-  float16* output = (float16*)ptrs->pointers[3];
-  const int32_t* block_table = (const int32_t*)ptrs->pointers[4];
-  const int32_t* query_start_loc = (const int32_t*)ptrs->pointers[5];
-  const int32_t* seq_lens = (const int32_t*)ptrs->pointers[6];
-  const int32_t num_reqs = *(const int32_t*)ptrs->pointers[7];
-  const int32_t num_tokens = *(const int32_t*)ptrs->pointers[8];
-  const int32_t num_heads = *(const int32_t*)ptrs->pointers[9];
-  const int32_t num_kv_heads = *(const int32_t*)ptrs->pointers[10];
-  const int32_t head_dim = *(const int32_t*)ptrs->pointers[11];
-  const int32_t block_size = *(const int32_t*)ptrs->pointers[12];
-  const int32_t max_blocks_per_seq = *(const int32_t*)ptrs->pointers[13];
-  const int32_t causal = *(const int32_t*)ptrs->pointers[14];
-  const float scale = *(const float*)ptrs->pointers[15];
+  const float16* query = (const float16*)ptrs->pointers[CachedArgs::kQuery];
+  float16* key_cache = (float16*)ptrs->pointers[CachedArgs::kKeyCache];
+  float16* value_cache = (float16*)ptrs->pointers[CachedArgs::kValueCache];
+  float16* output = (float16*)ptrs->pointers[CachedArgs::kOutput];
+  const int32_t* block_table =
+      (const int32_t*)ptrs->pointers[CachedArgs::kBlockTable];
+  const int32_t* query_start_loc =
+      (const int32_t*)ptrs->pointers[CachedArgs::kQueryStartLoc];
+  const int32_t* seq_lens =
+      (const int32_t*)ptrs->pointers[CachedArgs::kSeqLens];
+  const int32_t num_reqs =
+      *(const int32_t*)ptrs->pointers[CachedArgs::kNumReqs];
+  const int32_t num_tokens =
+      *(const int32_t*)ptrs->pointers[CachedArgs::kNumTokens];
+  const int32_t num_heads =
+      *(const int32_t*)ptrs->pointers[CachedArgs::kNumHeads];
+  const int32_t num_kv_heads =
+      *(const int32_t*)ptrs->pointers[CachedArgs::kNumKvHeads];
+  const int32_t head_dim =
+      *(const int32_t*)ptrs->pointers[CachedArgs::kHeadDim];
+  const int32_t block_size =
+      *(const int32_t*)ptrs->pointers[CachedArgs::kBlockSize];
+  const int32_t max_blocks_per_seq =
+      *(const int32_t*)ptrs->pointers[CachedArgs::kMaxBlocksPerSeq];
+  const int32_t causal = *(const int32_t*)ptrs->pointers[CachedArgs::kCausal];
+  const float scale = *(const float*)ptrs->pointers[CachedArgs::kScale];
 
   if (!all_requests_are_decode(query_start_loc, num_reqs) ||
       num_tokens != num_reqs) {
@@ -2113,33 +2299,50 @@ QAIC_KERNEL_API int32_t multinsp_multithreaded_paged_attention_hmx_decode_cache(
       cfg, query, NULL, NULL, key_cache, value_cache, NULL, output, block_table,
       query_start_loc, seq_lens, num_reqs, num_heads, num_kv_heads, head_dim,
       block_size, max_blocks_per_seq, causal != 0, scale,
-      read_cache_strides(ptrs, 16));
+      read_cache_strides(ptrs, CachedArgs::kCacheStrides),
+      read_sink_window_params(ptrs, CachedArgs::kSinks, CachedArgs::kHasSinks,
+                              CachedArgs::kWindowLeft));
 }
 
 QAIC_KERNEL_API int32_t multinsp_multithreaded_paged_attention(
     const AicJitEntryPointConfig* cfg, const AicJitPointerArray* ptrs) {
-  const float16* query = (const float16*)ptrs->pointers[0];
-  const float16* key_cache = (const float16*)ptrs->pointers[1];
-  const float16* value_cache = (const float16*)ptrs->pointers[2];
-  float16* output = (float16*)ptrs->pointers[3];
-  const int32_t* block_table = (const int32_t*)ptrs->pointers[4];
-  const int32_t* query_start_loc = (const int32_t*)ptrs->pointers[5];
-  const int32_t* seq_lens = (const int32_t*)ptrs->pointers[6];
-  const int32_t num_reqs = *(const int32_t*)ptrs->pointers[7];
-  const int32_t num_tokens = *(const int32_t*)ptrs->pointers[8];
-  const int32_t num_heads = *(const int32_t*)ptrs->pointers[9];
-  const int32_t num_kv_heads = *(const int32_t*)ptrs->pointers[10];
-  const int32_t head_dim = *(const int32_t*)ptrs->pointers[11];
-  const int32_t block_size = *(const int32_t*)ptrs->pointers[12];
-  const int32_t max_blocks_per_seq = *(const int32_t*)ptrs->pointers[13];
-  const int32_t causal = *(const int32_t*)ptrs->pointers[14];
-  const float scale = *(const float*)ptrs->pointers[15];
+  const float16* query = (const float16*)ptrs->pointers[CachedArgs::kQuery];
+  const float16* key_cache =
+      (const float16*)ptrs->pointers[CachedArgs::kKeyCache];
+  const float16* value_cache =
+      (const float16*)ptrs->pointers[CachedArgs::kValueCache];
+  float16* output = (float16*)ptrs->pointers[CachedArgs::kOutput];
+  const int32_t* block_table =
+      (const int32_t*)ptrs->pointers[CachedArgs::kBlockTable];
+  const int32_t* query_start_loc =
+      (const int32_t*)ptrs->pointers[CachedArgs::kQueryStartLoc];
+  const int32_t* seq_lens =
+      (const int32_t*)ptrs->pointers[CachedArgs::kSeqLens];
+  const int32_t num_reqs =
+      *(const int32_t*)ptrs->pointers[CachedArgs::kNumReqs];
+  const int32_t num_tokens =
+      *(const int32_t*)ptrs->pointers[CachedArgs::kNumTokens];
+  const int32_t num_heads =
+      *(const int32_t*)ptrs->pointers[CachedArgs::kNumHeads];
+  const int32_t num_kv_heads =
+      *(const int32_t*)ptrs->pointers[CachedArgs::kNumKvHeads];
+  const int32_t head_dim =
+      *(const int32_t*)ptrs->pointers[CachedArgs::kHeadDim];
+  const int32_t block_size =
+      *(const int32_t*)ptrs->pointers[CachedArgs::kBlockSize];
+  const int32_t max_blocks_per_seq =
+      *(const int32_t*)ptrs->pointers[CachedArgs::kMaxBlocksPerSeq];
+  const int32_t causal = *(const int32_t*)ptrs->pointers[CachedArgs::kCausal];
+  const float scale = *(const float*)ptrs->pointers[CachedArgs::kScale];
 
   if (head_dim > kMaxHeadDim || num_kv_heads <= 0 ||
       num_heads % num_kv_heads != 0) {
     return JIT_DEV_STATUS_SUCCESS;
   }
-  const CacheStrides cache_strides = read_cache_strides(ptrs, 16);
+  const CacheStrides cache_strides =
+      read_cache_strides(ptrs, CachedArgs::kCacheStrides);
+  const SinkWindowParams sink_window = read_sink_window_params(
+      ptrs, CachedArgs::kSinks, CachedArgs::kHasSinks, CachedArgs::kWindowLeft);
 
   const int32_t gqa = num_heads / num_kv_heads;
   const int32_t total_rows = num_tokens * num_heads;
@@ -2203,7 +2406,8 @@ QAIC_KERNEL_API int32_t multinsp_multithreaded_paged_attention(
     float max_score = -FLT_MAX;
     float denom = 0.0f;
 
-    for (int32_t kv_pos = 0; kv_pos < kv_limit; ++kv_pos) {
+    for (int32_t kv_pos = window_kv_begin(query_pos, sink_window.window_left);
+         kv_pos < kv_limit; ++kv_pos) {
       const int32_t logical_block = kv_pos / block_size;
       const int32_t block_offset = kv_pos - logical_block * block_size;
       const int32_t block_id =
@@ -2230,7 +2434,8 @@ QAIC_KERNEL_API int32_t multinsp_multithreaded_paged_attention(
       accumulate_value_hvx(acc, v_row, head_dim, p);
     }
 
-    const float inv_denom = denom == 0.0f ? 0.0f : 1.0f / denom;
+    const float inv_denom =
+        softmax_inv_denom(max_score, denom, sink_window.sinks, head);
     float16* out_row =
         output + flat_q_offset(token, head, 0, num_heads, head_dim);
     store_normalized_hvx(out_row, acc, head_dim, inv_denom);

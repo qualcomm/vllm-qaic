@@ -110,6 +110,35 @@ class QAicUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         """Down projection for one expert. Overridable by quantized methods."""
         return hidden @ layer.w2_weight[expert_id].t()
 
+    def _activation(self, gate_up: torch.Tensor, activation: str) -> torch.Tensor:
+        """Gated activation for one expert. Overridable by quantized methods."""
+        if activation.endswith("_no_mul"):
+            if activation == "silu_no_mul":
+                return F.silu(gate_up)
+            if activation == "gelu_no_mul":
+                return F.gelu(gate_up)
+            if activation == "gelu_tanh_no_mul":
+                return F.gelu(gate_up, approximate="tanh")
+            return F.relu(gate_up).square()
+        if activation == "swigluoai":
+            gate, up = gate_up[..., ::2], gate_up[..., 1::2]
+            gate = gate.clamp(max=7.0)
+            up = up.clamp(-7.0, 7.0)
+            return (up + 1) * (gate * torch.sigmoid(gate * 1.702))
+        if activation == "swiglustep":
+            half = gate_up.shape[-1] // 2
+            gate, up = gate_up[..., :half], gate_up[..., half:]
+            gate = F.silu(gate).clamp(max=7.0)
+            up = up.clamp(-7.0, 7.0)
+            return gate * up
+        half = gate_up.shape[-1] // 2
+        gate, up = gate_up[..., :half], gate_up[..., half:]
+        if activation == "silu":
+            return F.silu(gate) * up
+        if activation == "gelu":
+            return F.gelu(gate) * up
+        return F.gelu(gate, approximate="tanh") * up
+
     def _forward_per_expert(
         self,
         layer: FusedMoE,  # type: ignore[name-defined] # noqa: F821
@@ -119,14 +148,16 @@ class QAicUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     ) -> torch.Tensor:
         """Per-expert PyTorch MoE loop, used when the fused kernel can't be.
 
-        The two matmuls go through ``_gate_up_matmul``/``_down_matmul`` so that
-        quantized subclasses can substitute a packed-weight kernel without
-        reimplementing routing, activation, or the weighted reduce.
+        The two matmuls go through ``_gate_up_matmul``/``_down_matmul`` and the
+        activation through ``_activation`` so that quantized subclasses can
+        substitute device kernels without reimplementing routing or the
+        weighted reduce. Subclasses whose weights are not dense rows in
+        ``x.dtype`` (e.g. packed MXFP4) must also override ``forward_oot`` so
+        the fused kernel path above never sees them.
         """
         num_tokens = x.shape[0]
         top_k = topk_ids.shape[1]
         activation = getattr(layer.activation, "value", layer.activation)
-        is_no_mul = activation.endswith("_no_mul")
         apply_router_weight_on_input = layer.apply_router_weight_on_input
 
         if layer.expert_map is not None:
@@ -177,35 +208,7 @@ class QAicUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             if self.moe.has_bias:
                 gate_up = gate_up + layer.w13_bias[expert_id]
 
-            if is_no_mul:
-                if activation == "silu_no_mul":
-                    hidden = F.silu(gate_up)
-                elif activation == "gelu_no_mul":
-                    hidden = F.gelu(gate_up)
-                elif activation == "gelu_tanh_no_mul":
-                    hidden = F.gelu(gate_up, approximate="tanh")
-                else:
-                    hidden = F.relu(gate_up).square()
-            elif activation == "swigluoai":
-                gate, up = gate_up[..., ::2], gate_up[..., 1::2]
-                gate = gate.clamp(max=7.0)
-                up = up.clamp(-7.0, 7.0)
-                hidden = (up + 1) * (gate * torch.sigmoid(gate * 1.702))
-            elif activation == "swiglustep":
-                half = gate_up.shape[-1] // 2
-                gate, up = gate_up[..., :half], gate_up[..., half:]
-                gate = F.silu(gate).clamp(max=7.0)
-                up = up.clamp(-7.0, 7.0)
-                hidden = gate * up
-            else:
-                half = gate_up.shape[-1] // 2
-                gate, up = gate_up[..., :half], gate_up[..., half:]
-                if activation == "silu":
-                    hidden = F.silu(gate) * up
-                elif activation == "gelu":
-                    hidden = F.gelu(gate) * up
-                else:
-                    hidden = F.gelu(gate, approximate="tanh") * up
+            hidden = self._activation(gate_up, activation)
 
             expert_out = self._down_matmul(layer, hidden, expert_id)
             if self.moe.has_bias:

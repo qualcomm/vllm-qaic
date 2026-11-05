@@ -380,11 +380,11 @@ class QAicAttentionBackendImpl(AttentionImpl):
             return False
         if self.alibi_slopes is not None:
             return False
-        if self.sliding_window != (-1, -1):
+        if self.sliding_window[1] not in (-1, 0):
             return False
         if self.logits_soft_cap != 0:
             return False
-        if self.sinks is not None:
+        if self.sinks is not None and self.sinks.shape != (self.num_heads,):
             return False
         if self.num_kv_heads <= 0:
             return False
@@ -458,6 +458,8 @@ class QAicAttentionBackendImpl(AttentionImpl):
                 self.scale,
                 attn_metadata.causal,
                 write_cache=True,
+                sinks=self.sinks,
+                window_left=self.sliding_window[0],
             )
             output[:num_decode_tokens].copy_(
                 decode_out.reshape_as(output[:num_decode_tokens])
@@ -479,6 +481,8 @@ class QAicAttentionBackendImpl(AttentionImpl):
                 self.scale,
                 attn_metadata.causal,
                 write_cache=True,
+                sinks=self.sinks,
+                window_left=self.sliding_window[0],
             )
             output[num_decode_tokens:num_actual_tokens].copy_(
                 prefill_out.reshape_as(output[num_decode_tokens:num_actual_tokens])
@@ -498,6 +502,8 @@ class QAicAttentionBackendImpl(AttentionImpl):
             self.scale,
             attn_metadata.causal,
             write_cache=write_cache,
+            sinks=self.sinks,
+            window_left=self.sliding_window[0],
         )
         output[:num_actual_tokens].copy_(
             native_out.reshape_as(output[:num_actual_tokens])

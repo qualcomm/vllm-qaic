@@ -19,9 +19,10 @@ MXFP4 into VTCM tile-by-tile on device. That preserves the ~4x weight
 footprint/bandwidth reduction which is the whole point of MXFP4 — a
 dequantize-to-dense-at-load-time approach throws it away.
 
-Routing, activation, bias and the weighted reduce are inherited from
-``QAicUnquantizedFusedMoEMethod._forward_per_expert``; only its
-``_gate_up_matmul``/``_down_matmul`` hooks are overridden here.
+Routing, bias and the weighted reduce are inherited from
+``QAicUnquantizedFusedMoEMethod._forward_per_expert``; its
+``_gate_up_matmul``/``_down_matmul`` hooks are overridden to call
+``qaic::mxfp4_mm`` and its ``_activation`` hook to call ``qaic::swigluoai``.
 
 The in-tree fused HVX MoE kernel is deliberately bypassed: it assumes dense
 fp16 weight rows (no scale operand, no packed-format awareness) and its Python
@@ -57,6 +58,33 @@ from vllm_qaic.ops.unquantized_fused_moe_method import QAicUnquantizedFusedMoEMe
 from vllm_qaic.utils import QAIC_GPT_OSS_MXFP4_METHOD
 
 _MXFP4_BLOCK_SIZE = 32
+# GPT-OSS's clamped SwiGLU constants (vllm's swigluoai activation).
+_SWIGLUOAI_ALPHA = 1.702
+_SWIGLUOAI_LIMIT = 7.0
+# Activation dtypes qaic::mxfp4_mm accepts; it computes natively in lhs dtype.
+_MXFP4_MM_ACT_DTYPES = (torch.float16, torch.bfloat16)
+
+
+def check_qaic_mxfp4_ops_available() -> None:
+    """Raise if the installed torch_qaic lacks the ops this method calls.
+
+    Without this, an older torch_qaic wheel only fails on the first MoE
+    forward, after the full checkpoint has been loaded.
+    """
+    # The qaic ops are registered on import; don't rely on the caller having
+    # imported torch_qaic already.
+    import torch_qaic  # noqa: F401
+
+    missing = [
+        name for name in ("mxfp4_mm", "swigluoai") if not hasattr(torch.ops.qaic, name)
+    ]
+    if missing:
+        raise RuntimeError(
+            "gpt_oss_mxfp4 on QAIC requires torch_qaic ops "
+            f"{', '.join('qaic::' + n for n in missing)}, which the installed "
+            "torch_qaic does not provide. Install a torch_qaic build that "
+            "includes qaic::mxfp4_mm and qaic::swigluoai."
+        )
 
 
 @register_quantization_config(QAIC_GPT_OSS_MXFP4_METHOD)
@@ -71,7 +99,9 @@ class QaicGptOssMxfp4Config(QuantizationConfig):
 
     @classmethod
     def get_supported_act_dtypes(cls) -> list[torch.dtype]:
-        return [torch.float16, torch.float32]
+        # bf16 is only reachable on AI200; QaicPlatform.check_and_update_config
+        # rejects it elsewhere.
+        return [torch.float16, torch.bfloat16, torch.float32]
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -102,6 +132,7 @@ class QaicGptOssMxfp4Config(QuantizationConfig):
             return None
         if getattr(hf_config, "model_type", None) != "gpt_oss":
             return None
+        check_qaic_mxfp4_ops_available()
         return "gpt_oss_mxfp4"
 
     def get_quant_method(
@@ -226,9 +257,9 @@ class QaicGptOssMxfp4MoEMethod(QAicUnquantizedFusedMoEMethod):
         set_weight_attrs(w2_weight_scale, extra_weight_attrs)
 
         if self.moe.has_bias:
-            # Unlike upstream (bf16-only), QAIC has no bf16 tensor support at
-            # all, so biases are allocated directly in params_dtype (the
-            # checkpoint's bf16 values are cast on copy by weight_loader()).
+            # Biases are allocated in params_dtype rather than upstream's
+            # fixed bf16, since the model may run in fp16 (bf16 is AI200-only);
+            # weight_loader() casts the checkpoint's bf16 values on copy.
             w13_bias = torch.nn.Parameter(
                 torch.zeros(
                     num_experts,
@@ -270,14 +301,21 @@ class QaicGptOssMxfp4MoEMethod(QAicUnquantizedFusedMoEMethod):
         # qaic::mxfp4_mm on the packed weights instead.
         return self._forward_per_expert(layer, x, topk_weights, topk_ids)
 
+    @staticmethod
+    def _mxfp4_mm_lhs(x: torch.Tensor) -> torch.Tensor:
+        # mxfp4_mm takes fp16 or bf16 activations and computes in that dtype.
+        # Only an fp32 model needs a cast; fp16 is the safe choice for it,
+        # since bf16 would need AI200.
+        if x.dtype not in _MXFP4_MM_ACT_DTYPES:
+            x = x.to(torch.float16)
+        return x.contiguous()
+
     def _gate_up_matmul(
         self, layer: RoutedExperts, w13_input: torch.Tensor, expert_id: int
     ) -> torch.Tensor:
         # mxfp4_mm computes lhs @ dequant(rhs).T, so no explicit .t() here.
-        # The .to(float16) is a no-op in the expected fp16 case and only
-        # guards a params_dtype=float32 run against the op's hard fp16 check.
         return torch.ops.qaic.mxfp4_mm(
-            w13_input.to(torch.float16).contiguous(),
+            self._mxfp4_mm_lhs(w13_input),
             layer.w13_weight[expert_id],  # uint8 [2I, H/2]
             layer.w13_weight_scale[expert_id],  # uint8 [2I, H/32]
         )
@@ -285,12 +323,21 @@ class QaicGptOssMxfp4MoEMethod(QAicUnquantizedFusedMoEMethod):
     def _down_matmul(
         self, layer: RoutedExperts, hidden: torch.Tensor, expert_id: int
     ) -> torch.Tensor:
-        # .contiguous() matters here: the swigluoai branch builds `hidden` from
-        # strided gate_up[..., ::2] / [..., 1::2] slices.
         return torch.ops.qaic.mxfp4_mm(
-            hidden.to(torch.float16).contiguous(),
+            self._mxfp4_mm_lhs(hidden),
             layer.w2_weight[expert_id],  # uint8 [H, I/2]
             layer.w2_weight_scale[expert_id],  # uint8 [H, I/32]
+        )
+
+    def _activation(self, gate_up: torch.Tensor, activation: str) -> torch.Tensor:
+        # GPT-OSS always uses swigluoai. Run it as one device kernel instead of
+        # the inherited elementwise chain; qaic::swigluoai takes the same
+        # interleaved gate/up layout and clamp semantics, and returns a
+        # contiguous tensor for the down projection.
+        if activation != "swigluoai":
+            return super()._activation(gate_up, activation)
+        return torch.ops.qaic.swigluoai(
+            gate_up.contiguous(), _SWIGLUOAI_ALPHA, _SWIGLUOAI_LIMIT
         )
 
     def get_fused_moe_quant_config(
