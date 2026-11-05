@@ -242,6 +242,11 @@ class QaicPlatform(Platform):
     def get_supported_quantization(cls):
         return cls.supported_quantization
 
+    @classmethod
+    def discover_numa_topology(cls):
+        # vLLM's NIXL worker calls this; QAIC has no NUMA topology to report.
+        return []
+
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
         # Read by ModelConfig to resolve dtype="auto", before
@@ -668,13 +673,6 @@ class QaicPlatform(Platform):
             ), (
                 "Only ngram, suffix, and draft_model based SPD types are "
                 "supported with Disaggregated serving for QAIC backend"
-            )
-            assert not (
-                vllm_config.kv_transfer_config.kv_role != "kv_producer"
-                and vllm_config.cache_config.enable_prefix_caching
-            ), (
-                "Prefix caching with KV-role 'kv_consumer' or 'kv_both' not "
-                "yet supported for QAIC backend"
             )
             if (
                 on_device_sampling_en
