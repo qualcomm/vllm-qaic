@@ -404,7 +404,6 @@ class QaicPrefillBank:
     """Guards Nixl-Pull connector from early kv$ release"""
 
     def __init__(self, num_blocks: int) -> None:
-        self.num_blocks = num_blocks
         self.busy = [False] * num_blocks
         self.owner: dict[str, set[int]] = {}
 
@@ -487,7 +486,6 @@ class QaicModelRunnerAoT(GPUModelRunner):
         self._canon_by_idx: dict[int, torch.Tensor] = {}
         self._qpc_plane_layout: list[tuple[int, int]] = []
         self._kv_publish_pending_vids: np.ndarray | None = None
-        self.kv_cache_layers: dict[str, torch.Tensor | list[torch.Tensor]] = {}
         self.prefill_bank: QaicPrefillBank | None = None
         self._pending_finished_sending: set[str] = set()
         self._kv_connector_name: str | None = (
@@ -2009,9 +2007,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
         for plane, (layer_idx, kv_idx) in zip(
             self._paged_kv_cache_buffers, self._qpc_plane_layout, strict=True
         ):
-            canon = self._canon_by_idx.get(layer_idx)
-            if canon is None:
-                continue
+            canon = self._canon_by_idx[layer_idx]
             qpc = torch.from_numpy(plane)
             if to_canonical:
                 canon[vid_t, kv_idx] = qpc[row_t]
@@ -2069,20 +2065,12 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 "QAIC prefill bank needs one request id per prefill slot: "
                 f"num_req_ids={len(req_ids)}, num_slots={block_ids.shape[0]}"
             )
-        if block_ids.ndim == 2:
-            for row, req_id in zip(block_ids, req_ids, strict=True):
-                physical_blocks = (np.unique(row[row >= 0]) + 1).astype(np.int64)
-                if self.prefill_bank is not None:
-                    self.prefill_bank.reserve(
-                        physical_blocks.tolist(), req_id, self._drain_prefill_bank
-                    )
-            return
-
-        for physical_block_id, req_id in zip(block_ids, req_ids, strict=True):
-            physical_block = int(physical_block_id) + 1
+        # Paged mode only: the builder rejects non-paged NIXL/Mooncake configs.
+        for row, req_id in zip(block_ids, req_ids, strict=True):
+            physical_blocks = (np.unique(row[row >= 0]) + 1).astype(np.int64)
             if self.prefill_bank is not None:
                 self.prefill_bank.reserve(
-                    [physical_block], req_id, self._drain_prefill_bank
+                    physical_blocks.tolist(), req_id, self._drain_prefill_bank
                 )
 
     def _drain_prefill_bank(self) -> None:
@@ -2329,8 +2317,8 @@ class QaicModelRunnerAoT(GPUModelRunner):
         self.kv_cache_config = kv_cache_config
         if has_kv_transfer_group():
             if self._use_torch_view_kv_connector():
-                self.kv_cache_layers = self._build_torch_view_kv_caches(kv_cache_config)
-                get_kv_transfer_group().register_kv_caches(self.kv_cache_layers)
+                kv_cache_layers = self._build_torch_view_kv_caches(kv_cache_config)
+                get_kv_transfer_group().register_kv_caches(kv_cache_layers)
             else:
                 get_kv_transfer_group().register_kv_caches(self.kv_caches)
 
