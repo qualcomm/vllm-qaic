@@ -322,6 +322,12 @@ class QaicPlatform(Platform):
                     cache_config.block_size = 100000
                 else:
                     cache_config.block_size = model_config.max_model_len  # ctx_len
+            from vllm.utils.math_utils import cdiv
+
+            cache_config.num_gpu_blocks_override = (
+                cdiv(model_config.max_model_len, cache_config.block_size)
+                * scheduler_config.max_num_seqs
+            ) + 1
 
         if cls.is_aot:
             if model_config.hf_config.model_type == "whisper":
