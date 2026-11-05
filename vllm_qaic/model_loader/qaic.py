@@ -154,6 +154,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self.ctx_len = model_config.max_model_len
         self.decode_bsz = vllm_config.scheduler_config.max_num_seqs
         self.full_batch_size = vllm_config.scheduler_config.max_num_seqs
+        self._cache_config = vllm_config.cache_config
         self.prefill_bsz = 1
         self.lora_mode = bool(vllm_config.lora_config)
         self.last_decode = False
@@ -230,6 +231,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         prefill_is_partial: list[bool] | None = None,
         prefill_cum_sum: np.ndarray | None = None,
         logits: np.ndarray | None = None,
+        block_table: np.ndarray | None = None,
+        slot_id: np.ndarray | None = None,
         num_prompt_tokens_prefill: np.ndarray | None = None,
         tlm_prefill_hidden_chunks: list[np.ndarray] | None = None,
         dflash_decode_hidden_buf: np.ndarray | None = None,
@@ -254,6 +257,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     callback,
                     mm_kwargs_list,
                     logits,
+                    block_table,
+                    slot_id,
                     num_prompt_tokens_prefill,
                 )
                 return pending_prefill_exec_queue
@@ -273,6 +278,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                         lora_ids,
                         mm_kwargs_list,
                         tlm_prefill_hidden_chunks,
+                        block_table,
+                        slot_id,
                     )
                     return pending_prefill_exec_queue
                 else:
@@ -282,6 +289,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                         batch_indices,
                         logits,
                         lora_ids,
+                        block_table,
+                        slot_id,
                         callback=callback,
                         dflash_decode_hidden_buf=dflash_decode_hidden_buf,
                     )
@@ -378,6 +387,9 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self.stages: int = stages if stages is not None else 1
         self.disagg_serving_en = kv_transfer_role is not None
         self.disagg_producer_en = kv_transfer_role == "kv_producer"
+        self.num_gpu_blocks_per_batch = cdiv(
+            self.ctx_len, self._cache_config.block_size
+        )
 
         logger.info("Loading QPC...")
         logger.info(
@@ -407,6 +419,14 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self.logits_dtype = (
             np.dtype(_logits_info[1]) if _logits_info is not None else np.float32
         )
+
+        if "block_table" in self.session.input_names:
+            self.decode_batch_inputs["block_table"] = np.full(
+                (self.decode_bsz, self.num_gpu_blocks_per_batch), -1, dtype=np.int64
+            )
+            self.decode_batch_inputs["slot_id"] = np.full(
+                (self.decode_bsz,), 0, dtype=np.int64
+            )
 
         e = time.perf_counter() - s
         logger.info("Successfully loaded QPC in %s secs", e)
@@ -596,6 +616,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         callback: Callable | None = None,
         mm_kwargs_list: list[dict] | None = None,
         logits: np.ndarray | None = None,
+        block_table: np.ndarray | None = None,
+        slot_id: np.ndarray | None = None,
         num_prompt_tokens_prefill: np.ndarray | None = None,
     ):
         # set qpc prefill state
@@ -694,6 +716,12 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     if logits is not None:
                         chunk_inputs["logits"] = logits[index : index + 1]
 
+                if block_table is not None and slot_id is not None:
+                    chunk_inputs["block_table"] = block_table[
+                        index : index + 1
+                    ].reshape(1, self.num_gpu_blocks_per_batch)
+                    chunk_inputs["slot_id"] = slot_id[index : index + 1]
+
                 if self.session.prefill_available_exec_objs.empty():
                     if callback:
                         callback()
@@ -749,6 +777,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         lora_ids: np.ndarray | None = None,
         mm_kwargs_list: list[dict] | None = None,
         tlm_prefill_hidden_chunks: list[np.ndarray] | None = None,
+        block_table: np.ndarray | None = None,
+        slot_id: np.ndarray | None = None,
     ) -> np.ndarray:
         # perform prefill (only prefill_bsz=1 is supported)
         idx_start = 0
@@ -792,6 +822,11 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 chunk_inputs["lora_ids"] = lora_index
             if mm_kwargs_list and (mm_kwargs := mm_kwargs_list[i]):
                 chunk_inputs.update(mm_kwargs)
+            if block_table is not None and slot_id is not None:
+                chunk_inputs["block_table"] = block_table[i : i + 1].reshape(
+                    1, self.num_gpu_blocks_per_batch
+                )
+                chunk_inputs["slot_id"] = slot_id[i : i + 1]
             # chunk the request
             n_chunks: int = iids.shape[-1] // self.prefill_seq_len
 
@@ -876,6 +911,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         batch_indices: np.ndarray,
         logits: np.ndarray,
         lora_ids: np.ndarray | None = None,
+        block_table: np.ndarray | None = None,
+        slot_id: np.ndarray | None = None,
         callback: Callable | None = None,
         dflash_decode_hidden_buf: np.ndarray | None = None,
     ) -> None:
@@ -913,6 +950,13 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             batch_inputs["lora_ids"][:num_decodes] = lora_ids.reshape(num_decodes, 1)
             if num_decodes < self.decode_bsz:
                 batch_inputs["lora_ids"][num_decodes:] = -1
+
+        if block_table is not None and slot_id is not None:
+            batch_inputs["block_table"][:num_decodes] = block_table[:num_decodes]
+            batch_inputs["slot_id"][:num_decodes] = slot_id[:num_decodes]
+            if num_decodes < self.decode_bsz:
+                batch_inputs["block_table"][num_decodes:] = -1
+                batch_inputs["slot_id"][num_decodes:] = 0
 
         # For spec-decode target: include num_logits_to_keep in batch_inputs
         # so the hardware knows how many token positions to compute logits for.
@@ -1218,6 +1262,25 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     self.decode_bsz, dtype=np.int64
                 ).reshape(-1, 1)
 
+            # Paged attention: the dict rebuilt here replaces the one created in
+            # load_model(), so block_table/slot_id must be added again. All rows
+            # are padding (position_ids == -1), so -1 / 0 matches load_model().
+            if "block_table" in self.session.input_names:
+                decode_single_inputs["block_table"] = np.full(
+                    (1, self.num_gpu_blocks_per_batch),
+                    -1,
+                    dtype=np.int64,
+                )
+                decode_single_inputs["slot_id"] = np.zeros((1,), dtype=np.int64)
+                decode_batch_inputs["block_table"] = np.full(
+                    (self.decode_bsz, self.num_gpu_blocks_per_batch),
+                    -1,
+                    dtype=np.int64,
+                )
+                decode_batch_inputs["slot_id"] = np.zeros(
+                    (self.decode_bsz,), dtype=np.int64
+                )
+
             # TODO: mllama3.2 is currently not supported in v0.15.0
             # if input_info := self.get_io_shape_and_dtype("cross_attention_mask"):
             #     self.is_cross_attention = True
@@ -1297,6 +1360,11 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                         ).reshape(-1, 1)
                     if self.is_multimodal_model and self.default_mm_kwargs:
                         prefill_inputs.update(self.default_mm_kwargs)
+                    if self.paged_attention:
+                        prefill_inputs["block_table"] = np.arange(
+                            self.num_gpu_blocks_per_batch, dtype=np.int64
+                        ).reshape(1, self.num_gpu_blocks_per_batch)
+                        prefill_inputs["slot_id"] = np.zeros(1, dtype=np.int64)
                     KvCache_buff = []
                     for kv_shape, kv_type, _ in self.kv_cache_info:
                         _kv_shape = (1,) + kv_shape[1:]
@@ -1628,7 +1696,9 @@ def load_qaic_model(
                     speculative_model_type,
                 )
             logger.info("QEFF Compile called with %s", qaic_compile_config.cfg)
-            qpc_path = qeff_model.compile(**qaic_compile_config.cfg)
+            qpc_path = qeff_model.compile(
+                **qaic_compile_config.cfg, qaic_config=qaic_compile_config.qaic_config
+            )
             if isinstance(qpc_path, dict):
                 if (
                     "skip_lang" in qaic_compile_config.cfg
@@ -2183,26 +2253,21 @@ def _get_qaic_compile_config(
     qaic_config: dict[str, Any] | None = (override_qaic_config or {}).pop(
         "qaic_config", None
     )
+    if qaic_config is None:
+        qaic_config = dict()
     if speculative_model_type in ("target", "turbo"):
-        if qaic_config is None:
-            qaic_config = {}
         qaic_config["speculative_model_type"] = speculative_model_type
     # DFlash cross-checkpoint injection for QEfficient DFlash transforms.
     if dflash_cfg is not None:
         if speculative_model_type == "draft":
-            if qaic_config is None:
-                qaic_config = {}
             qaic_config["dflash_dlm"] = True
             qaic_config["dflash_tlm_repo"] = dflash_cfg["tlm_repo"]
         elif speculative_model_type in ("target", "turbo"):
-            if qaic_config is None:
-                qaic_config = {}
             qaic_config["target_layer_ids"] = dflash_cfg["target_layer_ids"]
             qaic_config["dflash_dlm_repo"] = dflash_cfg["dlm_repo"]
+
     # On Device Sampling
     if cfg.get("aic_include_sampler") is not None:
-        if qaic_config is None:
-            qaic_config = dict()
         qaic_config["include_sampler"] = cfg["aic_include_sampler"]
         if cfg.get("aic_return_pdfs") is not None:
             qaic_config["return_pdfs"] = cfg["aic_return_pdfs"]
@@ -2233,8 +2298,6 @@ def _get_qaic_compile_config(
         or len(cfg.get("comp_ctx_lengths_prefill", [])) > 0
         or len(cfg.get("comp_ctx_lengths_decode", [])) > 0
     ):
-        if qaic_config is None:
-            qaic_config = dict()
         qaic_config["ccl_enabled"] = True
         if not cfg.pop("ccl_enabled", False):
             cfg["comp_ctx_lengths_prefill"] = (
@@ -2247,6 +2310,29 @@ def _get_qaic_compile_config(
                 if (len(cfg.get("comp_ctx_lengths_decode", [])) == 0)
                 else cfg.get("comp_ctx_lengths_decode")
             )
+    # For disaggregated serving, the KV cache block size must match the
+    # prefill chunk size actually compiled into the QPC (post-override), not
+    # just the scheduler's long_prefill_token_threshold, so KV blocks handed
+    # off between producer and consumer stay aligned. Written here, before
+    # get_kv_cache_spec() is queried, so the updated value is picked up when
+    # the KV cache is sized.
+
+    if vllm_config.cache_config.enable_prefix_caching:
+        # Add num_kv_blocks through qaic_config
+        if vllm_config.kv_transfer_config:
+            kv_block_size = cfg.pop("kv_block_size")
+            num_kv_blocks = cdiv(vllm_config.model_config.max_model_len, kv_block_size)
+            vllm_config.cache_config.block_size = kv_block_size
+        else:
+            num_kv_blocks = cdiv(
+                vllm_config.model_config.max_model_len, cfg["prefill_seq_len"]
+            )
+            vllm_config.cache_config.block_size = cfg["prefill_seq_len"]
+        logger.info("Num KV Blocks: %s", num_kv_blocks)
+        qaic_config["num_kv_blocks"] = num_kv_blocks
+        qaic_config["blocking_mode"] = "kv_paged"
+    else:
+        qaic_config["blocking_mode"] = ""
     qpc_path = cfg.pop("qpc_path")
     if qpc_path and kv_offload and len(qpc_path.split(":")) > 1:
         assert qpc_idx is not None
