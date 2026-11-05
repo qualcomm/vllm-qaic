@@ -119,6 +119,7 @@ def _patched_compute_routing(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     indices_type: torch.dtype | None,
+    input_ids=None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     num_experts = router_logits.shape[-1]
     valid_grouping = (

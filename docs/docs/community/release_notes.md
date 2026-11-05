@@ -14,21 +14,21 @@ execution modes.
 - Speculative decoding (Ngram, Suffix, Draft)
 - LoRaX adapter serving (Dynamic & Fixed)
 - Disaggregated Serving:
-  - Pipeline prefill execution with Tensor Splitting
-  - MDP Partitioner support
-  - QAIC shared memory connector
-  - LMCache connector
-  - Disaggregated orchestration package integration
-  - Grafana/Prometheus monitoring dashboard
-  - LLM-D support
-  - Auto head replication
-  - KV cache transfer for heterogeneous attention layers
+    - Pipeline prefill execution with Tensor Splitting
+    - MDP Partitioner support
+    - QAIC shared memory connector
+    - LMCache connector
+    - Disaggregated orchestration package integration
+    - Grafana/Prometheus monitoring dashboard
+    - LLM-D support
+    - Auto head replication
+    - KV cache transfer for heterogeneous attention layers
 - Vision-Language Models:
-  - 2QPC and 3QPC VLM execution
-  - Qwen3VL, Qwen3VLMoE, InternVL, Qwen2.5VL
+    - 2QPC and 3QPC VLM execution
+    - Qwen3VL, Qwen3VLMoE, InternVL, Qwen2.5VL
 - Scheduling & Performance:
-  - Scheduler optimization with async scheduling
-  - Chunked prefill scheduling (reduces P99 TPOT)
+    - Scheduler optimization with async scheduling
+    - Chunked prefill scheduling (reduces P99 TPOT)
 
 ### PyTorch (JIT) Execution Mode
 

@@ -6,14 +6,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Adapted from vllm/vllm/v1/attention/backends/cpu_attn.py
 
+import os
 from dataclasses import dataclass
 from typing import ClassVar
 
 import torch
 
 from vllm.config import VllmConfig
-from vllm.logger import init_logger
-from vllm.platforms import CpuArchEnum, current_platform
+from vllm_qaic.logger import init_logger
+from vllm.platforms import CpuArchEnum
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
@@ -21,8 +22,8 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     AttentionType,
     CommonAttentionMetadata,
-    is_quantized_kv_cache,
 )
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backends.registry import (
     AttentionBackendEnum,
     register_backend,
@@ -37,8 +38,8 @@ logger = init_logger(__name__)
 _CPU_ARCH_PREFER_MIXED_BATCH = (CpuArchEnum.X86, CpuArchEnum.ARM)
 
 
-# prefill is done via torch.sdpa()
-# decode is done via paged attention fallback to cpu impl
+# Decoder prefill and decode use native QAIC paged attention when supported.
+# SDPA remains the compatibility fallback for unsupported configurations.
 @register_backend(AttentionBackendEnum.CUSTOM)
 class QAicTorchAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
@@ -53,7 +54,7 @@ class QAicTorchAttentionBackend(AttentionBackend):
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
-        return [32, 64, 96, 128, 160, 192, 224, 256]
+        return list(range(1, 8193))
 
     @staticmethod
     def get_name() -> str:
@@ -83,7 +84,7 @@ class QAicTorchAttentionBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
-        return 2, num_blocks, num_kv_heads, block_size, head_size
+        return num_blocks, num_kv_heads, block_size, 2 * head_size
 
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
@@ -92,7 +93,6 @@ class QAicTorchAttentionBackend(AttentionBackend):
 
 @dataclass
 class QAicAttentionMetadata:
-    isa: str
     num_actual_tokens: int  # Number of tokens excluding padding.
     max_query_len: int
     query_start_loc: torch.Tensor
@@ -100,6 +100,7 @@ class QAicAttentionMetadata:
     seq_lens: torch.Tensor
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
+    slot_mapping_i32: torch.Tensor
     max_num_seqs: int
     max_model_len: int
     scheduler_metadata: torch.Tensor | None
@@ -112,6 +113,8 @@ class QAicAttentionMetadata:
     sdpa_start_loc: torch.Tensor | None = None
     # req_ids ordered by batch dim (decode seqs first); set by update_req_ids()
     req_ids: list[str] | None = None
+    # requests the scheduler reports as finished; their KV caches are freed
+    finished_req_ids: set[str] | None = None
 
 
 class QAicAttentionMetadataBuilder(AttentionMetadataBuilder[QAicAttentionMetadata]):
@@ -131,7 +134,9 @@ class QAicAttentionMetadataBuilder(AttentionMetadataBuilder[QAicAttentionMetadat
 
         self.kv_cache_spec = kv_cache_spec
         self.vllm_config = vllm_config
+        self.device = device
         self.current_req_ids: list[str] = []
+        self.finished_req_ids: set[str] = set()
 
         parallel_config = vllm_config.parallel_config
         self.num_kv_heads = vllm_config.model_config.get_num_kv_heads(parallel_config)
@@ -144,11 +149,14 @@ class QAicAttentionMetadataBuilder(AttentionMetadataBuilder[QAicAttentionMetadat
         if self.window_size is None:
             self.window_size = -1
         self.block_size = vllm_config.cache_config.block_size
-        self.isa = _get_attn_isa(self.dtype, self.block_size, self.head_dim)
 
-    def update_req_ids(self, req_ids: list[str]) -> None:
-        """Called by the model runner before build() to supply the current batch's request IDs."""
+    def update_req_ids(
+        self, req_ids: list[str], finished_req_ids: set[str] | None = None
+    ) -> None:
+        """Called by the model runner before build() to supply the current
+        batch's request IDs and the requests finished since the last step."""
         self.current_req_ids = req_ids
+        self.finished_req_ids = finished_req_ids or set()
 
     def build(
         self,
@@ -156,7 +164,6 @@ class QAicAttentionMetadataBuilder(AttentionMetadataBuilder[QAicAttentionMetadat
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> QAicAttentionMetadata:
-        num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
         max_seq_len = common_attn_metadata.max_seq_len
@@ -164,6 +171,16 @@ class QAicAttentionMetadataBuilder(AttentionMetadataBuilder[QAicAttentionMetadat
         seq_lens = common_attn_metadata.seq_lens
         block_table_tensor = common_attn_metadata.block_table_tensor
         slot_mapping = common_attn_metadata.slot_mapping
+        if (
+            slot_mapping.device != self.device
+            or slot_mapping.dtype != torch.int32
+            or not slot_mapping.is_contiguous()
+        ):
+            slot_mapping_i32 = slot_mapping.to(
+                device=self.device, dtype=torch.int32
+            ).contiguous()
+        else:
+            slot_mapping_i32 = slot_mapping
         causal = common_attn_metadata.causal
 
         sdpa_start_loc = query_start_loc
@@ -182,12 +199,10 @@ class QAicAttentionMetadataBuilder(AttentionMetadataBuilder[QAicAttentionMetadat
                 decode_threshold=self.reorder_batch_threshold,
                 require_uniform=True,
             )
-            num_reqs = num_decodes + num_prefills
 
         scheduler_metadata = None
 
         attn_metadata = QAicAttentionMetadata(
-            isa=self.isa,
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
             query_start_loc=query_start_loc,
@@ -195,6 +210,7 @@ class QAicAttentionMetadataBuilder(AttentionMetadataBuilder[QAicAttentionMetadat
             seq_lens=seq_lens,
             block_table=block_table_tensor,
             slot_mapping=slot_mapping,
+            slot_mapping_i32=slot_mapping_i32,
             scheduler_metadata=scheduler_metadata,
             causal=causal,
             use_sdpa_prefill=self.use_sdpa_prefill,
@@ -203,6 +219,7 @@ class QAicAttentionMetadataBuilder(AttentionMetadataBuilder[QAicAttentionMetadat
             max_model_len=self.vllm_config.model_config.max_model_len,
             max_num_seqs=self.vllm_config.scheduler_config.max_num_seqs,
             req_ids=req_ids,
+            finished_req_ids=self.finished_req_ids,
         )
 
         return attn_metadata
@@ -266,7 +283,6 @@ class QAicAttentionBackendImpl(AttentionImpl):
         # Per-sequence KV cache: req_id -> (k_buf, v_buf, cached_tokens)
         # Each buffer is pre-allocated to max_model_len on first access.
         self._kv_cache: dict[str, tuple[torch.Tensor, torch.Tensor, int]] = {}
-        self._prev_req_ids: set[str] = set()
         self._max_model_len: int | None = None  # lazily set from metadata
 
     def forward(
@@ -288,7 +304,7 @@ class QAicAttentionBackendImpl(AttentionImpl):
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: shape =
-                [2, num_blocks, num_kv_heads, block_size, head_size]
+                [num_blocks, num_kv_heads, block_size, 2 * head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -321,6 +337,19 @@ class QAicAttentionBackendImpl(AttentionImpl):
                 self.attn_type,
             )
 
+        key_cache, value_cache = kv_cache.split(self.head_size, dim=-1)
+        if self._run_native_paged_attention(
+            query=query,
+            key=key,
+            value=value,
+            key_cache=key_cache,
+            value_cache=value_cache,
+            output=output,
+            attn_metadata=attn_metadata,
+            num_actual_tokens=num_actual_tokens,
+        ):
+            return output
+
         return self._run_sdpa_decode_forward(
             query,
             key,
@@ -328,6 +357,152 @@ class QAicAttentionBackendImpl(AttentionImpl):
             attn_metadata,
             output,
         )
+
+    def _run_native_paged_attention(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        value: torch.Tensor | None,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        output: torch.Tensor,
+        attn_metadata: QAicAttentionMetadata,
+        num_actual_tokens: int,
+    ) -> bool:
+        if os.environ.get("QAIC_NATIVE_PAGED_ATTN", "1") == "0":
+            return False
+        write_cache = self.kv_sharing_target_layer_name is None
+        if self.attn_type != AttentionType.DECODER:
+            return False
+        if query.device.type != "qaic" or query.dtype != torch.float16:
+            return False
+        if key_cache.dtype != torch.float16 or value_cache.dtype != torch.float16:
+            return False
+        if self.alibi_slopes is not None:
+            return False
+        if self.sliding_window != (-1, -1):
+            return False
+        if self.logits_soft_cap != 0:
+            return False
+        if self.sinks is not None:
+            return False
+        if self.num_kv_heads <= 0:
+            return False
+        backend = os.environ.get("QAIC_PAGED_ATTN_BACKEND")
+        if backend is None:
+            backend = (
+                "hvx" if os.environ.get("QAIC_PAGED_ATTN_HMX", "1") == "0" else "hmx"
+            )
+        backend = backend.lower()
+        if backend == "hvx" and self.head_size > 256:
+            return False
+        if self.num_heads % self.num_kv_heads != 0:
+            return False
+        if query.dim() != 3:
+            return False
+        if write_cache:
+            if key is None or value is None:
+                return False
+            if key.dtype != torch.float16 or value.dtype != torch.float16:
+                return False
+            if key.dim() != 3 or value.dim() != 3:
+                return False
+        if key_cache.dim() != 4 or value_cache.dim() != 4:
+            return False
+        if num_actual_tokens <= 0:
+            return True
+
+        try:
+            from vllm_qaic import _custom_ops as qaic_ops
+        except Exception:
+            return False
+
+        native_key = key[:num_actual_tokens] if key is not None else None
+        native_value = value[:num_actual_tokens] if value is not None else None
+        if not write_cache and (native_key is None or native_value is None):
+            native_shape = (num_actual_tokens, self.num_kv_heads, self.head_size)
+            native_key = query.new_empty(native_shape)
+            native_value = query.new_empty(native_shape)
+
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        split_mixed = (
+            backend == "hmx"
+            and write_cache
+            and os.environ.get("QAIC_SPLIT_MIXED_PAGED_ATTN", "1") != "0"
+            and 0 < num_decode_tokens < num_actual_tokens
+            and num_decode_tokens < attn_metadata.seq_lens.shape[0]
+            and num_decode_tokens + 1 < attn_metadata.query_start_loc.shape[0]
+        )
+        if split_mixed:
+            try:
+                min_decode_reqs = int(
+                    os.environ.get("QAIC_SPLIT_MIXED_MIN_DECODE_REQS", "4")
+                )
+            except ValueError:
+                min_decode_reqs = 4
+            split_mixed = num_decode_tokens >= max(1, min_decode_reqs)
+
+        if split_mixed:
+            assert native_key is not None
+            assert native_value is not None
+            decode_out = qaic_ops.paged_attention(
+                query[:num_decode_tokens],
+                native_key[:num_decode_tokens],
+                native_value[:num_decode_tokens],
+                key_cache,
+                value_cache,
+                attn_metadata.block_table[:num_decode_tokens],
+                attn_metadata.slot_mapping_i32[:num_decode_tokens],
+                attn_metadata.query_start_loc[: num_decode_tokens + 1],
+                attn_metadata.seq_lens[:num_decode_tokens],
+                self.scale,
+                attn_metadata.causal,
+                write_cache=True,
+            )
+            output[:num_decode_tokens].copy_(
+                decode_out.reshape_as(output[:num_decode_tokens])
+            )
+
+            prefill_start_loc = (
+                attn_metadata.query_start_loc[num_decode_tokens:] - num_decode_tokens
+            ).contiguous()
+            prefill_out = qaic_ops.paged_attention(
+                query[num_decode_tokens:num_actual_tokens],
+                native_key[num_decode_tokens:num_actual_tokens],
+                native_value[num_decode_tokens:num_actual_tokens],
+                key_cache,
+                value_cache,
+                attn_metadata.block_table[num_decode_tokens:],
+                attn_metadata.slot_mapping_i32[num_decode_tokens:num_actual_tokens],
+                prefill_start_loc,
+                attn_metadata.seq_lens[num_decode_tokens:],
+                self.scale,
+                attn_metadata.causal,
+                write_cache=True,
+            )
+            output[num_decode_tokens:num_actual_tokens].copy_(
+                prefill_out.reshape_as(output[num_decode_tokens:num_actual_tokens])
+            )
+            return True
+
+        native_out = qaic_ops.paged_attention(
+            query[:num_actual_tokens],
+            native_key,
+            native_value,
+            key_cache,
+            value_cache,
+            attn_metadata.block_table,
+            attn_metadata.slot_mapping_i32[:num_actual_tokens],
+            attn_metadata.query_start_loc,
+            attn_metadata.seq_lens,
+            self.scale,
+            attn_metadata.causal,
+            write_cache=write_cache,
+        )
+        output[:num_actual_tokens].copy_(
+            native_out.reshape_as(output[:num_actual_tokens])
+        )
+        return True
 
     def _run_sdpa_decode_forward(
         self,
@@ -353,6 +528,8 @@ class QAicAttentionBackendImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
+        assert attn_metadata is not None
+        assert output is not None
         req_ids = attn_metadata.req_ids
         if req_ids is None:
             # Fallback: no req_ids available, skip computation
@@ -362,14 +539,18 @@ class QAicAttentionBackendImpl(AttentionImpl):
         if self._max_model_len is None:
             self._max_model_len = attn_metadata.max_model_len
 
-        # Evict KV cache entries for requests that left the batch.
-        current_ids = set(req_ids)
-        for rid in self._prev_req_ids - current_ids:
+        # Evict KV cache entries only for finished requests. A running request
+        # can be absent from a batch (PP micro-batches, token budget, chunked
+        # prefill) and must keep its cache.
+        for rid in attn_metadata.finished_req_ids or ():
             self._kv_cache.pop(rid, None)
-        self._prev_req_ids = current_ids
 
         query_start_loc = attn_metadata.query_start_loc  # [num_seqs + 1]
+        if query_start_loc.device.type != "cpu":
+            query_start_loc = query_start_loc.cpu()
         seq_lens = attn_metadata.seq_lens  # [num_seqs]
+        if seq_lens.device.type != "cpu":
+            seq_lens = seq_lens.cpu()
 
         for i, req_id in enumerate(req_ids):
             tok_start = query_start_loc[i].item()
@@ -398,6 +579,11 @@ class QAicAttentionBackendImpl(AttentionImpl):
                     )
                     kv_v = torch.zeros_like(kv_k)
                     cached = 0
+                    if num_new != seq_len:
+                        raise RuntimeError(
+                            f"QAIC_ATTN: no KV cache for request {req_id} "
+                            f"with {seq_len - num_new} cached tokens"
+                        )
                 else:
                     kv_k, kv_v, cached = self._kv_cache[req_id]
 
@@ -494,6 +680,7 @@ class QAicAttentionBackendImpl(AttentionImpl):
         causal_attn = attn_type == AttentionType.DECODER
 
         sdpa_start_loc = attn_metadata.sdpa_start_loc  # .numpy()  # type: ignore
+        assert sdpa_start_loc is not None
         for i in range(len(attn_masks)):
             mask = attn_masks[i]
             start_q = sdpa_start_loc[i]
@@ -571,20 +758,3 @@ def _make_sliding_window_bias(
         attn_biases.append(mask)
 
     return attn_biases
-
-
-def _get_attn_isa(
-    dtype: torch.dtype, block_size: int, head_size: int | None = None
-) -> str:
-    if head_size is not None and head_size % 32 != 0 and head_size % 16 == 0:
-        return "vec16"
-    supports_amx = torch._C._cpu._is_amx_tile_supported()
-    if supports_amx and dtype in (torch.bfloat16,) and block_size % 32 == 0:
-        return "amx"
-    elif block_size % 32 == 0:
-        if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
-            return "neon"
-        else:
-            return "vec"
-    else:
-        return "vec16"

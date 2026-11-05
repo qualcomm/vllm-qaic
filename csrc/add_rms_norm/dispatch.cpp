@@ -27,12 +27,12 @@
 // Forward declarations for symbols defined in kernel.cpp / kernel_bf16.cpp.
 // Use plain extern "C" — QAIC_KERNEL_API adds visibility/alignment attributes
 // that belong only on the definition, not the declaration.
-extern "C" uint32_t rms_norm_multi_nsp(const AicJitEntryPointConfig *cfg,
-                                       const AicJitPointerArray *ptrs);
+extern "C" uint32_t rms_norm_multi_nsp(const AicJitEntryPointConfig* cfg,
+                                       const AicJitPointerArray* ptrs);
 
 #if __HEXAGON_ARCH__ >= 81
-extern "C" uint32_t rms_norm_multi_nsp_bf16(const AicJitEntryPointConfig *cfg,
-                                            const AicJitPointerArray *ptrs);
+extern "C" uint32_t rms_norm_multi_nsp_bf16(const AicJitEntryPointConfig* cfg,
+                                            const AicJitPointerArray* ptrs);
 #endif
 
 // rms_norm_dispatch — single entry point called by the wrapper.
@@ -46,9 +46,9 @@ extern "C" uint32_t rms_norm_multi_nsp_bf16(const AicJitEntryPointConfig *cfg,
 //   ptrs->pointers[6] : N           int scalar (weight.numel())
 //   ptrs->pointers[7] : total_elems int scalar (attn_out.numel())
 //   ptrs->pointers[8] : dtype       int scalar (0=FP16, 1=BF16)
-QAIC_KERNEL_API uint32_t rms_norm_dispatch(const AicJitEntryPointConfig *cfg,
-                                           const AicJitPointerArray *ptrs) {
-  const int dtype = *(const int32_t *)ptrs->pointers[8];
+QAIC_KERNEL_API uint32_t rms_norm_dispatch(const AicJitEntryPointConfig* cfg,
+                                           const AicJitPointerArray* ptrs) {
+  const int dtype = *(const int32_t*)ptrs->pointers[8];
 
 #if __HEXAGON_ARCH__ >= 81
   if (dtype == QAIC_RMS_NORM_DTYPE_BF16) {

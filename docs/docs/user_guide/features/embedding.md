@@ -21,6 +21,7 @@ Embedding networks transform high-dimensional inputs — text, images, items —
 ## Usage
 
 "embed" example
+
 ```python
 from vllm import LLM
 
@@ -29,7 +30,6 @@ prompts = ["Hello, my name is"] * 10
 model = LLM(
     model="intfloat/multilingual-e5-large",
     runner="pooling",
-    enforce_eager=True,
     max_num_seqs=4,
     max_model_len=256,
     additional_config={
@@ -50,7 +50,6 @@ for prompt, output in zip(prompts, outputs):
 model = LLM(
     model="intfloat/multilingual-e5-large",
     runner="pooling",
-    enforce_eager=True,
     max_num_seqs=4,
     max_model_len=256,
     additional_config={
@@ -84,7 +83,6 @@ prompts = ["Hello, my name is"] * 10
 model = LLM(
     model="BAAI/bge-reranker-v2-m3",
     runner="pooling",
-    enforce_eager=True,
     max_num_seqs=4,
     max_model_len=512,
     additional_config={
@@ -114,7 +112,6 @@ passages = [
 model = LLM(
     model="BAAI/bge-reranker-v2-m3",
     runner="pooling",
-    enforce_eager=True,
     max_num_seqs=4,
     max_model_len=512,
     additional_config={

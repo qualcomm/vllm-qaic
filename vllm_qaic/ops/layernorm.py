@@ -61,7 +61,7 @@ class QAicGemmaRMSNorm(GemmaRMSNorm):
             return normed, new_residual
 
         return F.rms_norm(
-            x, [self.hidden_size], 1.0 + self.weight, self.variance_epsilon
+            x, self.weight.shape, 1.0 + self.weight, self.variance_epsilon
         )
 
 

@@ -58,10 +58,9 @@ SpD provides the largest single-feature improvement to decode throughput:
 
 Separating prefill and decode onto different nodes allows independent optimization:
 
-```
+```text
 Request → Prefill Node (TTFT-optimized) → KV transfer → Decode Node (TPOT-optimized) → Response
-```
-
+```text
 | Topology | Use Case |
 |----------|----------|
 | 1P1D | Balanced latency and throughput |

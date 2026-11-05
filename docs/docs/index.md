@@ -65,7 +65,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 | **Best for** | Production throughput | Development flexibility |
 | **Model compilation** | Pre-compiled QPCs (static graphs) | Dynamic execution |
 | **Feature coverage** | Full (SpD, LoRA, disaggregated, multimodal) | VLMs (experimental) |
-| **torch version** | 2.7.0+cpu | 2.10.0+cpu |
+| **torch version** | 2.7.0+cpu | 2.13.0+cpu |
 
 !!! warning "Mode isolation"
     The two modes cannot coexist in the same Python environment. Use separate virtual environments.
@@ -76,7 +76,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 | vllm-qaic | vLLM | Apps SDK | QEfficient | torch (AOT) | torch (PYT) |
 |-----------|------|----------|------------|-------------|-------------|
-| v0.15.0.dev0 | v0.15.0 | >= 1.22.0 | main | 2.7.0+cpu | 2.10.0+cpu |
+| v0.30.0.dev0 | v0.30.0 | >= 1.22.0 | main | 2.7.0+cpu | 2.13.0+cpu |
 
 ---
 
@@ -96,7 +96,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 <div class="grid cards" markdown>
 
--   :rocket:{ .lg .middle } **Quick Start**
+- :rocket:{ .lg .middle } **Quick Start**
 
     ---
 
@@ -104,7 +104,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
     [:octicons-arrow-right-24: Quickstart](getting_started/quickstart.md)
 
--   :bar_chart:{ .lg .middle } **Support Matrix**
+- :bar_chart:{ .lg .middle } **Support Matrix**
 
     ---
 
@@ -112,7 +112,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
     [:octicons-arrow-right-24: Support Matrix](user_guide/features/index.md)
 
--   :brain:{ .lg .middle } **Supported Models**
+- :brain:{ .lg .middle } **Supported Models**
 
     ---
 
@@ -120,7 +120,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
     [:octicons-arrow-right-24: AOT Models](user_guide/models/supported_models_aot.md) · [:octicons-arrow-right-24: Eager Models](user_guide/models/supported_models_eager.md)
 
--   :zap:{ .lg .middle } **Features**
+- :zap:{ .lg .middle } **Features**
 
     ---
 
@@ -128,7 +128,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
     [:octicons-arrow-right-24: Features](user_guide/features/speculative_decoding.md)
 
--   :gear:{ .lg .middle } **Configuration**
+- :gear:{ .lg .middle } **Configuration**
 
     ---
 
@@ -136,7 +136,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
     [:octicons-arrow-right-24: Configuration](user_guide/configuration/engine_args.md)
 
--   :construction_worker:{ .lg .middle } **Developer Guide**
+- :construction_worker:{ .lg .middle } **Developer Guide**
 
     ---
 

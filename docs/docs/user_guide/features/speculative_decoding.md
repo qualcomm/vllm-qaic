@@ -16,13 +16,14 @@ Speculative decoding (SpD) accelerates token generation by using a fast proposer
 
 ## Methods
 
-Cloud AI supports three speculative decoding methods:
+Cloud AI supports four speculative decoding methods:
 
 | Method | Proposer | Separate Model Binary | Dedicated Core Allocation | Best For |
 |--------|----------|-------------|-------------|----------|
 | `ngram` | N-gram pattern matching | No | No | Summarization, repetitive output |
 | `suffix` | Suffix array matching | No | No | Code completion, long-context echo |
 | `draft_model` | Lightweight LLM | Yes | Yes | General text generation |
+| `dflash` | Block-diffusion draft LM | Yes | Yes | High-throughput block drafting |
 
 ## N-gram Speculative Decoding
 
@@ -118,11 +119,85 @@ docker run --rm -it --network host \
     [QEfficient SpD Guide](https://quic.github.io/efficient-transformers/speculative_decoding.html)
     for compilation details.
 
+## DFlash Speculative Decoding
+
+DFlash uses a block-diffusion draft LM (DLM) that proposes an entire block of candidate tokens per step in a single batched forward pass, conditioned on the target model's (TLM) hidden states. The DLM's `block_size` sets `num_speculative_tokens` (`= block_size - 1`):
+
+```python
+from vllm import LLM, SamplingParams
+
+device_group = [0, 1, 2, 3]
+block_size = 16  # DFlash DLM block_size (num_speculative_tokens = block_size - 1)
+
+llm = LLM(
+    model="Qwen/Qwen3-4B",
+    max_num_seqs=4,
+    max_model_len=4096,
+    long_prefill_token_threshold=128,  # TLM prefill_seq_len (multiple of block_size)
+    quantization="mxfp6",
+    kv_cache_dtype="mxint8",
+    additional_config={
+        "override_qaic_config": {
+            "device_group": device_group,
+            "num_cores": 8,
+            "prefill_seq_len": 128,
+            "mxfp6_matmul": True,
+            "mxint8_kv_cache": True,
+            "mos": 1,
+        },
+        "draft_override_qaic_config": {
+            "device_group": device_group,  # Same device
+            "num_cores": 8,
+            "prefill_seq_len": block_size,  # DLM prefills block_size at a time
+            "mxfp6_matmul": True,
+            "mxint8_kv_cache": True,
+            "mos": 1,
+        },
+    },
+    speculative_config={
+        "method": "dflash",
+        "model": "z-lab/Qwen3-4B-DFlash-b16",
+        "num_speculative_tokens": block_size - 1,
+    },
+)
+```
+
+**Docker example:**
+
+```bash
+docker run --rm -it --network host \
+  --device /dev/accel/ \
+  --shm-size=4gb \
+  -e HF_TOKEN=<your_hf_token> \
+  ghcr.io/quic/cloud_ai_inference_vllm:1.21.2.0 \
+  --host 127.0.0.1 --port 8000 \
+  --model Qwen/Qwen3-4B \
+  --max-model-len 4096 \
+  --max-num-seq 4 \
+  --max-seq-len-to-capture 128 \
+  --quantization mxfp6 \
+  --kv-cache-dtype mxint8 \
+  --speculative-config '{"method":"dflash","model":"z-lab/Qwen3-4B-DFlash-b16","num_speculative_tokens":15}' \
+  --additional-config '{"override_qaic_config":{"device_group":[0,1,2,3],"num_cores":8,"prefill_seq_len":128,"mxfp6_matmul":true,"mxint8_kv_cache":true,"mos":1},"draft_override_qaic_config":{"device_group":[0,1,2,3],"num_cores":8,"prefill_seq_len":16,"mxfp6_matmul":true,"mxint8_kv_cache":true,"mos":1}}'
+```
+
+!!! info "QEfficient Reference"
+    The DFlash DLM checkpoint (e.g. `z-lab/Qwen3-4B-DFlash-b16`) and its
+    cross-checkpoint config (`block_size`, `target_layer_ids`, `mask_token_id`)
+    are consumed via QEfficient's `DFlashDLMTransform`/`DFlashTLMTransform`. See
+    the [QEfficient SpD Guide](https://quic.github.io/efficient-transformers/speculative_decoding.html)
+    for details.
+
+!!! note "TLM `prefill_seq_len` must be a multiple of `block_size`"
+    The target model's `prefill_seq_len` (`long_prefill_token_threshold`) must be
+    an exact multiple of the DLM's `block_size`, since prefill chunks are fanned
+    out into `block_size`-sized sub-blocks for the DLM.
+
 ## Core Allocation
 
 On a Cloud AI 100 Ultra card (4 QIDs, 16 cores per QID), cores are split between the target model (TLM) and draft model (DLM) on each QID:
 
-```
+```text
 Per QID (16 NSP cores):
 +--------------------+----------------+
 | Target Model (10)  | Draft Model (6)|
@@ -145,6 +220,26 @@ No additional hardware is required — both models run on the same device.
     | `override_qaic_config.num_cores` | Compute for verification (target) | 10-12 for 8B models |
     | `draft_override_qaic_config.num_cores` | Compute for proposing (draft) | 4-6 for 1B models |
     | `max_num_seqs` | Batch size | Lower batch = higher acceptance rate |
+
+!!! tip "LD_PRELOAD libiomp5 for CPU-bound SpD proposers (AOT mode)"
+    For AOT mode, `ngram`/`suffix` SpD proposers run on host CPU and benefit
+    from Intel OpenMP (`libiomp5.so`) runtime tuning — on both Intel **and**
+    AMD hosts. Benchmarks on an AMD EPYC host showed meaningful throughput
+    gains for CPU-bound proposers like `ngram`, with the improvement growing
+    at higher batch sizes (actual gains are workload-dependent).
+
+    ```bash
+    # install Intel OpenMP (provides libiomp5.so) into your active venv
+    pip install intel-openmp
+
+    # manually find the path
+    IOMP_PATH=$(find "$(python -c 'import sysconfig; print(sysconfig.get_paths()["data"])')" -iname "libiomp5.so" | head -1)
+
+    # add it to LD_PRELOAD
+    export LD_PRELOAD="$IOMP_PATH:$LD_PRELOAD"
+    ```
+
+    Set `VLLM_DISABLE_LD_PRELOAD_OPT=1` to opt out of this tuning.
 
 ## SpD with Disaggregated Serving
 

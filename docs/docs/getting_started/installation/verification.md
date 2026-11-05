@@ -11,7 +11,7 @@ After installation, verify your environment is correctly set up.
 # Check torch is CPU-only
 python -c "import torch; print(torch.__version__)"
 # AOT expected: 2.7.0+cpu
-# PYT expected: 2.10.0+cpu
+# PYT expected: 2.13.0+cpu
 
 # Verify vllm-qaic plugin loads
 python -c "import vllm_qaic; print('vllm_qaic OK')"
@@ -65,7 +65,6 @@ print('QAIC environment loaded successfully')
         model="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
         max_num_seqs=4,
         max_model_len=256,
-        enforce_eager=True,
         async_scheduling=False,
     )
     outputs = llm.generate(["Hello, world!"], SamplingParams(max_tokens=32))

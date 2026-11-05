@@ -21,7 +21,7 @@ export QAIC_VISIBLE_DEVICES=0
 vllm serve TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
     --max-model-len 256 --max-num-seq 1 \
     --long-prefill-token-threshold 128 \
-    --no-enable-prefix-caching --enforce-eager \
+    --no-enable-prefix-caching \
     --no-async-scheduling
 """
 

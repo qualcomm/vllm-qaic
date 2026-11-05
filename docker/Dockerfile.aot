@@ -1,0 +1,593 @@
+# ------------------------------------------------------------------
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause-Clear
+# ------------------------------------------------------------------
+#
+# Dockerfile.aot — AOT (Ahead-of-Time) mode for vllm-qaic.
+#
+# Stage overview
+# --------------
+#   aot-base   Shared foundation: system packages, uv venv, build tools,
+#              QEfficient + torch, triton-cpu (optional), rust frontend
+#              (optional), vllm deps + vllm. Can be built and pushed as a
+#              standalone image.
+#
+#   release    FROM aot-base. Installs vllm-qaic non-editable from a
+#              published git ref (tag or branch). Fully self-contained.
+#
+#   ci         FROM aot-base. Installs vllm-qaic non-editable from the
+#              current build-context checkout, a branch, or a PR number.
+#
+#   dev        FROM aot-base. Installs QEfficient and vllm-qaic both
+#              editable (pip install -e) for fast in-container iteration.
+#
+#   wheel      FROM aot-base. Builds a vllm-qaic AOT wheel from the
+#              build-context checkout and exports it via BuildKit's local
+#              exporter — no container run / bind mount needed.
+#
+# Build commands
+# --------------
+#   # Standalone base (push to registry for reuse):
+#   docker build --target aot-base -t vllm-qaic-aot-base:1.24 .
+#
+#   # Release (default pins):
+#   docker build --target release -t vllm-qaic-aot:1.24 .
+#
+#   # Release (override version):
+#   docker build --target release \
+#     --build-arg VLLM_QAIC_GIT_REF=v1.24 \
+#     --build-arg QEFF_BRANCH=main \
+#     -t vllm-qaic-aot:1.24 .
+#
+#   # CI (current checkout):
+#   docker build --target ci -t vllm-qaic-aot:ci .
+#
+#   # CI (specific PR):
+#   docker build --target ci --build-arg VLLM_QAIC_PR=42 -t vllm-qaic-aot:ci-pr-42 .
+#
+#   # CI (specific branch):
+#   docker build --target ci \
+#     --build-arg VLLM_QAIC_BRANCH=feature/my-branch \
+#     -t vllm-qaic-aot:ci-branch .
+#
+#   # Dev (default branches, editable installs):
+#   docker build --target dev -t vllm-qaic-aot:dev .
+#
+#   # Dev (specific QEfficient PR):
+#   docker build --target dev --build-arg QEFF_PR=456 -t vllm-qaic-aot:dev .
+#
+#   # Wheel (export to ./dist/aot):
+#   docker buildx build --target wheel -t vllm-qaic-aot-wheel \
+#     --output type=local,dest=./dist/aot .
+#
+#   # Wheel with an overridden filename:
+#   docker buildx build --target wheel -t vllm-qaic-aot-wheel \
+#     --build-arg WHEEL_NAME=vllm_qaic-1.24.0+aot-py3-none-any.whl \
+#     --output type=local,dest=./dist/aot .
+#
+#   # Any target — also build vllm's experimental Rust OpenAI frontend
+#   # (vllm-rs). See docs/installation.md for known caveats.
+#   docker build --target release --build-arg VLLM_BUILD_RUST=1 \
+#     -t vllm-qaic-aot:1.24-rust .
+#
+#   # Rust toolchain from a mirror / internal registry instead of Docker Hub:
+#   docker build --target release --build-arg VLLM_BUILD_RUST=1 \
+#     --build-arg RUST_IMAGE=my.registry.internal:5000/mirror/rust:1.90-slim \
+#     -t vllm-qaic-aot:1.24-rust .
+#
+# The BASE_IMAGE must have the QAIC Platform and Apps SDKs installed
+# (i.e. /opt/qti-aic/ present) so that vllm-qaic can load at runtime.
+#
+# Run dev container with host-matching UID/GID and qaic group access:
+#   docker run -it --rm \
+#     -e USER_UID=$(id -u) -e USER_GID=$(id -g) \
+#     -e QAIC_GID=$(getent group qaic | cut -d: -f3) \
+#     --device /dev/accel/ -v $(pwd):/src/vllm-qaic \
+#     vllm-qaic-aot:dev
+#
+# Verify any target:
+#   docker run --rm <image> python -c "import vllm_qaic; print('OK')"
+# ------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Infrastructure ARGs
+# ---------------------------------------------------------------------------
+ARG BASE_IMAGE="ghcr.io/quic/cloud_ai_inference_ubuntu24:1.21.6.0"
+ARG VENV="/opt/venv-aot"
+ARG UV_VERSION="0.11.29"
+ARG PYTHON_VERSION="3.12"
+ARG RUST_VERSION="1.90"
+
+# Full image ref for the Rust toolchain. Defaults to the RUST_VERSION pin on
+# Docker Hub; override to pull from a mirror or internal registry, in which case
+# RUST_VERSION is ignored (the override supplies its own tag).
+ARG RUST_IMAGE="docker.io/library/rust:${RUST_VERSION}-slim"
+
+# ---------------------------------------------------------------------------
+# Shared stack version pins — defaults mirror scripts/utility.sh.
+# All vars use ${VAR:-default} in utility.sh so passing --build-arg takes
+# precedence without changing the script.
+# ---------------------------------------------------------------------------
+ARG VLLM_VERSION="0.30.0"
+ARG VLLM_QAIC_VERSION="1.24"
+ARG QEFF_BRANCH="main"
+ARG TORCH_VERSION_AOT="2.7.0+cpu"
+ARG TORCHVISION_VERSION_AOT="0.22.0+cpu"
+ARG VLLM_TARGET_DEVICE_AOT="empty"
+
+# ---------------------------------------------------------------------------
+# triton-cpu — shared by aot-base, installed BEFORE vllm so vllm sees it.
+# Set TRITON_CPU=0 to skip (faster builds when not needed).
+# ---------------------------------------------------------------------------
+ARG TRITON_CPU="0"
+ARG TRITON_CPU_COMMIT="e60f448f8f197073b75d6d3e77347414a5db3ee7"
+ARG TRITON_CPU_COMPILE_MAX_JOBS="4"
+
+# ---------------------------------------------------------------------------
+# rust frontend — experimental (see docs/installation.md); default ON.
+# ---------------------------------------------------------------------------
+ARG VLLM_BUILD_RUST="1"
+
+# ---------------------------------------------------------------------------
+# vllm source override (any target) — priority: VLLM_PR > VLLM_BRANCH > the
+# pinned VLLM_VERSION tag.
+# ---------------------------------------------------------------------------
+ARG VLLM_PR=""
+ARG VLLM_BRANCH=""
+
+# ---------------------------------------------------------------------------
+# Release-specific
+# ---------------------------------------------------------------------------
+ARG VLLM_QAIC_GIT_REF="main"
+
+# ---------------------------------------------------------------------------
+# CI-specific (both empty → use build-context COPY)
+# ---------------------------------------------------------------------------
+ARG VLLM_QAIC_PR=""
+ARG VLLM_QAIC_BRANCH=""
+
+# ---------------------------------------------------------------------------
+# Dev-specific
+# ---------------------------------------------------------------------------
+ARG QEFF_PR=""    # if set, overrides QEFF_BRANCH for editable QEfficient install
+
+# ---------------------------------------------------------------------------
+# Wheel-specific — WHEEL_NAME renames the built wheel before it is exported
+# (empty = keep uv build's own name).
+# ---------------------------------------------------------------------------
+ARG WHEEL_NAME=""
+
+# ---------------------------------------------------------------------------
+# Pinned uv binary — FROM supports ARG substitution, COPY --from does not.
+# ---------------------------------------------------------------------------
+# hadolint ignore=DL3006
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
+
+# ---------------------------------------------------------------------------
+# Pinned Rust toolchain, COPY'd into the infra layer below. Version doesn't
+# need to match exactly — rustup auto-fetches whatever toolchain vllm's own
+# rust-toolchain.toml pins when `cargo build` runs. RUST_IMAGE selects the ref
+# (see the ARG above) so a mirror can be used instead of Docker Hub.
+# ---------------------------------------------------------------------------
+# hadolint ignore=DL3006
+FROM ${RUST_IMAGE} AS rust-toolchain
+
+# ===========================================================================
+# aot-base — shared foundation for all three targets.
+#
+# Layer structure (each RUN is an independent cache layer):
+#   1. infra    : apt + uv venv + build-deps + Rust toolchain (COPY'd, unused
+#                 unless VLLM_BUILD_RUST=1)
+#   2. step1    : torch (CPU wheel)
+#   3. step2    : triton-cpu (optional, before vllm so vllm sees it at install)
+#   4. step1b   : QEfficient (non-editable), after triton-cpu since it
+#                 changes more often
+#   5a. step2b  : clone vllm at the pinned tag (always; rust build deps only
+#                 when VLLM_BUILD_RUST=1)
+#   5b. step2c  : rust frontend build (optional)
+#   6. step3    : vllm deps + vllm install from the local clone, then delete it
+# ===========================================================================
+# hadolint ignore=DL3006
+FROM ${BASE_IMAGE} AS aot-base
+
+COPY --from=rust-toolchain /usr/local/cargo /usr/local/cargo
+COPY --from=rust-toolchain /usr/local/rustup /usr/local/rustup
+COPY --from=uv /uv /usr/local/bin/uv
+
+# UV environment — set once, inherited by all downstream stages.
+#   UV_LINK_MODE=copy        : copy wheels instead of hardlinking; required for
+#                              COPY --from across multi-stage builds.
+#   UV_COMPILE_BYTECODE=1    : pre-compile .pyc at install time → faster startup.
+#   UV_PYTHON_DOWNLOADS=manual: never auto-download a runtime implicitly; the
+#                              infra layer below explicitly installs PYTHON_VERSION.
+#   UV_PYTHON_INSTALL_DIR    : pinned to a known path (uv's default is
+#                              $HOME/.local/share/uv/python) so it can be
+#                              COPY'd alongside VENV into release/ci/dev —
+#                              `uv venv --seed` symlinks the venv's python
+#                              binary to this external store rather than
+#                              copying it in, so any final stage that only
+#                              copies VENV out of its builder is left with a
+#                              dangling symlink.
+#   UV_NO_PROGRESS=1         : suppress progress bars for clean build logs.
+#   UV_HTTP_TIMEOUT=500      : tolerate slow PyPI mirrors / large wheels.
+#   UV_INDEX_STRATEGY        : relax transitive resolution; torch is pinned separately.
+#   UV_CACHE_DIR             : matches the --mount=type=cache targets below.
+ENV UV_LINK_MODE=copy \
+    UV_COMPILE_BYTECODE=1 \
+    UV_PYTHON_DOWNLOADS=manual \
+    UV_PYTHON_INSTALL_DIR=/opt/uv-python \
+    UV_NO_PROGRESS=1 \
+    UV_HTTP_TIMEOUT=500 \
+    UV_INDEX_STRATEGY=unsafe-best-match \
+    UV_CACHE_DIR=/var/cache/uv
+
+# Rust toolchain from the COPY above. Not leaked into release/ci/dev/wheel —
+# those stages COPY only specific paths (${VENV}, /opt/uv-python) out of
+# their builder, not this whole filesystem.
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+
+# Use bash for all RUN steps — scripts require bash syntax and set -euo pipefail.
+SHELL ["/bin/bash", "-c"]
+
+# Declare all ARGs after the last ENV block so they are visible as shell env
+# vars in every subsequent RUN. Defaults are repeated here explicitly — bare
+# ARG re-declarations without defaults can fail to inherit global ARG values
+# when declared after an ENV instruction in Docker BuildKit.
+ARG VENV="/opt/venv-aot"
+ARG PYTHON_VERSION="3.12"
+ARG VLLM_VERSION="0.30.0"
+ARG VLLM_QAIC_VERSION="1.24"
+ARG QEFF_BRANCH="main"
+ARG TORCH_VERSION_AOT="2.7.0+cpu"
+ARG TORCHVISION_VERSION_AOT="0.22.0+cpu"
+ARG VLLM_TARGET_DEVICE_AOT="empty"
+ARG TRITON_CPU="0"
+ARG TRITON_CPU_COMMIT="e60f448f8f197073b75d6d3e77347414a5db3ee7"
+ARG TRITON_CPU_COMPILE_MAX_JOBS="4"
+ARG VLLM_BUILD_RUST="1"
+ARG VLLM_PR=""
+ARG VLLM_BRANCH=""
+
+# ---------------------------------------------------------------------------
+# Layer 1 — infra: system packages + uv-managed python + build tools (merged)
+# Invalidated only when the package list, VENV/PYTHON_VERSION ARGs, or tool
+# pins change. uv-managed CPython (not apt) so PYTHON_VERSION can be any of
+# 3.11/3.12/3.13 regardless of what the base image's apt repos carry.
+# NOTE: the uv-installed Python must NOT sit under a cache mount — uv venv
+# symlinks into it, and a cache mount's contents vanish when the RUN ends,
+# leaving a dangling symlink in the venv for every later layer.
+# ---------------------------------------------------------------------------
+COPY requirements/build.txt /src/vllm-qaic/requirements/build.txt
+RUN --mount=type=cache,sharing=locked,target=/var/cache/apt \
+    --mount=type=cache,sharing=locked,target=/var/lib/apt \
+    --mount=type=cache,sharing=locked,target=/var/cache/uv \
+    apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        git && \
+    uv python install ${PYTHON_VERSION} && \
+    uv venv ${VENV} --python ${PYTHON_VERSION} --seed && \
+    PATH="${VENV}/bin:${PATH}" uv pip install -r /src/vllm-qaic/requirements/build.txt
+
+ENV PATH="${VENV}/bin:${PATH}" \
+    VIRTUAL_ENV="${VENV}"
+
+# ARG values are automatically available as shell env vars inside RUN commands
+# after they are declared — no ENV promotion needed.
+
+# ---------------------------------------------------------------------------
+# Layer 2 — step1: torch (CPU wheel). Separate from QEfficient (Layer 4) so
+# a QEFF_BRANCH bump doesn't invalidate the expensive triton-cpu build below.
+# Must use python -m pip (uv refuses +local version labels like 2.7.0+cpu).
+# ---------------------------------------------------------------------------
+COPY scripts/utility.sh scripts/install_triton_cpu.sh /src/vllm-qaic/scripts/
+RUN python -m pip install --quiet \
+        --index-url https://download.pytorch.org/whl/cpu \
+        "torch==${TORCH_VERSION_AOT}" \
+        "torchvision==${TORCHVISION_VERSION_AOT}"
+
+# ---------------------------------------------------------------------------
+# Layer 3 — step2: triton-cpu (optional, BEFORE vllm so vllm sees it)
+# Cache key: TRITON_CPU and TRITON_CPU_COMMIT ENV vars (set above).
+# Cache mounts keep the git clone and LLVM toolchain across rebuilds so
+# only changed source files are recompiled on subsequent builds.
+# zlib1g-dev/libxml2-dev: triton-cpu's prebuilt LLVM links against them;
+# without the dev headers, CMake fails to resolve LLVM's exported targets.
+# ---------------------------------------------------------------------------
+RUN --mount=type=cache,sharing=locked,target=/var/cache/apt \
+    --mount=type=cache,sharing=locked,target=/var/lib/apt \
+    --mount=type=cache,sharing=locked,target=/var/cache/uv \
+    --mount=type=cache,sharing=locked,target=/root/triton-cpu \
+    --mount=type=cache,sharing=locked,target=/root/.triton_home \
+    if [ "${TRITON_CPU}" = "1" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends \
+            zlib1g-dev \
+            libxml2-dev && \
+        VIRTUAL_ENV="${VENV}" \
+        TRITON_CPU_SRC=/root/triton-cpu \
+        TRITON_HOME=/root/.triton_home \
+        TRITON_CPU_COMMIT="${TRITON_CPU_COMMIT}" \
+        TRITON_CPU_COMPILE_MAX_JOBS="${TRITON_CPU_COMPILE_MAX_JOBS}" \
+        bash /src/vllm-qaic/scripts/install_triton_cpu.sh; \
+    else \
+        echo "INFO: triton-cpu skipped (TRITON_CPU=${TRITON_CPU})"; \
+    fi
+
+# ---------------------------------------------------------------------------
+# Layer 4 — step1b: QEfficient (non-editable). Placed after triton-cpu since
+# QEFF_BRANCH changes far more often — only this layer onward invalidates.
+# ---------------------------------------------------------------------------
+RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
+    uv pip install \
+        "qefficient @ git+https://github.com/quic/efficient-transformers.git@${QEFF_BRANCH}"
+
+# ---------------------------------------------------------------------------
+# Layer 5a — clone vllm; vllm is always installed from this local checkout
+# (never git+URL). Priority: VLLM_PR > VLLM_BRANCH > pinned VLLM_VERSION tag.
+# Rust build deps installed only when needed. Kept separate from the build
+# step below — cache-mounting into a not-yet-cloned /src/vllm makes BuildKit
+# pre-create the path, and git clone then fails ("already exists").
+# ---------------------------------------------------------------------------
+RUN if [ -n "${VLLM_PR}" ]; then \
+        echo "=== vllm from PR #${VLLM_PR} ===" && \
+        git clone https://github.com/vllm-project/vllm.git /src/vllm && \
+        git -C /src/vllm fetch origin "refs/pull/${VLLM_PR}/head" && \
+        git -C /src/vllm checkout FETCH_HEAD; \
+    elif [ -n "${VLLM_BRANCH}" ]; then \
+        echo "=== vllm from branch ${VLLM_BRANCH} ===" && \
+        git clone --branch "${VLLM_BRANCH}" --depth 1 \
+            https://github.com/vllm-project/vllm.git /src/vllm; \
+    else \
+        git clone --branch "v${VLLM_VERSION}" --depth 1 \
+            https://github.com/vllm-project/vllm.git /src/vllm; \
+    fi && \
+    if [ "${VLLM_BUILD_RUST}" = "1" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends \
+            pkg-config perl protobuf-compiler libprotobuf-dev; \
+    fi
+
+# ---------------------------------------------------------------------------
+# Layer 5b — rust frontend build (optional): compile vllm-rs via
+# build_rust.sh. Cache mounts persist the cargo registry/git caches, rustup
+# toolchain, and build target dir across rebuilds. Uses cargo's DEFAULT
+# target dir — build_rust.sh's own `cp` step expects the binary there;
+# CARGO_TARGET_DIR overrides break it.
+# ---------------------------------------------------------------------------
+RUN --mount=type=cache,sharing=locked,target=/usr/local/cargo/registry \
+    --mount=type=cache,sharing=locked,target=/usr/local/cargo/git \
+    --mount=type=cache,sharing=locked,target=/usr/local/rustup \
+    --mount=type=cache,sharing=locked,target=/src/vllm/rust/target \
+    if [ "${VLLM_BUILD_RUST}" = "1" ]; then \
+        bash /src/vllm/build_rust.sh; \
+    fi
+
+# ---------------------------------------------------------------------------
+# Layer 6 — step3: vllm dependencies + vllm, installed from the local clone
+# (Layer 5a, optionally Rust-enabled by 5b), then delete the clone — release
+# and ci never COPY /src/vllm into their final image; dev re-clones it below.
+# ---------------------------------------------------------------------------
+COPY requirements/vllm_dependency_aot.txt /src/vllm-qaic/requirements/vllm_dependency_aot.txt
+RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
+    uv pip install -r /src/vllm-qaic/requirements/build.txt && \
+    uv pip install -r /src/vllm-qaic/requirements/vllm_dependency_aot.txt && \
+    VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE_AOT}" uv pip install \
+        --no-build-isolation --no-deps /src/vllm && \
+    rm -rf /src/vllm
+
+ENV VLLM_PLUGINS="qaic"
+
+# ===========================================================================
+# RELEASE — non-editable install from a published git ref.
+# Fully reproducible from ARG pins alone; no COPY from build context.
+# ===========================================================================
+FROM aot-base AS release-builder
+
+ARG VENV="/opt/venv-aot"
+ARG VLLM_VERSION="0.30.0"
+ARG VLLM_QAIC_VERSION="1.24"
+ARG VLLM_QAIC_GIT_REF="main"
+
+# Clone the pinned git ref, overlay our fixed setup.py (which supports
+# VLLM_VERSION_OVERRIDE and has simplified get_qaic_sdk_version), then install.
+COPY setup.py /src/vllm-qaic-setup.py
+RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
+    git clone --branch "${VLLM_QAIC_GIT_REF}" --depth 1 \
+        https://github.com/qualcomm/vllm-qaic.git /src/vllm-qaic-release && \
+    cp /src/vllm-qaic-setup.py /src/vllm-qaic-release/setup.py && \
+    TORCH_QAIC_INSTALLED=0 \
+    VLLM_VERSION_OVERRIDE="${VLLM_VERSION}+aot${VLLM_QAIC_VERSION}" \
+    uv pip install --no-build-isolation /src/vllm-qaic-release
+
+# hadolint ignore=DL3006
+FROM ${BASE_IMAGE} AS release
+
+ARG VENV
+
+COPY --from=release-builder ${VENV} ${VENV}
+COPY --from=release-builder /opt/uv-python /opt/uv-python
+
+ENV PATH="${VENV}/bin:${PATH}" \
+    VLLM_PLUGINS="qaic"
+
+# ===========================================================================
+# CI — non-editable install from build-context checkout, branch, or PR.
+# Priority: VLLM_QAIC_PR > VLLM_QAIC_BRANCH > build-context COPY (default).
+# ===========================================================================
+FROM aot-base AS ci-builder
+
+ARG VENV="/opt/venv-aot"
+ARG VLLM_VERSION="0.30.0"
+ARG VLLM_QAIC_VERSION="1.24"
+ARG VLLM_QAIC_PR=""
+ARG VLLM_QAIC_BRANCH=""
+
+COPY . /src/vllm-qaic
+RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
+    if [ -n "${VLLM_QAIC_PR}" ]; then \
+        echo "=== CI: vllm-qaic from PR #${VLLM_QAIC_PR} ===" && \
+        git clone https://github.com/qualcomm/vllm-qaic.git /src/vllm-qaic-ci && \
+        git -C /src/vllm-qaic-ci fetch origin "refs/pull/${VLLM_QAIC_PR}/head" && \
+        git -C /src/vllm-qaic-ci checkout FETCH_HEAD && \
+        SRC=/src/vllm-qaic-ci; \
+    elif [ -n "${VLLM_QAIC_BRANCH}" ]; then \
+        echo "=== CI: vllm-qaic from branch ${VLLM_QAIC_BRANCH} ===" && \
+        git clone --branch "${VLLM_QAIC_BRANCH}" --depth 1 \
+            https://github.com/qualcomm/vllm-qaic.git /src/vllm-qaic-ci && \
+        SRC=/src/vllm-qaic-ci; \
+    else \
+        echo "=== CI: vllm-qaic from build context ===" && \
+        SRC=/src/vllm-qaic; \
+    fi && \
+    TORCH_QAIC_INSTALLED=0 \
+    VLLM_VERSION_OVERRIDE="${VLLM_VERSION}+aot${VLLM_QAIC_VERSION}" \
+    uv pip install --no-build-isolation "${SRC}" && \
+    uv pip install -r "${SRC}/requirements/test.txt"
+
+# hadolint ignore=DL3006
+FROM ${BASE_IMAGE} AS ci
+
+ARG VENV
+
+COPY --from=ci-builder ${VENV} ${VENV}
+COPY --from=ci-builder /opt/uv-python /opt/uv-python
+
+ENV PATH="${VENV}/bin:${PATH}" \
+    VLLM_PLUGINS="qaic"
+
+# ===========================================================================
+# DEV — editable installs of QEfficient, vllm, and vllm-qaic for fast
+# iteration.
+# QEfficient: QEFF_PR > QEFF_BRANCH (cloned, editable).
+# vllm-qaic:  always from build context (COPY .), editable.
+# vllm:       re-cloned and reinstalled editable (aot-base's non-editable
+#             install is uninstalled first).
+# Source dirs are kept in the final image (editable installs need them).
+# ===========================================================================
+FROM aot-base AS dev-builder
+
+ARG VENV="/opt/venv-aot"
+ARG VLLM_VERSION="0.30.0"
+ARG VLLM_QAIC_VERSION="1.24"
+ARG QEFF_BRANCH="main"
+ARG QEFF_PR=""
+ARG VLLM_TARGET_DEVICE_AOT="empty"
+ARG VLLM_PR=""
+ARG VLLM_BRANCH=""
+
+# Step 4a: QEfficient editable — clone source, uninstall non-editable, reinstall -e.
+RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
+    if [ -n "${QEFF_PR}" ]; then \
+        echo "=== DEV: QEfficient from PR #${QEFF_PR} ===" && \
+        git clone https://github.com/quic/efficient-transformers.git /src/qefficient && \
+        git -C /src/qefficient fetch origin "refs/pull/${QEFF_PR}/head" && \
+        git -C /src/qefficient checkout FETCH_HEAD; \
+    else \
+        echo "=== DEV: QEfficient from branch ${QEFF_BRANCH} ===" && \
+        git clone --branch "${QEFF_BRANCH}" --depth 1 \
+            https://github.com/quic/efficient-transformers.git /src/qefficient; \
+    fi && \
+    uv pip uninstall qefficient --quiet 2>/dev/null || true && \
+    uv pip install -e /src/qefficient --no-build-isolation
+
+# Step 4b: vllm editable — re-clone (aot-base deleted its source after the
+# non-editable install; same VLLM_PR/VLLM_BRANCH priority), uninstall that
+# copy, reinstall -e.
+RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
+    if [ -n "${VLLM_PR}" ]; then \
+        git clone https://github.com/vllm-project/vllm.git /src/vllm && \
+        git -C /src/vllm fetch origin "refs/pull/${VLLM_PR}/head" && \
+        git -C /src/vllm checkout FETCH_HEAD; \
+    elif [ -n "${VLLM_BRANCH}" ]; then \
+        git clone --branch "${VLLM_BRANCH}" --depth 1 \
+            https://github.com/vllm-project/vllm.git /src/vllm; \
+    else \
+        git clone --branch "v${VLLM_VERSION}" --depth 1 \
+            https://github.com/vllm-project/vllm.git /src/vllm; \
+    fi && \
+    uv pip uninstall vllm --quiet 2>/dev/null || true && \
+    VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE_AOT}" uv pip install \
+        --no-build-isolation --no-deps -e /src/vllm
+
+# Step 4c: vllm-qaic editable — always from build context.
+# This is the last COPY so it is the only layer invalidated by source edits.
+COPY . /src/vllm-qaic
+RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
+    TORCH_QAIC_INSTALLED=0 \
+    VLLM_VERSION_OVERRIDE="${VLLM_VERSION}+aot${VLLM_QAIC_VERSION}" \
+    uv pip install --no-build-isolation -e /src/vllm-qaic && \
+    uv pip install -r /src/vllm-qaic/requirements/test.txt
+
+# hadolint ignore=DL3006
+FROM ${BASE_IMAGE} AS dev
+
+ARG VENV="/opt/venv-aot"
+
+# sudo + entrypoint.sh: map the container user to the host's uid/gid (and the
+# host's qaic device group) on `docker run`, so bind-mounted files keep host
+# ownership and /dev/accel stays accessible without running as root.
+RUN --mount=type=cache,sharing=locked,target=/var/cache/apt \
+    --mount=type=cache,sharing=locked,target=/var/lib/apt \
+    apt-get update && apt-get install -y --no-install-recommends sudo
+
+COPY --from=uv /uv /usr/local/bin/uv
+COPY --from=dev-builder ${VENV} ${VENV}
+COPY --from=dev-builder /opt/uv-python /opt/uv-python
+COPY --from=dev-builder /src/qefficient /src/qefficient
+COPY --from=dev-builder /src/vllm /src/vllm
+COPY --from=dev-builder /src/vllm-qaic /src/vllm-qaic
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+ENV PATH="${VENV}/bin:${PATH}" \
+    VLLM_PLUGINS="qaic" \
+    VENV="${VENV}"
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["bash"]
+
+# ===========================================================================
+# WHEEL — build a vllm-qaic AOT wheel from the build-context checkout and
+# export it via BuildKit's local exporter (no container run / bind mount
+# needed). AOT wheels are py3-none-any (pyver-independent).
+#
+#   docker buildx build --target wheel -f docker/Dockerfile.aot \
+#     --output type=local,dest=./dist/aot .
+#
+#   # Custom wheel filename:
+#   docker buildx build --target wheel -f docker/Dockerfile.aot \
+#     --build-arg WHEEL_NAME=vllm_qaic-1.24.0+aot-py3-none-any.whl \
+#     --output type=local,dest=./dist/aot .
+# ===========================================================================
+FROM aot-base AS wheel-builder
+
+ARG VLLM_VERSION="0.30.0"
+ARG VLLM_QAIC_VERSION="1.24"
+ARG WHEEL_NAME=""
+
+# WHEEL_NAME rename: the wheel's own name comes from setup.py's package name
+# and version, so overriding the filename is a post-build mv. Only the filename
+# changes — the .dist-info inside still carries the real name/version. pip reads
+# the distribution and compatibility tags off the filename and requires the
+# distribution to match that metadata, so an arbitrary name exports fine but
+# may not be installable; scripts/build_wheels.sh warns about names pip would
+# reject. Failing when /out has no wheel keeps a silent no-op rename from
+# exporting an unrenamed artifact.
+COPY . /src/vllm-qaic
+RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
+    TORCH_QAIC_INSTALLED=0 \
+    VLLM_VERSION_OVERRIDE="${VLLM_VERSION}+aot${VLLM_QAIC_VERSION}" \
+    uv build --wheel --no-build-isolation --out-dir /out /src/vllm-qaic && \
+    if [ -n "${WHEEL_NAME}" ]; then \
+        built="$(find /out -maxdepth 1 -name '*.whl' -print -quit)"; \
+        if [ -z "${built}" ]; then \
+            echo "ERROR: no wheel found in /out to rename" >&2; exit 1; \
+        fi; \
+        if [ "${built}" != "/out/${WHEEL_NAME}" ]; then \
+            mv "${built}" "/out/${WHEEL_NAME}" && \
+            echo "=== Wheel renamed: $(basename "${built}") -> ${WHEEL_NAME} ==="; \
+        fi; \
+    fi
+
+FROM scratch AS wheel
+COPY --from=wheel-builder /out /

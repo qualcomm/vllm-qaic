@@ -7,6 +7,7 @@
 # Adapted from vllm/examples/offline_inference/basic/classify.py
 
 from vllm import LLM
+from vllm.config import PoolerConfig
 
 # Classification example for QAIC.
 # llm.classify(prompts) runs a sequence-classification model and returns a
@@ -14,20 +15,16 @@ from vllm import LLM
 #
 # Use 'task: "classify"' in override_qaic_config to select
 # QEFFAutoModelForSequenceClassification (the correct model class for classifiers).
-# For QAIC pooling, also pass 'softmax: True' to get probabilities instead of raw logits.
+# For QAIC pooling, also pass 'softmax: True' to get probabilities instead of
+# raw logits.
 
 
 def print_classifications(prompts, outputs):
     print("\nGenerated Classifications:\n" + "-" * 60)
-    for prompt, output in zip(prompts, outputs):
+    for prompt, output in zip(prompts, outputs, strict=False):
         probs = output.outputs.probs
-        probs_trimmed = (
-            (str(probs[:8])[:-1] + ", ...]") if len(probs) > 8 else probs
-        )
-        print(
-            f"Prompt: {prompt!r}\n"
-            f"Probs:  {probs_trimmed} (num_labels={len(probs)})"
-        )
+        probs_trimmed = (str(probs[:8])[:-1] + ", ...]") if len(probs) > 8 else probs
+        print(f"Prompt: {prompt!r}\nProbs:  {probs_trimmed} (num_labels={len(probs)})")
         print("-" * 60)
 
 
@@ -44,11 +41,11 @@ def main():
     model = LLM(
         model="BAAI/bge-reranker-v2-m3",
         runner="pooling",
-        enforce_eager=True,
         max_num_seqs=4,
         max_model_len=512,
+        pooler_config=PoolerConfig(task="classify"),
         additional_config={
-            "device_group": [5],
+            "device_group": [0],
             "override_qaic_config": {"pooling_device": "cpu", "task": "classify"},
         },
     )
@@ -59,11 +56,11 @@ def main():
     model = LLM(
         model="BAAI/bge-reranker-v2-m3",
         runner="pooling",
-        enforce_eager=True,
         max_num_seqs=4,
         max_model_len=512,
+        pooler_config=PoolerConfig(task="classify"),
         additional_config={
-            "device_group": [6],
+            "device_group": [0],
             "override_qaic_config": {"pooling_device": "qaic", "task": "classify"},
         },
     )

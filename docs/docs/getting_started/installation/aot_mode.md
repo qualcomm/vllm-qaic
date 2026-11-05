@@ -12,13 +12,26 @@ AOT (Ahead-of-Time) mode uses the QEfficient library to compile models into Qual
 ./scripts/install.sh aot
 ```
 
+!!! info "Configuration banner"
+    Before installation starts, `install.sh` prints a full summary of every version and
+    setting it will use (vllm, vllm-qaic, torch, qeff branch, target device, triton-cpu
+    state). Review the banner output and override any variable before re-running.
+
 ??? example "Optional environment overrides"
     ```bash
     # Pin transformers version
     TRANSFORMERS_VERSION_AOT=4.55.3 ./scripts/install.sh aot
 
     # Enable triton-cpu backend (for Speculative Decoding)
+    # triton-cpu is a large C++ build — requires ~10 GB of free disk space at TRITON_CPU_SRC
     TRITON_CPU=1 ./scripts/install.sh aot
+
+    # Redirect the triton-cpu clone+build to a filesystem with more space
+    # (use when $HOME has limited disk space or a user quota)
+    TRITON_CPU=1 TRITON_CPU_SRC=/path/with/more/space/triton-cpu ./scripts/install.sh aot
+
+    # Skip the disk-space pre-flight check entirely
+    TRITON_CPU=1 TRITON_CPU_SKIP_DISK_CHECK=1 ./scripts/install.sh aot
 
     # Install from pre-built wheel
     VLLM_QAIC_INSTALL_SOURCE=wheel \
@@ -50,7 +63,7 @@ pip install -r requirements/vllm_dependency_aot.txt
 # Build vLLM from source (no C++ compilation needed)
 VLLM_TARGET_DEVICE=empty pip install \
     --no-build-isolation --no-deps \
-    "vllm @ git+https://github.com/vllm-project/vllm.git@v0.15.0"
+    "vllm @ git+https://github.com/vllm-project/vllm.git@v0.30.0"
 
 # 3. vllm-qaic plugin
 TORCH_QAIC_INSTALLED=0 pip install --no-build-isolation ./vllm-qaic
@@ -60,7 +73,7 @@ TORCH_QAIC_INSTALLED=0 pip install --no-build-isolation ./vllm-qaic
 
 | Component | Version |
 |-----------|---------|
-| vLLM | 0.15.0 |
+| vLLM | 0.30.0 |
 | torch | 2.7.0+cpu |
 | QEfficient | main branch |
 | QAIC SDK | >= 1.22.0 |

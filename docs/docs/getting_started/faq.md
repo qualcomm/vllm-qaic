@@ -69,9 +69,11 @@ Common questions and solutions for vLLM QAIC.
     export VLLM_QAIC_QPC_PATH=/path/to/precompiled/qpc/
     ```
 
-??? question "`enforce_eager` has no effect"
-    `enforce_eager=True` is only meaningful in **PYT mode**. In AOT mode, execution is
-    always through pre-compiled QPCs — the flag is a no-op.
+??? question "Do I need to pass `enforce_eager`?"
+    No. The QAIC platform sets it for you: `True` in **PYT mode**, `False` in **AOT mode**,
+    where execution is always through pre-compiled QPCs. Passing it yourself is unnecessary,
+    and a value that disagrees with the selected mode is overridden (in AOT mode, overriding
+    an explicit `enforce_eager=True` also logs a warning).
 
 ---
 

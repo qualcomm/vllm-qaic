@@ -7,6 +7,7 @@
 # Adapted from vllm/examples/offline_inference/basic/score.py
 
 from vllm import LLM
+from vllm.config import PoolerConfig
 
 # Score (reranking) example for QAIC.
 # llm.score(query, passages) runs a cross-encoder model that produces a
@@ -19,7 +20,7 @@ from vllm import LLM
 def print_scores(query, passages, outputs):
     print("\nGenerated Scores:\n" + "-" * 60)
     print(f"Query: {query!r}")
-    for passage, output in zip(passages, outputs):
+    for passage, output in zip(passages, outputs, strict=False):
         score = output.outputs.score
         print(f"Passage: {passage!r}\nScore:   {score:.4f}")
         print("-" * 60)
@@ -39,11 +40,11 @@ def main():
     model = LLM(
         model="BAAI/bge-reranker-v2-m3",
         runner="pooling",
-        enforce_eager=True,
         max_num_seqs=4,
         max_model_len=512,
+        pooler_config=PoolerConfig(task="classify"),
         additional_config={
-            "device_group": [5],
+            "device_group": [0],
             "override_qaic_config": {"pooling_device": "cpu", "task": "score"},
         },
     )
@@ -54,11 +55,11 @@ def main():
     model = LLM(
         model="BAAI/bge-reranker-v2-m3",
         runner="pooling",
-        enforce_eager=True,
         max_num_seqs=4,
         max_model_len=512,
+        pooler_config=PoolerConfig(task="classify"),
         additional_config={
-            "device_group": [6],
+            "device_group": [0],
             "override_qaic_config": {"pooling_device": "qaic", "task": "score"},
         },
     )

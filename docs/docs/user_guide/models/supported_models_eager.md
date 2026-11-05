@@ -19,7 +19,6 @@ Eager (PYT) mode currently supports a focused set of vision-language models via 
         model="Qwen/Qwen2.5-VL-7B-Instruct",
         max_num_seqs=4,
         max_model_len=4096,
-        enforce_eager=True,
         async_scheduling=False,
     )
     ```

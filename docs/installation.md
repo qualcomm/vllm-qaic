@@ -9,15 +9,20 @@ This guide covers installing `vllm-qaic` in both **AOT** (Ahead-of-Time compiled
 - [Prerequisites](#prerequisites)
 - [Mode Overview](#mode-overview)
 - [Install using `install.sh` (recommended)](#install-using-installsh-recommended)
-  - [AOT mode](#aot-mode--installsh)
-  - [PYT mode](#pyt-mode--installsh)
+    - [AOT mode](#aot-mode--installsh)
+    - [PYT mode](#pyt-mode--installsh)
 - [Manual Installation](#manual-installation)
-  - [AOT mode](#aot-mode--manual)
-  - [PYT mode](#pyt-mode--manual)
+    - [AOT mode](#aot-mode--manual)
+    - [PYT mode](#pyt-mode--manual)
+- [Docker-based Installation](#docker-based-installation)
+    - [Build targets](#build-targets)
+    - [Build args](#build-args)
+    - [Build commands](#build-commands)
+    - [Entrypoint script (dev only)](#entrypoint-script-dev-only)
 - [Wheel-based Installation](#wheel-based-installation)
-  - [Build wheels](#step-1--build-wheels)
-  - [Install from wheel using `install.sh`](#step-2a--install-from-wheel-using-installsh)
-  - [Install from wheel manually](#step-2b--install-from-wheel-manually)
+    - [Build wheels](#step-1--build-wheels)
+    - [Install from wheel using `install.sh`](#step-2a--install-from-wheel-using-installsh)
+    - [Install from wheel manually](#step-2b--install-from-wheel-manually)
 - [Verification](#verification)
 - [Version Reference](#version-reference)
 
@@ -29,15 +34,36 @@ This guide covers installing `vllm-qaic` in both **AOT** (Ahead-of-Time compiled
 |---|---|
 | Hardware | Qualcomm Cloud AI 100 / Cloud AI 080 |
 | OS | Linux (Ubuntu 22.04+) |
-| Python | 3.12 |
-| QAIC Platform SDK | >= 1.22.0 |
-| QAIC Apps SDK | >= 1.22.0 (PYT mode requires `--install-torch-qaic` flag) |
+| Python | PYT mode: 3.11 / 3.12 / 3.13 &nbsp;·&nbsp; AOT mode: 3.11 / 3.12 only — **not 3.13** |
+| QAIC Platform SDK | >= 1.23.0 |
+| QAIC Apps SDK | >= 1.23.0 (PYT mode requires `--install-torch-qaic` flag) |
+
+> [!WARNING]
+> **AOT mode does not work on Python 3.13.** AOT depends on `QEfficient`, whose own
+> `pyproject.toml` declares `requires-python = ">=3.10,<3.13"` and hard-pins
+> `sentencepiece==0.2.0`. `sentencepiece` publishes cp313 wheels only from 0.2.1
+> onward, so under Python 3.13 that pin forces a source build of 0.2.0, which fails:
+>
+> ```text
+> Building sentencepiece==0.2.0
+> /bin/sh: 1: pkg-config: not found
+> CMake Error at CMakeLists.txt:15 (cmake_minimum_required):
+>   Compatibility with CMake < 3.5 has been removed from CMake.
+> hint: `sentencepiece` (v0.2.0) was included because `qefficient` (v1.23.0.dev0)
+>       depends on `sentencepiece`
+> ```
+>
+> **Workaround:** use Python 3.11 or 3.12 for AOT environments. This will be
+> resolved upstream when QEfficient supports 3.13 and relaxes the
+> `sentencepiece==0.2.0` pin.
 
 Install the QAIC SDK before proceeding:
+
 - [SDK installation guide](https://quic.github.io/cloud-ai-sdk-pages/latest/Getting-Started/Installation/index.html)
 - For **PYT mode**: run the Apps SDK installer with `--install-torch-qaic` to build `torch_qaic` wheels into `/opt/qti-aic/integrations/torch_qaic/py312/`
 
-Activate a Python 3.12 environment before running any install step:
+Activate a Python 3.11, 3.12, or 3.13 environment before running any install step
+(3.11 or 3.12 for AOT):
 
 ```bash
 # conda
@@ -60,7 +86,7 @@ source .venv/bin/activate
 | | AOT (Ahead-of-Time) | PYT (Eager / PyTorch) |
 |---|---|---|
 | Inference engine | QEfficient + QAIC compiler | torch_qaic |
-| torch version | `2.7.0+cpu` | `2.10.0+cpu` |
+| torch version | `2.7.0+cpu` | `2.13.0+cpu` |
 | `torch_qaic` required | No (must **not** be present) | Yes |
 | vllm-qaic wheel tag | `*aot*` | `*pyt*` |
 
@@ -72,7 +98,16 @@ source .venv/bin/activate
 
 The script handles all dependency ordering, version pinning, and `uv`/`pip` detection automatically.
 
+> **Configuration banner:** Before installation starts, `install.sh` prints a full summary of
+> every version and setting it will use (vllm, vllm-qaic, torch, qeff branch, target device,
+> triton-cpu state, rust frontend state). Review it and override any variable before re-running.
+
 ### AOT mode — `install.sh`
+
+> [!WARNING]
+> Requires Python 3.11 or 3.12. **Python 3.13 is not supported for AOT** — Step 1
+> (QEfficient) fails on a `sentencepiece==0.2.0` source build. See
+> [Prerequisites](#prerequisites) for details and the full matrix.
 
 ```bash
 # From the vllm-qaic repo root, with your env activated:
@@ -93,11 +128,48 @@ TRANSFORMERS_VERSION_AOT=4.55.3 ./scripts/install.sh aot
 TRANSFORMERS_VERSION_PYT=4.57.3 ./scripts/install.sh pyt
 
 # Enable triton-cpu backend for AOT Speculative Decoding
+# triton-cpu is a large C++ build — requires ~10 GB of free disk space at TRITON_CPU_SRC
 TRITON_CPU=1 ./scripts/install.sh aot
+
+# Redirect the triton-cpu clone+build to a filesystem with more space
+# (use when $HOME has limited disk space or a user quota)
+TRITON_CPU=1 TRITON_CPU_SRC=/path/with/more/space/triton-cpu ./scripts/install.sh aot
+
+# Skip the disk-space pre-flight check entirely
+TRITON_CPU=1 TRITON_CPU_SKIP_DISK_CHECK=1 ./scripts/install.sh aot
+
+# Build vllm's experimental Rust OpenAI-compatible frontend (rust/, build_rust.sh)
+# from source instead of installing vllm from the published git tag.
+# Requires a Rust toolchain (cargo) on PATH — see "Installing Rust" below.
+# Applies to both aot and pyt; clones/reuses a vllm checkout as a sibling of the
+# vllm-qaic repo (`../vllm`) and checks out the pinned VLLM_VERSION tag.
+VLLM_BUILD_RUST=1 ./scripts/install.sh aot
 
 # Force wheel install from a custom SDK path
 VLLM_QAIC_INSTALL_SOURCE=wheel VLLM_QAIC_SDK_PATH=/path/to/sdk ./scripts/install.sh pyt
 ```
+
+**Installing Rust:** `VLLM_BUILD_RUST=1` requires `cargo` on `PATH` — `install.sh` checks for it up front and exits with an error if it's missing, rather than installing it for you. Install via [rustup](https://rustup.rs):
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source "$HOME/.cargo/env"
+cargo --version   # confirm it's on PATH before re-running install.sh
+```
+
+Or via conda-forge, if you'd rather keep it inside an existing conda env:
+
+```bash
+conda install -c conda-forge rust
+```
+
+**Using the Rust frontend after installing with `VLLM_BUILD_RUST=1`:** it's opt-in at *serve* time too — the standard `vllm serve` entrypoint still runs the Python frontend unless `VLLM_USE_RUST_FRONTEND=1` is set:
+
+```bash
+VLLM_USE_RUST_FRONTEND=1 vllm serve <model> [...same flags as usual...]
+```
+
+> **Status:** this is an experimental, unfinished component of upstream vLLM (not vllm-qaic specific). It does not support every OpenAI-compatible request field yet
 
 ---
 
@@ -135,7 +207,7 @@ pip install -r requirements/vllm_dependency_aot.txt
 #   (empty target: no C++ compilation, no torch in wheel METADATA)
 VLLM_TARGET_DEVICE=empty pip install \
     --no-build-isolation --no-deps \
-    "vllm @ git+https://github.com/vllm-project/vllm.git@v0.15.0"
+    "vllm @ git+https://github.com/vllm-project/vllm.git@v0.30.0"
 
 # 3. vllm-qaic from source
 TORCH_QAIC_INSTALLED=0 pip install --no-build-isolation ./vllm-qaic
@@ -151,12 +223,12 @@ pip install "setuptools>=77.0.3,<80.0.0" setuptools-scm wheel "cmake>=3.26"
 #    and will error if a CUDA torch is present when it imports.
 python -m pip install \
     --index-url https://download.pytorch.org/whl/cpu \
-    "torch==2.10.0+cpu" \
-    "torchvision==0.25.0+cpu" \
-    "torchaudio==2.10.0+cpu"
+    "torch==2.13.0+cpu" \
+    "torchvision==0.28.0+cpu" \
+    "torchaudio==2.11.0+cpu"
 
 # 1b. torch_qaic AFTER torch is confirmed CPU-only
-#     Replace py312 with your Python version (py310, py311, py312)
+#     Replace py312 with your Python version (py311, py312, py313)
 pip install /opt/qti-aic/integrations/torch_qaic/py312/torch_qaic-*.whl
 
 # [Optional] Pin transformers if torch_qaic's version conflicts with your model
@@ -165,20 +237,150 @@ pip install /opt/qti-aic/integrations/torch_qaic/py312/torch_qaic-*.whl
 # 2. vllm runtime dependencies (torch excluded — already installed above)
 pip install -r requirements/vllm_dependency_pyt.txt
 
-# 2 (cont.) vllm — choose based on VLLM_TARGET_DEVICE_PYT:
-
-# Option A (default): install vllm-cpu from PyPI — no C++ compilation needed
-pip install --no-deps "vllm-cpu==0.15.0"
-
-# Option B: build from public GitHub tag with VLLM_TARGET_DEVICE=empty
+# 2 (cont.) vllm — build from public GitHub tag with VLLM_TARGET_DEVICE=empty
 #   (no C++ compilation, no torch in wheel METADATA — uv-safe)
-# VLLM_TARGET_DEVICE=empty pip install \
-#     --no-build-isolation --no-deps \
-#     "vllm @ git+https://github.com/vllm-project/vllm.git@v0.15.0"
+VLLM_TARGET_DEVICE=empty pip install \
+    --no-build-isolation --no-deps \
+    "vllm @ git+https://github.com/vllm-project/vllm.git@v0.30.0"
 
 # 3. vllm-qaic from source
 pip install --no-build-isolation ./vllm-qaic
 ```
+
+---
+
+## Docker-based Installation
+
+`docker/Dockerfile.aot` and `docker/Dockerfile.pyt` each build vllm-qaic inside a container, layered on a shared `aot-base`/`pyt-base` stage (system packages, uv venv, torch, vllm deps + vllm). Both Dockerfiles expose the same four BuildKit targets on top of that base.
+
+### Build targets
+
+| Target | vllm-qaic source | Install mode | Use case |
+|---|---|---|---|
+| `release` | Published git ref (`VLLM_QAIC_GIT_REF` tag/branch) | Non-editable | Self-contained image, reproducible from ARG pins alone — no build context needed for vllm-qaic itself |
+| `ci` | Build-context checkout (default), or `VLLM_QAIC_PR`/`VLLM_QAIC_BRANCH` | Non-editable | Test a specific PR/branch/checkout without touching a dev environment |
+| `dev` | Build-context checkout (always) | Editable (`pip install -e`) | Interactive iteration — source is bind-mounted at `/src/vllm-qaic` and kept in the image |
+| `wheel` | Build-context checkout | N/A — builds and exports a wheel, no install | Produce a distributable `vllm_qaic-*.whl` via BuildKit's local exporter (see [Wheel-based Installation](#wheel-based-installation)) |
+
+`release`/`ci` both install non-editably and differ only in *where* vllm-qaic's source comes from. `dev` is the only target with an editable install and the only one that ships source directories (`/src/vllm-qaic`, plus `/src/qefficient` for AOT) and a `sudo`+`entrypoint.sh` layer for interactive use — `release`/`ci` are meant to run as immutable images under whatever user the orchestrator picks, not as UID-mapped interactive containers.
+
+`ci` and `dev` additionally install `requirements/test.txt` (pytest, ruff, mypy, etc.) so tests can run directly inside the image; `release`/`wheel` don't, since they're meant to be lean runtime/distribution artifacts.
+
+`PYTHON_VERSION` (default `3.12`; also `3.11`/`3.13`) is threaded through every target via `aot-base`/`pyt-base`, provisioned with `uv python install` rather than apt so non-default versions work regardless of the base image's own Python.
+
+> [!WARNING]
+> `PYTHON_VERSION=3.13` works for `Dockerfile.pyt` but **fails for `Dockerfile.aot`**
+> at the QEfficient layer (`sentencepiece==0.2.0` has no cp313 wheel). Build AOT images
+> and wheels with 3.11 or 3.12 — the AOT wheel is `py3-none-any`, so one build covers
+> every supported Python version anyway. See [Prerequisites](#prerequisites).
+
+### Build args
+
+All `ARG`s are global (declared before the first `FROM`) and re-declared inside every stage that needs them — BuildKit requires that re-declaration for a global `ARG`'s value to be visible inside a stage's `RUN`/`COPY` instructions. Override any of them with `--build-arg NAME=value`.
+
+**`docker/Dockerfile.aot`**
+
+| ARG | Default | Description |
+|---|---|---|
+| `BASE_IMAGE` | `ghcr.io/quic/cloud_ai_inference_ubuntu24:1.21.6.0` | Must have the QAIC Platform and Apps SDKs installed (`/opt/qti-aic/` present) |
+| `VENV` | `/opt/venv-aot` | Path to the venv created inside the image |
+| `UV_VERSION` | `0.11.29` | Pinned `uv` binary version, pulled via `COPY --from` |
+| `PYTHON_VERSION` | `3.12` | Python version (`3.11`/`3.12`), provisioned via `uv python install`. **`3.13` is not supported for AOT** — see [Prerequisites](#prerequisites) |
+| `RUST_VERSION` | `1.90` | Pinned Rust toolchain image tag (`rust:<ver>-slim`); only used when `VLLM_BUILD_RUST=1` |
+| `RUST_IMAGE` | `docker.io/library/rust:${RUST_VERSION}-slim` | Full image ref for the Rust toolchain. Override to pull from a mirror or internal registry; supplies its own tag, so it takes precedence over `RUST_VERSION` |
+| `VLLM_VERSION` | `0.30.0` | vLLM release tag to install |
+| `VLLM_PR` | *(empty)* | Any target: vLLM PR number to fetch (takes priority over `VLLM_BRANCH` and `VLLM_VERSION`) |
+| `VLLM_BRANCH` | *(empty)* | Any target: vLLM branch to clone instead of the pinned `VLLM_VERSION` tag |
+| `VLLM_QAIC_VERSION` | `1.24` | vllm-qaic SDK/version tag (wheel tag/version suffix) |
+| `QEFF_BRANCH` | `main` | QEfficient branch/tag to install |
+| `TORCH_VERSION_AOT` | `2.7.0+cpu` | CPU torch version for AOT |
+| `TORCHVISION_VERSION_AOT` | `0.22.0+cpu` | torchvision version for AOT |
+| `TRITON_CPU` | `1` | Set to `1` to build the triton-cpu backend (AOT SpD); Docker defaults ON, unlike `install.sh`'s default OFF |
+| `TRITON_CPU_COMMIT` | `e60f448f8f197073b75d6d3e77347414a5db3ee7` | Pinned triton-cpu commit hash |
+| `TRITON_CPU_COMPILE_MAX_JOBS` | `4` | Parallel build jobs for triton-cpu compilation |
+| `VLLM_BUILD_RUST` | `1` | Set to `1` to build vLLM's experimental Rust OpenAI frontend (`vllm-rs`) |
+| `VLLM_QAIC_GIT_REF` | `main` | `release` target: vllm-qaic git tag/branch to clone |
+| `VLLM_QAIC_PR` | *(empty)* | `ci` target: PR number to fetch (takes priority over `VLLM_QAIC_BRANCH`) |
+| `VLLM_QAIC_BRANCH` | *(empty)* | `ci` target: branch to fetch |
+| `QEFF_PR` | *(empty)* | `dev` target: QEfficient PR to install editable (overrides `QEFF_BRANCH`) |
+| `WHEEL_NAME` | *(empty)* | `wheel` target: rename the built wheel to this filename before exporting it (empty = `uv build`'s own name). See [Overriding the wheel filename](#overriding-the-wheel-filename) |
+
+**`docker/Dockerfile.pyt`**
+
+| ARG | Default | Description |
+|---|---|---|
+| `BASE_IMAGE` | `ghcr.io/quic/cloud_ai_inference_ubuntu24:1.21.6.0` | Must have the QAIC Platform and Apps SDKs installed (`/opt/qti-aic/` present with `torch_qaic` wheels) |
+| `VENV` | `/opt/venv-pyt` | Path to the venv created inside the image |
+| `UV_VERSION` | `0.11.29` | Pinned `uv` binary version, pulled via `COPY --from` |
+| `PYTHON_VERSION` | `3.12` | Python version (`3.11`/`3.12`/`3.13`), provisioned via `uv python install` |
+| `RUST_VERSION` | `1.90` | Pinned Rust toolchain image tag (`rust:<ver>-slim`); only used when `VLLM_BUILD_RUST=1` |
+| `RUST_IMAGE` | `docker.io/library/rust:${RUST_VERSION}-slim` | Full image ref for the Rust toolchain. Override to pull from a mirror or internal registry; supplies its own tag, so it takes precedence over `RUST_VERSION` |
+| `VLLM_VERSION` | `0.30.0` | vLLM release tag to install |
+| `VLLM_PR` | *(empty)* | Any target: vLLM PR number to fetch (takes priority over `VLLM_BRANCH` and `VLLM_VERSION`) |
+| `VLLM_BRANCH` | *(empty)* | Any target: vLLM branch to clone instead of the pinned `VLLM_VERSION` tag |
+| `VLLM_QAIC_VERSION` | `1.24` | vllm-qaic SDK/version tag (wheel tag/version suffix) |
+| `TORCH_VERSION_PYT` | `2.13.0+cpu` | CPU torch version for PYT |
+| `TORCHVISION_VERSION_PYT` | `0.28.0+cpu` | torchvision version for PYT |
+| `TORCHAUDIO_VERSION_PYT` | `2.11.0+cpu` | torchaudio version for PYT |
+| `VLLM_TARGET_DEVICE_PYT` | `empty` | vLLM build target device (`empty` = no C++ compilation) |
+| `TORCH_QAIC_BASE_PATH` | `/opt/qti-aic/integrations/torch_qaic` | SDK path containing `torch_qaic` wheels inside `BASE_IMAGE` |
+| `QAIC_DEVICE_ARCH` | `v68` | `v68` = AI 100 series, `v81` = AI 200 series (includes BF16 kernels); controls which Hexagon kernel C++ sources compile |
+| `VLLM_BUILD_RUST` | `1` | Set to `1` to build vLLM's experimental Rust OpenAI frontend (`vllm-rs`) |
+| `VLLM_QAIC_GIT_REF` | `main` | `release` target: vllm-qaic git tag/branch to clone |
+| `VLLM_QAIC_PR` | *(empty)* | `ci` target: PR number to fetch (takes priority over `VLLM_QAIC_BRANCH`) |
+| `VLLM_QAIC_BRANCH` | *(empty)* | `ci` target: branch to fetch |
+| `WHEEL_NAME` | *(empty)* | `wheel` target: rename the built wheel to this filename before exporting it (empty = `uv build`'s own name). See [Overriding the wheel filename](#overriding-the-wheel-filename) |
+
+### Build commands
+
+```bash
+# Release (default pins)
+docker build --target release -f docker/Dockerfile.aot -t vllm-qaic-aot:1.24 .
+docker build --target release -f docker/Dockerfile.pyt -t vllm-qaic-pyt:1.24 .
+
+# Release (override version / device arch)
+docker build --target release -f docker/Dockerfile.aot \
+  --build-arg VLLM_QAIC_GIT_REF=v1.24 --build-arg QEFF_BRANCH=main \
+  -t vllm-qaic-aot:1.23 .
+docker build --target release -f docker/Dockerfile.pyt \
+  --build-arg QAIC_DEVICE_ARCH=v81 -t vllm-qaic-pyt:1.24-v81 .
+
+# CI (current checkout)
+docker build --target ci -f docker/Dockerfile.aot -t vllm-qaic-aot:ci .
+docker build --target ci -f docker/Dockerfile.pyt -t vllm-qaic-pyt:ci .
+
+# CI (specific PR or branch)
+docker build --target ci -f docker/Dockerfile.aot --build-arg VLLM_QAIC_PR=42 -t vllm-qaic-aot:ci-pr-42 .
+docker build --target ci -f docker/Dockerfile.pyt --build-arg VLLM_QAIC_BRANCH=feature/my-branch -t vllm-qaic-pyt:ci-branch .
+
+# Any target — install vllm itself from a PR or branch instead of the pinned tag
+docker build --target release -f docker/Dockerfile.aot --build-arg VLLM_PR=12345 -t vllm-qaic-aot:vllm-pr-12345 .
+docker build --target dev -f docker/Dockerfile.pyt --build-arg VLLM_BRANCH=some-feature-branch -t vllm-qaic-pyt:dev .
+
+# Dev (editable install; AOT also supports overriding the QEfficient ref)
+docker build --target dev -f docker/Dockerfile.aot -t vllm-qaic-aot:dev .
+docker build --target dev -f docker/Dockerfile.aot --build-arg QEFF_PR=456 -t vllm-qaic-aot:dev .
+docker build --target dev -f docker/Dockerfile.pyt -t vllm-qaic-pyt:dev .
+```
+
+The `BASE_IMAGE` used by any target must have the QAIC Platform and Apps SDKs installed (`/opt/qti-aic/` present) so vllm-qaic can load at runtime; override with `--build-arg BASE_IMAGE=...`.
+
+### Entrypoint script (dev only)
+
+`dev` images use `docker/entrypoint.sh` to map the container process to the host's UID/GID on `docker run`, so bind-mounted source stays host-owned and the QAIC device is accessible without running as root:
+
+```bash
+docker run -it --rm \
+  -e USER_UID=$(id -u) -e USER_GID=$(id -g) \
+  -e QAIC_GID=$(getent group qaic | cut -d: -f3) \
+  --device /dev/accel/ -v $(pwd):/src/vllm-qaic \
+  vllm-qaic-pyt:dev
+```
+
+- If `USER_UID`/`USER_GID` are unset, the entrypoint is a no-op passthrough (`exec "$@"`) and the command runs as root.
+- Otherwise it creates/reuses a matching-GID/UID user, grants it passwordless sudo, joins it to a group literally named `qaic` at `QAIC_GID` (created if missing) so it can access `/dev/accel`, `chown`s its home directory, then execs the container command as that user via `runuser`.
+- `--device /dev/accel/` and `QAIC_GID` are independent requirements — passing one without the other leaves the container either without device nodes at all, or with device nodes it lacks permission to open. Both are needed for `torch_qaic`/QEfficient to enumerate live devices.
+- To add other setup logic (extra packages, env vars) that should run once per container start rather than at build time, extend `docker/entrypoint.sh` before its final `exec runuser -u "${USERNAME}" -- "$@"` line — anything after that line only runs as root and is skipped once the exec replaces the shell.
 
 ---
 
@@ -188,7 +390,7 @@ Use this path when distributing a pre-built `vllm-qaic` wheel (e.g., from the QA
 
 ### Step 1 — Build wheels
 
-Run `build_wheels.sh` from within an activated Python 3.12 environment:
+Wheels are always built inside a docker container — run `build_wheels.sh` from the repo root with `docker buildx` available (no venv activation needed; the script invokes each Dockerfile's `wheel` BuildKit target and exports the result via BuildKit's local exporter, no bind mount or container run required):
 
 ```bash
 # Build both AOT and PYT wheels into ./dist/
@@ -205,6 +407,38 @@ Output locations:
 |---|---|
 | AOT | `dist/aot/vllm_qaic-*aot*-py3-none-any.whl` |
 | PYT | `dist/pyt/py312/vllm_qaic-*pyt*-cp312-cp312-linux_x86_64.whl` |
+
+#### Pulling the Rust toolchain from a mirror
+
+The base stage copies `cargo`/`rustup` out of a pinned `rust:<RUST_VERSION>-slim` image on Docker Hub. `--rust-image` replaces that ref, so the toolchain can come from a mirror or internal registry instead:
+
+```bash
+./scripts/build_wheels.sh both --outdir ./dist \
+    --rust-image my.registry.internal:5000/mirror/rust:1.90-slim
+```
+
+The script forwards it as the `RUST_IMAGE` build-arg (same passthrough shape as `--base-image` → `BASE_IMAGE`), and it applies to both Dockerfiles. Because the override carries its own tag, `RUST_VERSION` is ignored when it is set. The image only needs `/usr/local/cargo` and `/usr/local/rustup` at the paths the official `rust` images use — the exact toolchain version doesn't have to match `RUST_VERSION`, since `rustup` fetches whatever vllm's `rust-toolchain.toml` pins when `cargo build` runs.
+
+#### Overriding the wheel filename
+
+`--wheel-name` replaces the filename `uv build` would generate. The script forwards it to the Dockerfile's `wheel` stage as the `WHEEL_NAME` build-arg, and that stage renames the wheel before BuildKit exports it — so the file that lands in `--outdir` already carries the custom name:
+
+```bash
+# AOT wheel as dist/aot/vllm_qaic-1.24.0+aot-py3-none-any.whl
+./scripts/build_wheels.sh aot --outdir ./dist \
+    --wheel-name vllm_qaic-1.24.0+aot-py3-none-any.whl
+
+# PYT wheel as dist/pyt/py312/vllm_qaic-1.24.0+pyt-cp312-cp312-linux_x86_64.whl
+./scripts/build_wheels.sh pyt --outdir ./dist \
+    --wheel-name vllm_qaic-1.24.0+pyt-cp312-cp312-linux_x86_64.whl
+```
+
+Notes:
+
+- **Requires an explicit `aot` or `pyt` target.** One filename cannot name two wheels, so `--wheel-name` is rejected with `both` — including the implicit default when no target is given.
+- Must be a bare filename ending in `.whl` (letters, digits, `.`, `_`, `+`, `-`). The directory still comes from `--outdir`.
+- Only the filename changes; the `.dist-info` inside the wheel still carries the real `vllm_qaic` name and version. pip reads the distribution, version and compatibility tags off the filename and requires the distribution to match that metadata. The script warns (but still builds) when the name isn't a valid wheel filename — `<distribution>-<version>[-<build>]-<pytag>-<abitag>-<plattag>.whl`, no `-` inside a field and a build tag starting with a digit — or when its distribution part isn't `vllm_qaic`. Such a wheel is fine as an archived artifact but `pip install` will reject it.
+- A renamed wheel no longer matches the `vllm_qaic-*aot*.whl` / `vllm_qaic-*pyt*.whl` globs used by `install.sh` and by the manual `pip install` commands below. Install it by its explicit path, or keep an `*aot*`/`*pyt*` substring in the name.
 
 ### Step 2a — Install from wheel using `install.sh`
 
@@ -246,7 +480,7 @@ After installation, verify the environment is clean:
 # Check torch is CPU-only (no CUDA suffix)
 python -c "import torch; print(torch.__version__)"
 # AOT expected: 2.7.0+cpu
-# PYT expected: 2.10.0+cpu
+# PYT expected: 2.13.0+cpu
 
 # Verify vllm-qaic loads and registers the QAIC platform plugin
 python -c "import vllm_qaic; print('vllm_qaic OK')"
@@ -267,18 +501,23 @@ All version constants are defined in [`scripts/utility.sh`](../scripts/utility.s
 
 | Constant | Value | Description |
 |---|---|---|
-| `VLLM_VERSION` | `0.15.0` | vLLM release tag |
+| `VLLM_VERSION` | `0.30.0` | vLLM release tag |
+| `VLLM_QAIC_VERSION` | `0.30.0` | vllm-qaic SDK/version tag (used in wheel tag and version suffix) |
 | `TORCH_VERSION_AOT` | `2.7.0+cpu` | CPU torch for AOT (matches QEfficient exact pin) |
-| `TORCH_VERSION_PYT` | `2.10.0+cpu` | CPU torch for PYT |
-| `TORCHVISION_VERSION_PYT` | `0.25.0+cpu` | torchvision for PYT (keep in sync with torch) |
-| `TORCHAUDIO_VERSION_PYT` | `2.10.0+cpu` | torchaudio for PYT (keep in sync with torch) |
+| `TORCHVISION_VERSION_AOT` | `0.22.0+cpu` | torchvision for AOT (keep in sync with torch) |
+| `TORCH_VERSION_PYT` | `2.13.0+cpu` | CPU torch for PYT |
+| `TORCHVISION_VERSION_PYT` | `0.28.0+cpu` | torchvision for PYT (keep in sync with torch) |
+| `TORCHAUDIO_VERSION_PYT` | `2.11.0+cpu` | torchaudio for PYT (keep in sync with torch) |
 | `QEFF_BRANCH` | `main` | QEfficient branch/tag |
 | `TORCH_QAIC_VERSION` | `0.1.0` | torch_qaic wheel version |
 | `VLLM_TARGET_DEVICE_AOT` | `empty` | vLLM build target for AOT mode |
-| `VLLM_TARGET_DEVICE_PYT` | `cpu` | vLLM build target for PYT mode |
+| `VLLM_TARGET_DEVICE_PYT` | `empty` | vLLM build target for PYT mode |
 | `TRITON_CPU` | `0` | Set to `1` to enable triton-cpu backend (AOT SpD) |
 | `TRITON_CPU_COMMIT` | `e60f448f...` | Pinned triton-cpu commit hash |
-| `TRITON_CPU_SRC` | `$HOME/triton-cpu` | Clone destination for triton-cpu source |
+| `TRITON_CPU_SRC` | `<repo>/.build/triton-cpu` | Clone destination for triton-cpu source |
 | `TRITON_CPU_COMPILE_MAX_JOBS` | `4` | Parallel build jobs for triton-cpu compilation |
+| `TRITON_CPU_SKIP_DISK_CHECK`¹ | `0` | Set to `1` to skip the 10 GB disk-space pre-flight check |
 | `TORCH_QAIC_BASE_PATH` | `/opt/qti-aic/integrations/torch_qaic` | SDK path for torch_qaic wheels |
 | `VLLM_QAIC_SDK_PATH` | `/opt/qti-aic/integrations/vllm_qaic` | SDK path for pre-built vllm-qaic wheels |
+
+¹ Defined in `scripts/install_triton_cpu.sh`, not `utility.sh`.

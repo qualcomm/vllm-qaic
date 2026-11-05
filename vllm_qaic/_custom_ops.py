@@ -7,7 +7,7 @@ import os
 import torch
 from torch import Tensor
 
-from vllm.logger import init_logger
+from vllm_qaic.logger import init_logger
 from vllm.platforms import current_platform
 import torch_qaic.custom_ops as _qaic_custom_ops
 
@@ -16,6 +16,8 @@ logger = init_logger(__name__)
 _rms_norm_kernel = _qaic_custom_ops.rms_norm_dispatch
 _NSP_COUNT = current_platform.get_num_cores()
 _THREAD_COUNT = current_platform.get_num_hvx_threads()
+_HMX_THREAD_COUNT = _THREAD_COUNT + 1
+
 
 def rms_norm_hexagon(
     attn_out: torch.Tensor,  # previous layer's output (acts as the residual)
@@ -29,19 +31,21 @@ def rms_norm_hexagon(
       new_residual = attn_out + x   (stored in FP16 by the kernel)
       normed = new_residual / rms(new_residual) * weight
     """
-    out = torch.empty_like(attn_out)
-    dst = torch.empty_like(attn_out)
+    is_bf16 = attn_out.dtype == torch.bfloat16
+    out_dtype = torch.float32 if is_bf16 else attn_out.dtype
+    out = torch.empty(attn_out.shape, dtype=out_dtype, device=attn_out.device)
+    dst = torch.empty(attn_out.shape, dtype=out_dtype, device=attn_out.device)
     # Launch grid: [_NSP_COUNT cores, _THREAD_COUNT HVX threads per core]
     _rms_norm_kernel[_NSP_COUNT, _THREAD_COUNT](
         attn_out,
         x,
         weight,
-        out,      # written as residual by the kernel
-        dst,      # written as normed output by the kernel
+        out,  # written as residual by the kernel
+        dst,  # written as normed output by the kernel
         float(epsilon),
         attn_out.shape[-1],
         attn_out.numel(),
-        int(attn_out.dtype == torch.bfloat16),
+        int(is_bf16),
     )
 
     return dst, out
@@ -53,10 +57,42 @@ current_platform.import_kernels()
 # 0=fp16 softmax, 1=fp32 softmax, 2=fp16 sigmoid, 3=fp32 sigmoid.
 _FP32_SCORING = os.environ.get("QAIC_ROUTER_FP32_SCORING", "0") == "1"
 
+_MOE_ACTIVATION_IDS = {
+    "silu": 0,
+    "gelu": 1,
+    "gelu_tanh": 2,
+    "swigluoai": 3,
+    "swiglustep": 4,
+    "silu_no_mul": 5,
+    "gelu_no_mul": 6,
+    "gelu_tanh_no_mul": 7,
+    "relu2_no_mul": 8,
+}
+
+_UNQUANTIZED_FUSED_MOE_HMX_KERNEL = (
+    "multinsp_multithreaded_unquantized_fused_moe_route_compute_hmx"
+)
+
 
 def _kernel(name: str):
     """Return a compiled QAIC Hexagon kernel by exported symbol name."""
     return getattr(_qaic_custom_ops, name)
+
+
+_paged_attention_store_kernel = _kernel("multinsp_multithreaded_paged_attention_store")
+_paged_attention_hvx_kernel = _kernel("multinsp_multithreaded_paged_attention")
+_paged_attention_hmx_prefill_cache_kernel = _kernel(
+    "multinsp_multithreaded_paged_attention_hmx_prefill"
+)
+_paged_attention_hmx_prefill_kernel = _kernel(
+    "multinsp_multithreaded_paged_attention_hmx_prefill_direct"
+)
+_paged_attention_hmx_decode_kernel = _kernel(
+    "multinsp_multithreaded_paged_attention_hmx_decode"
+)
+_paged_attention_hmx_decode_cache_kernel = _kernel(
+    "multinsp_multithreaded_paged_attention_hmx_decode_cache"
+)
 
 
 def _kernel_score_mode(scoring_func: int) -> int:
@@ -71,6 +107,216 @@ def _kernel_score_mode(scoring_func: int) -> int:
     if scoring_func == 0:
         return 1 if _FP32_SCORING else 0
     return 3 if _FP32_SCORING else 2
+
+
+@torch.library.custom_op(
+    "qaic::unquantized_fused_moe_hvx", mutates_args=(), device_types="qaic"
+)
+def _unquantized_fused_moe_hvx_op(
+    x: Tensor,
+    topk_weights: Tensor,
+    topk_ids: Tensor,
+    w13_weight: Tensor,
+    w2_weight: Tensor,
+    bias: Tensor,
+    expert_map: Tensor,
+    activation_id: int,
+    has_bias: bool,
+    apply_router_weight_on_input: bool,
+    has_expert_map: bool,
+) -> Tensor:
+    """Low-level QAIC HVX routed-MoE variant using route_out + reduce."""
+    num_tokens = x.shape[0]
+    hidden_size = x.shape[1]
+    num_experts = w13_weight.shape[0]
+    global_num_experts = expert_map.shape[0] if has_expert_map else num_experts
+    w13_dim = w13_weight.shape[1]
+    intermediate_size = w2_weight.shape[2]
+    topk = topk_ids.shape[1]
+    total_routes = num_tokens * topk
+    workers = _NSP_COUNT * _THREAD_COUNT
+    route_out = torch.empty((total_routes, hidden_size), dtype=x.dtype, device=x.device)
+    expert_route_indices = torch.empty(
+        (total_routes,), dtype=torch.float32, device=x.device
+    )
+    expert_offsets = torch.empty(
+        (num_experts + 1,), dtype=torch.float32, device=x.device
+    )
+    worker_counts = torch.empty(
+        (workers, num_experts), dtype=torch.float32, device=x.device
+    )
+    worker_offsets = torch.empty(
+        (workers, num_experts), dtype=torch.float32, device=x.device
+    )
+    out = torch.empty_like(x)
+    params = torch.tensor(
+        [
+            num_tokens,
+            hidden_size,
+            w13_dim,
+            intermediate_size,
+            num_experts,
+            topk,
+            activation_id,
+            int(has_bias),
+            int(apply_router_weight_on_input),
+            global_num_experts,
+            int(has_expert_map),
+        ],
+        dtype=torch.float32,
+        device=x.device,
+    ).contiguous()
+
+    group_count_kernel = _kernel(
+        "multinsp_multithreaded_unquantized_fused_moe_route_group_count"
+    )
+    group_prefix_kernel = _kernel(
+        "multinsp_multithreaded_unquantized_fused_moe_route_group_prefix"
+    )
+    group_fill_kernel = _kernel(
+        "multinsp_multithreaded_unquantized_fused_moe_route_group_fill"
+    )
+    route_kernel = _kernel("multinsp_multithreaded_unquantized_fused_moe_route_compute")
+    reduce_kernel = _kernel("multinsp_multithreaded_unquantized_fused_moe_route_reduce")
+    group_count_kernel[_NSP_COUNT, _THREAD_COUNT](
+        topk_ids,
+        expert_map,
+        worker_counts,
+        params,
+    )
+    group_prefix_kernel[_NSP_COUNT, _THREAD_COUNT](
+        worker_counts,
+        worker_offsets,
+        expert_offsets,
+        params,
+    )
+    group_fill_kernel[_NSP_COUNT, _THREAD_COUNT](
+        topk_ids,
+        expert_map,
+        worker_offsets,
+        expert_route_indices,
+        params,
+    )
+    route_kernel[_NSP_COUNT, _THREAD_COUNT](
+        x,
+        topk_weights,
+        topk_ids,
+        w13_weight,
+        w2_weight,
+        bias,
+        route_out,
+        expert_route_indices,
+        expert_offsets,
+        expert_map,
+        params,
+    )
+    reduce_kernel[_NSP_COUNT, _THREAD_COUNT](route_out, out, params)
+    return out
+
+
+@torch.library.custom_op(
+    "qaic::unquantized_fused_moe_hmx", mutates_args=(), device_types="qaic"
+)
+def _unquantized_fused_moe_hmx_op(
+    x: Tensor,
+    topk_weights: Tensor,
+    topk_ids: Tensor,
+    w13_weight: Tensor,
+    w2_weight: Tensor,
+    bias: Tensor,
+    expert_map: Tensor,
+    activation_id: int,
+    has_bias: bool,
+    apply_router_weight_on_input: bool,
+    has_expert_map: bool,
+) -> Tensor:
+    """Low-level QAIC HMX routed-MoE variant using route_out + reduce."""
+    num_tokens = x.shape[0]
+    hidden_size = x.shape[1]
+    num_experts = w13_weight.shape[0]
+    global_num_experts = expert_map.shape[0] if has_expert_map else num_experts
+    w13_dim = w13_weight.shape[1]
+    intermediate_size = w2_weight.shape[2]
+    topk = topk_ids.shape[1]
+    total_routes = num_tokens * topk
+    workers = _NSP_COUNT * _THREAD_COUNT
+    route_out = torch.empty((total_routes, hidden_size), dtype=x.dtype, device=x.device)
+    expert_route_indices = torch.empty(
+        (total_routes,), dtype=torch.float32, device=x.device
+    )
+    expert_offsets = torch.empty(
+        (num_experts + 1,), dtype=torch.float32, device=x.device
+    )
+    worker_counts = torch.empty(
+        (workers, num_experts), dtype=torch.float32, device=x.device
+    )
+    worker_offsets = torch.empty(
+        (workers, num_experts), dtype=torch.float32, device=x.device
+    )
+    out = torch.empty_like(x)
+    params = torch.tensor(
+        [
+            num_tokens,
+            hidden_size,
+            w13_dim,
+            intermediate_size,
+            num_experts,
+            topk,
+            activation_id,
+            int(has_bias),
+            int(apply_router_weight_on_input),
+            global_num_experts,
+            int(has_expert_map),
+        ],
+        dtype=torch.float32,
+        device=x.device,
+    ).contiguous()
+
+    group_count_kernel = _kernel(
+        "multinsp_multithreaded_unquantized_fused_moe_route_group_count"
+    )
+    group_prefix_kernel = _kernel(
+        "multinsp_multithreaded_unquantized_fused_moe_route_group_prefix"
+    )
+    group_fill_kernel = _kernel(
+        "multinsp_multithreaded_unquantized_fused_moe_route_group_fill"
+    )
+    route_kernel = _kernel(_UNQUANTIZED_FUSED_MOE_HMX_KERNEL)
+    reduce_kernel = _kernel("multinsp_multithreaded_unquantized_fused_moe_route_reduce")
+    group_count_kernel[_NSP_COUNT, _THREAD_COUNT](
+        topk_ids,
+        expert_map,
+        worker_counts,
+        params,
+    )
+    group_prefix_kernel[_NSP_COUNT, _THREAD_COUNT](
+        worker_counts,
+        worker_offsets,
+        expert_offsets,
+        params,
+    )
+    group_fill_kernel[_NSP_COUNT, _THREAD_COUNT](
+        topk_ids,
+        expert_map,
+        worker_offsets,
+        expert_route_indices,
+        params,
+    )
+    route_kernel[_NSP_COUNT, _HMX_THREAD_COUNT](
+        x,
+        topk_weights,
+        topk_ids,
+        w13_weight,
+        w2_weight,
+        bias,
+        route_out,
+        expert_route_indices,
+        expert_offsets,
+        expert_map,
+        params,
+    )
+    reduce_kernel[_NSP_COUNT, _THREAD_COUNT](route_out, out, params)
+    return out
 
 
 @torch.library.custom_op(
@@ -331,4 +577,360 @@ def regular_topk(
         routed_scaling_factor,
         use_bias,
         _scoring_func_id(scoring_func),
+    )
+
+
+def unquantized_fused_moe_hvx(
+    x: Tensor,
+    topk_weights: Tensor,
+    topk_ids: Tensor,
+    w13_weight: Tensor,
+    w2_weight: Tensor,
+    w13_bias: Tensor | None,
+    w2_bias: Tensor | None,
+    activation: str,
+    has_bias: bool,
+    apply_router_weight_on_input: bool,
+    expert_map: Tensor | None = None,
+) -> Tensor:
+    """Run the QAIC HVX route_out + reducer MoE kernel."""
+    if activation not in _MOE_ACTIVATION_IDS:
+        raise ValueError(f"Unsupported QAIC MoE activation: {activation}")
+
+    x = x.contiguous()
+    topk_weights = topk_weights.to(device=x.device, dtype=x.dtype).contiguous()
+    topk_ids = topk_ids.to(device=x.device, dtype=x.dtype).contiguous()
+    w13_weight = w13_weight.to(device=x.device, dtype=x.dtype).contiguous()
+    w2_weight = w2_weight.to(device=x.device, dtype=x.dtype).contiguous()
+    has_expert_map = expert_map is not None
+    if expert_map is None:
+        expert_map_tensor = torch.empty((1,), dtype=torch.float32, device=x.device)
+    else:
+        expert_map_tensor = expert_map.to(
+            device=x.device, dtype=torch.float32
+        ).contiguous()
+
+    if has_bias:
+        assert w13_bias is not None and w2_bias is not None
+        w13_bias = w13_bias.to(device=x.device, dtype=x.dtype).contiguous()
+        w2_bias = w2_bias.to(device=x.device, dtype=x.dtype).contiguous()
+        w13_bias_flat = w13_bias.reshape(-1)
+        w2_bias_flat = w2_bias.reshape(-1)
+        bias = torch.empty(
+            (w13_bias_flat.numel() + w2_bias_flat.numel(),),
+            dtype=x.dtype,
+            device=x.device,
+        )
+        bias[: w13_bias_flat.numel()].copy_(w13_bias_flat)
+        bias[w13_bias_flat.numel() :].copy_(w2_bias_flat)
+    else:
+        bias = torch.empty((1,), dtype=x.dtype, device=x.device)
+
+    return _unquantized_fused_moe_hvx_op(
+        x,
+        topk_weights,
+        topk_ids,
+        w13_weight,
+        w2_weight,
+        bias,
+        expert_map_tensor,
+        _MOE_ACTIVATION_IDS[activation],
+        has_bias,
+        apply_router_weight_on_input,
+        has_expert_map,
+    )
+
+
+def unquantized_fused_moe_hmx(
+    x: Tensor,
+    topk_weights: Tensor,
+    topk_ids: Tensor,
+    w13_weight: Tensor,
+    w2_weight: Tensor,
+    w13_bias: Tensor | None,
+    w2_bias: Tensor | None,
+    activation: str,
+    has_bias: bool,
+    apply_router_weight_on_input: bool,
+    expert_map: Tensor | None = None,
+) -> Tensor:
+    """Run the QAIC HMX route_out + reducer MoE kernel."""
+    if activation not in _MOE_ACTIVATION_IDS:
+        raise ValueError(f"Unsupported QAIC MoE activation: {activation}")
+    if not hasattr(_qaic_custom_ops, _UNQUANTIZED_FUSED_MOE_HMX_KERNEL):
+        raise RuntimeError(
+            "QAIC HMX fused-MoE kernel is not available in this build. "
+            "Rebuild on an HMX-capable QAIC arch with QAicAppsExt headers, "
+            "or set QAIC_UNQUANTIZED_FUSED_MOE_KERNEL=hvx."
+        )
+
+    x = x.contiguous()
+    topk_weights = topk_weights.to(device=x.device, dtype=x.dtype).contiguous()
+    topk_ids = topk_ids.to(device=x.device, dtype=x.dtype).contiguous()
+    w13_weight = w13_weight.to(device=x.device, dtype=x.dtype).contiguous()
+    w2_weight = w2_weight.to(device=x.device, dtype=x.dtype).contiguous()
+    has_expert_map = expert_map is not None
+    if expert_map is None:
+        expert_map_tensor = torch.empty((1,), dtype=torch.float32, device=x.device)
+    else:
+        expert_map_tensor = expert_map.to(
+            device=x.device, dtype=torch.float32
+        ).contiguous()
+
+    if has_bias:
+        assert w13_bias is not None and w2_bias is not None
+        w13_bias = w13_bias.to(device=x.device, dtype=x.dtype).contiguous()
+        w2_bias = w2_bias.to(device=x.device, dtype=x.dtype).contiguous()
+        w13_bias_flat = w13_bias.reshape(-1)
+        w2_bias_flat = w2_bias.reshape(-1)
+        bias = torch.empty(
+            (w13_bias_flat.numel() + w2_bias_flat.numel(),),
+            dtype=x.dtype,
+            device=x.device,
+        )
+        bias[: w13_bias_flat.numel()].copy_(w13_bias_flat)
+        bias[w13_bias_flat.numel() :].copy_(w2_bias_flat)
+    else:
+        bias = torch.empty((1,), dtype=x.dtype, device=x.device)
+
+    return _unquantized_fused_moe_hmx_op(
+        x,
+        topk_weights,
+        topk_ids,
+        w13_weight,
+        w2_weight,
+        bias,
+        expert_map_tensor,
+        _MOE_ACTIVATION_IDS[activation],
+        has_bias,
+        apply_router_weight_on_input,
+        has_expert_map,
+    )
+
+
+@torch.library.custom_op(
+    "qaic::paged_attention",
+    mutates_args=("key_cache", "value_cache"),
+    device_types="qaic",
+)
+def _paged_attention_op(
+    query: Tensor,
+    key: Tensor,
+    value: Tensor,
+    key_cache: Tensor,
+    value_cache: Tensor,
+    block_table: Tensor,
+    slot_mapping: Tensor,
+    query_start_loc: Tensor,
+    seq_lens: Tensor,
+    scale: float,
+    causal: bool,
+    write_cache: bool,
+) -> Tensor:
+    """Run QAIC paged attention over vLLM block-cache metadata."""
+    query = query.contiguous()
+    if write_cache:
+        key = key.contiguous()
+        value = value.contiguous()
+    if (
+        block_table.device != query.device
+        or block_table.dtype != torch.int32
+        or not block_table.is_contiguous()
+    ):
+        block_table = block_table.to(
+            device=query.device, dtype=torch.int32
+        ).contiguous()
+    if write_cache and (
+        slot_mapping.device != query.device
+        or slot_mapping.dtype != torch.int32
+        or not slot_mapping.is_contiguous()
+    ):
+        slot_mapping = slot_mapping.to(
+            device=query.device, dtype=torch.int32
+        ).contiguous()
+    if (
+        query_start_loc.device != query.device
+        or query_start_loc.dtype != torch.int32
+        or not query_start_loc.is_contiguous()
+    ):
+        query_start_loc = query_start_loc.to(
+            device=query.device, dtype=torch.int32
+        ).contiguous()
+    if (
+        seq_lens.device != query.device
+        or seq_lens.dtype != torch.int32
+        or not seq_lens.is_contiguous()
+    ):
+        seq_lens = seq_lens.to(device=query.device, dtype=torch.int32).contiguous()
+
+    output = torch.empty_like(query)
+
+    num_tokens = query.shape[0]
+    num_heads = query.shape[1]
+    head_dim = query.shape[2]
+    num_kv_heads = key_cache.shape[1]
+    block_size = key_cache.shape[2]
+    num_reqs = seq_lens.shape[0]
+    max_blocks_per_seq = block_table.shape[1]
+
+    if (
+        key_cache.shape != value_cache.shape
+        or key_cache.stride() != value_cache.stride()
+        or key_cache.stride(-1) != 1
+    ):
+        raise ValueError(
+            "Paged attention requires matching K/V strides and dense heads"
+        )
+    cache_strides = key_cache.stride()[:3]
+    if any(s <= 0 or s > 2**31 - 1 for s in cache_strides):
+        raise ValueError("Paged attention cache strides must fit positive int32")
+
+    backend = os.environ.get("QAIC_PAGED_ATTN_BACKEND")
+    if backend is None:
+        backend = "hvx" if os.environ.get("QAIC_PAGED_ATTN_HMX", "1") == "0" else "hmx"
+    backend = backend.lower()
+    if backend not in ("hmx", "hvx"):
+        raise RuntimeError(
+            f"QAIC_PAGED_ATTN_BACKEND must be 'hmx' or 'hvx', got {backend!r}"
+        )
+
+    use_hmx = backend == "hmx"
+    is_decode = num_tokens == num_reqs
+    hmx_supported = head_dim > 0 and num_kv_heads > 0 and num_heads % num_kv_heads == 0
+    if use_hmx and not hmx_supported:
+        raise RuntimeError(
+            "HMX paged attention requested for unsupported shape: "
+            f"tokens={num_tokens}, reqs={num_reqs}, heads={num_heads}, "
+            f"kv_heads={num_kv_heads}, head_dim={head_dim}"
+        )
+    if not use_hmx and head_dim > 256:
+        raise RuntimeError(
+            "HVX paged attention supports head_dim <= 256; "
+            f"got head_dim={head_dim}. Set QAIC_PAGED_ATTN_BACKEND=hmx."
+        )
+
+    if use_hmx:
+        if is_decode:
+            attn_kernel = (
+                _paged_attention_hmx_decode_kernel
+                if write_cache
+                else _paged_attention_hmx_decode_cache_kernel
+            )
+        else:
+            attn_kernel = (
+                _paged_attention_hmx_prefill_kernel
+                if write_cache
+                else _paged_attention_hmx_prefill_cache_kernel
+            )
+    else:
+        attn_kernel = _paged_attention_hvx_kernel
+
+    fused_hmx_store = use_hmx and write_cache
+
+    if not fused_hmx_store and write_cache:
+        _paged_attention_store_kernel[_NSP_COUNT, _THREAD_COUNT](
+            key,
+            value,
+            key_cache,
+            value_cache,
+            slot_mapping,
+            num_tokens,
+            num_kv_heads,
+            head_dim,
+            block_size,
+            *cache_strides,
+        )
+    if use_hmx and not write_cache:
+        attn_kernel[_NSP_COUNT, _HMX_THREAD_COUNT](
+            query,
+            key_cache,
+            value_cache,
+            output,
+            block_table,
+            query_start_loc,
+            seq_lens,
+            num_reqs,
+            num_tokens,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            block_size,
+            max_blocks_per_seq,
+            int(causal),
+            float(scale),
+            *cache_strides,
+        )
+    elif use_hmx:
+        attn_kernel[_NSP_COUNT, _HMX_THREAD_COUNT](
+            query,
+            key,
+            value,
+            key_cache,
+            value_cache,
+            slot_mapping,
+            output,
+            block_table,
+            query_start_loc,
+            seq_lens,
+            num_reqs,
+            num_tokens,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            block_size,
+            max_blocks_per_seq,
+            int(causal),
+            float(scale),
+            *cache_strides,
+        )
+    else:
+        attn_kernel[_NSP_COUNT, _THREAD_COUNT](
+            query,
+            key_cache,
+            value_cache,
+            output,
+            block_table,
+            query_start_loc,
+            seq_lens,
+            num_reqs,
+            num_tokens,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            block_size,
+            max_blocks_per_seq,
+            int(causal),
+            float(scale),
+            *cache_strides,
+        )
+    return output
+
+
+def paged_attention(
+    query: Tensor,
+    key: Tensor,
+    value: Tensor,
+    key_cache: Tensor,
+    value_cache: Tensor,
+    block_table: Tensor,
+    slot_mapping: Tensor,
+    query_start_loc: Tensor,
+    seq_lens: Tensor,
+    scale: float,
+    causal: bool = True,
+    write_cache: bool = True,
+) -> Tensor:
+    return _paged_attention_op(
+        query,
+        key,
+        value,
+        key_cache,
+        value_cache,
+        block_table,
+        slot_mapping,
+        query_start_loc,
+        seq_lens,
+        scale,
+        causal,
+        write_cache,
     )

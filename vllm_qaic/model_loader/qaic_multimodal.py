@@ -4,6 +4,7 @@
 # ------------------------------------------------------------------
 
 import importlib
+import inspect
 import math
 from collections.abc import Iterator, Set
 
@@ -11,7 +12,7 @@ import numpy as np
 import torch
 
 from vllm.config import VllmConfig
-from vllm.logger import init_logger
+from vllm_qaic.logger import init_logger
 from vllm.model_executor.layers.pooler.abstract import Pooler
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
@@ -66,7 +67,7 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
 
             # TODO: need to update if we can support reranker
             # TODO: Add additional args for vision embedding models
-            self.pooler = VisionEncoderPooler()
+            self._pooler = VisionEncoderPooler()
 
         self.default_mm_kwargs: dict[str, np.ndarray] | None = None
         self.video_pruning_rate: float | None = getattr(
@@ -110,8 +111,14 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
                 "image_idx_output": np.array([[0]], dtype=np.int64),
             }
             if "mm_token_type_ids" in self.session.input_names:
+                # CCL prefill specializations require a mask matching the
+                # prefill batch and sequence dimensions.
                 mm_token_type_shape = (
-                    (1, 1)
+                    (
+                        (self.prefill_bsz, self.prefill_seq_len)
+                        if self.comp_ctx_lengths_prefill is not None
+                        else (1, 1)
+                    )
                     if self.session.cluster_id == "prefill"
                     else (self.decode_bsz, 1)
                 )
@@ -125,11 +132,18 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
             for k, v in self.mm_input_info.items():
                 if k == "input_features":
                     _shape = v[0].copy()
-                    _shape[-1] = 1 # Feature vector during decode is 1
-                    self.default_mm_kwargs["input_features"] = np.empty(_shape, dtype=v[1])
+                    _shape[-1] = 1  # Feature vector during decode is 1
+                    self.default_mm_kwargs["input_features"] = np.empty(
+                        _shape, dtype=v[1]
+                    )
             self.decode_batch_inputs.update(self.default_mm_kwargs)
 
-    def _to_np(self, t, dtype: np.dtype | None = None) -> np.ndarray | list[np.ndarray]:
+    def _to_np(
+        self,
+        t,
+        dtype: np.dtype | None = None,
+        binding_name: str | None = None,
+    ) -> np.ndarray | list[np.ndarray]:
         """
         Convert a tensor, numpy array, or list thereof to numpy array(s).
         - Single tensors/arrays are converted directly.
@@ -140,18 +154,36 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
         """
         if isinstance(t, list):
             if len(t) == 1:
-                return self._to_np(t[0], dtype)
-            return [self._to_np(item, dtype) for item in t]
+                return self._to_np(t[0], dtype, binding_name)
+            return [self._to_np(item, dtype, binding_name) for item in t]
 
         if isinstance(t, torch.Tensor):
+            if (
+                self.session.is_bfloat16_binding(binding_name)
+                and t.dtype == torch.bfloat16
+            ):
+                # NumPy cannot materialize BF16; keep numerical values in FP32
+                # until QAICInferenceSession packs the LRT input.
+                return t.float().numpy()
             t = t.numpy()
 
+        array = np.asarray(t)
+        if self.session.is_bfloat16_binding(binding_name):
+            # A NumPy float16 array at this boundary is raw BF16 storage from a
+            # QPC output. Preserve its bits for direct language-QPC handoff.
+            if array.dtype == np.float16:
+                return array
+            return array.astype(np.float32, copy=False)
         if dtype is not None:
-            return t.astype(dtype, copy=False)
-        return t
+            return array.astype(dtype, copy=False)
+        return array
 
     def _pad_or_crop(
-        self, tensor: torch.Tensor, target_dims: list | tuple, dtype: np.dtype
+        self,
+        tensor: torch.Tensor,
+        target_dims: list | tuple,
+        dtype: np.dtype,
+        binding_name: str | None = None,
     ) -> np.ndarray:
         """
         Pad or crop a tensor to the specified target dimensions, returning
@@ -167,10 +199,21 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
                 list(tensor.shape),
                 list(target_dims),
             )
-        padded = np.zeros(target_dims, dtype=dtype)
         slices = tuple(
             slice(0, min(s, t)) for s, t in zip(tensor.shape, target_dims, strict=False)
         )
+        if self.session.is_bfloat16_binding(binding_name):
+            source = tensor.float() if tensor.dtype == torch.bfloat16 else tensor
+            source_array = source.detach().cpu().numpy()
+            # Preserve raw BF16 storage when padding a vision-QPC output.
+            output_dtype = (
+                np.float16 if source_array.dtype == np.float16 else np.float32
+            )
+            padded = np.zeros(target_dims, dtype=output_dtype)
+            padded[slices] = source_array[slices]
+            return padded
+
+        padded = np.zeros(target_dims, dtype=dtype)
         padded[slices] = tensor[slices]
         return padded
 
@@ -229,10 +272,14 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
                         deepstack_features, deepstack_dims, embed_dtype
                     )
 
-        mm_kwargs["vision_embeds"] = np.asarray(image_embeds, dtype=embed_dtype)
+        mm_kwargs["vision_embeds"] = self._to_np(
+            image_embeds, embed_dtype, binding_name="vision_embeds"
+        )
         if deepstack_features is not None:
-            mm_kwargs["deepstack_features"] = np.asarray(
-                deepstack_features, dtype=embed_dtype
+            mm_kwargs["deepstack_features"] = self._to_np(
+                deepstack_features,
+                embed_dtype,
+                binding_name="deepstack_features",
             )
 
     def _init_vision_outputs(
@@ -363,15 +410,18 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
             else:
                 raise ValueError(f"Unsupported pixel_values type {type(pixel_values)}")
         elif "input_features" in kwargs:
-            # Audio model. Currently only whisper is supported with a single audio input.
+            # Audio model. Currently only whisper is supported with a single
+            # audio input.
             num_mm_inputs = 1
         else:
             raise ValueError(f"Unsupported multimodal inputs {kwargs.keys()}")
 
+        # Preserve numerical inputs until QAICInferenceSession packs raw BF16 storage.
         valid_input = {
             k: self._to_np(
                 v,
                 self.mm_input_info.get(k, (None, None))[1],  # get dtype
+                binding_name=k,
             )
             for k, v in kwargs.items()
             if k in self.session.binding_index_map
@@ -463,6 +513,7 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
             session_input.update(mm_output[i])
             exec_obj_idx = self.session.np_run(session_input, is_prefill=False)
             self.session.complete_inf(exec_obj_idx, is_prefill=False)
+            # Keep raw BF16 vision outputs intact for direct language-QPC handoff.
             if len(mm_output[i]) == 1:
                 feature = next(iter(mm_output[i].values()))
             elif "deepstack_features" in mm_output[i]:  # For Qwen3VL
@@ -584,13 +635,39 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
         mm_features: list[MultiModalFeatureSpec],
     ) -> tuple[torch.Tensor, int]:
         source_class = self._get_mrope_source_class()
+        # The QaicMultiModal wrapper delegates get_mrope_input_positions to the
+        # upstream qwen3_vl.py implementation via
+        # source_class.get_mrope_input_positions(self, ...). The upstream method
+        # internally calls self._get_mrope_input_positions(...), but
+        # _get_mrope_input_positions is a private method on the original Qwen3VL
+        # class that was not forwarded to the QaicMultiModal wrapper, causing an
+        # AttributeError that kills the EngineCore process.
+        static_impl = inspect.getattr_static(
+            source_class, "_get_mrope_input_positions", None
+        )
+        if isinstance(static_impl, staticmethod):
+            return static_impl.__func__(
+                input_tokens=input_tokens,
+                mm_features=mm_features,
+                config=self.config,
+            )
         return source_class.get_mrope_input_positions(self, input_tokens, mm_features)
 
     def iter_mm_grid_hw(
         self, input_tokens: list[int], mm_features: list[MultiModalFeatureSpec]
-    ) -> Iterator[tuple[int, int, int]]:
+    ) -> Iterator[tuple[int, int, int] | tuple[int, int, int, int]]:
         # Helper for Qwen3-VL's get_mrope_input_positions.
         source_class = self._get_mrope_source_class()
+        static_impl = inspect.getattr_static(source_class, "_iter_mm_grid_hw", None)
+        if isinstance(static_impl, staticmethod):
+            return static_impl.__func__(
+                input_tokens,
+                mm_features,
+                video_token_id=self.config.video_token_id,
+                vision_start_token_id=self.config.vision_start_token_id,
+                vision_end_token_id=self.config.vision_end_token_id,
+                spatial_merge_size=self.config.vision_config.spatial_merge_size,
+            )
         return source_class.iter_mm_grid_hw(self, input_tokens, mm_features)
 
     def iter_mm_grid_thw(

@@ -30,7 +30,7 @@ from vllm.distributed.kv_transfer import (
     has_kv_transfer_group,
 )
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
-from vllm.logger import init_logger
+from vllm_qaic.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.platforms import current_platform
@@ -50,7 +50,7 @@ from vllm.v1.outputs import (
 from vllm.v1.utils import compute_iteration_details
 from vllm.v1.worker.gpu_worker import init_worker_distributed_environment
 from vllm.v1.worker.worker_base import WorkerBase
-
+from vllm.v1.worker.worker_base import CompilationTimes
 
 from vllm_qaic.worker.model_runner import (
     QaicModelRunnerAoT,
@@ -60,7 +60,7 @@ from vllm_qaic.worker.model_runner import (
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
-    from vllm.v1.core.scheduler_output import SchedulerOutput
+    from vllm.v1.core.sched.output import SchedulerOutput
 
 
 class QaicWorker(WorkerBase):
@@ -82,7 +82,7 @@ class QaicWorker(WorkerBase):
             is_driver_worker=is_driver_worker,
         )
 
-        self.profiler = None
+        self.profiler: TorchProfilerWrapper | None = None
 
         if self.speculative_config:
             assert self.model_config.hf_config.model_type not in [
@@ -157,6 +157,7 @@ class QaicWorker(WorkerBase):
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
+        ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
         self.model_runner.initialize_kv_cache(kv_cache_config)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
@@ -200,29 +201,13 @@ class QaicWorkerPyt(QaicWorker):
             distributed_init_method=distributed_init_method,
             is_driver_worker=is_driver_worker,
         )
-        assert self.model_config.enforce_eager
+        self.use_v2_model_runner = False
         self.parallel_config.disable_custom_all_reduce = True
+        self.profiler_config = vllm_config.profiler_config
 
         # configure float32 matmul precision according to vLLM env.
         precision = envs.VLLM_FLOAT32_MATMUL_PRECISION
         torch.set_float32_matmul_precision(precision)
-
-        # Torch profiler. Enabled and configured through env vars:
-        if os.environ.get("VLLM_TORCH_PROFILER_DIR"):
-            torch_profiler_trace_dir = os.environ["VLLM_TORCH_PROFILER_DIR"]
-            worker_name = f"{vllm_config.instance_id}-rank-{self.rank}"
-            logger.info(
-                "Profiling enabled. Traces will be saved to: %s",
-                torch_profiler_trace_dir,
-            )
-            profiler_config = vllm_config.profiler_config
-            assert profiler_config.profiler == "torch"
-            self.profiler = TorchProfilerWrapper(
-                profiler_config,
-                worker_name=worker_name,
-                local_rank=self.local_rank,
-                activities=["CPU"],
-            )
 
         from vllm_qaic.ops import register_qaic_customop
 
@@ -407,7 +392,8 @@ class QaicWorkerPyt(QaicWorker):
             GiB(self.requested_memory),
         )
         logger.debug(
-            "Free memory after profiling: %.2f GiB (total), %.2f GiB (within requested)",
+            "Free memory after profiling: %.2f GiB (total), %.2f GiB "
+            "(within requested)",
             GiB(free_gpu_memory),
             GiB(free_gpu_memory - unrequested_memory),
         )
@@ -439,11 +425,11 @@ class QaicWorkerPyt(QaicWorker):
     # to hijack tensor allocation.
     def load_model(self) -> None:
         # adapted from gpu_worker.py
-        eep_scale_up = os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1"
-        with self._maybe_get_memory_pool_context(
-            tag="weights"
-        ) and set_current_vllm_config(self.vllm_config):
-            self.model_runner.load_model(eep_scale_up=eep_scale_up)
+        with (
+            self._maybe_get_memory_pool_context(tag="weights"),
+            set_current_vllm_config(self.vllm_config),
+        ):
+            self.model_runner.load_model()
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
         if self.vllm_config.model_config.enable_sleep_mode:
@@ -458,9 +444,9 @@ class QaicWorkerPyt(QaicWorker):
         else:
             return nullcontext()
 
-    def compile_or_warm_up_model(self) -> None:
+    def compile_or_warm_up_model(self) -> CompilationTimes:
         # Adapted from gpu_worker.py
-        warmup_sizes = []
+        warmup_sizes: list[int] = []
 
         if self.vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE:
             # warm up sizes that are not in cudagraph capture sizes,
@@ -496,10 +482,9 @@ class QaicWorkerPyt(QaicWorker):
         kernel_warmup(self)
 
         cuda_graph_memory_bytes = 0
-        # FIXME need better handling of AoT v/s torch compile mode when
-        # that needs to be supported
-        # if not self.model_config.enforce_eager:
-        #     cuda_graph_memory_bytes = self.model_runner.capture_model()
+
+        if not current_platform.is_aot:
+            cuda_graph_memory_bytes = self.model_runner.capture_model()
 
         if self.cache_config.kv_cache_memory_bytes is None and hasattr(
             self, "peak_activation_memory"
@@ -583,6 +568,7 @@ class QaicWorkerPyt(QaicWorker):
             # the model initialization and profiling.
             set_random_seed(self.model_config.seed)
         # self.model_runner.warming_up_model()
+        return CompilationTimes(language_model=0.0, encoder=0.0)
 
     def execute_model(
         self,
@@ -593,8 +579,8 @@ class QaicWorkerPyt(QaicWorker):
             output = self.model_runner.execute_model(scheduler_output)
         return output
 
-    def profile(self, is_start: bool = True):
-        if self.profiler is None:
+    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
+        if self.profiler_config is None or self.profiler_config.profiler is None:
             raise RuntimeError(
                 "Profiling is not enabled. Please set --profiler-config to enable "
                 "profiling. Example: "
@@ -602,8 +588,40 @@ class QaicWorkerPyt(QaicWorker):
                 "=YOUR_DIR_PATH_TO_DUMP_TRACE'"
             )
         if is_start:
+            # Generate the trace name by combining prefix with comprehensive rank suffix
+            from vllm.distributed.utils import get_worker_rank_suffix
+
+            rank_suffix = get_worker_rank_suffix(global_rank=self.rank)
+
+            # Build the full trace name
+            if profile_prefix:
+                trace_name = f"{profile_prefix}_{rank_suffix}"
+            else:
+                trace_name = rank_suffix
+            if self.profiler is None:
+                profiler_config = self.vllm_config.profiler_config
+                if profiler_config.profiler == "torch":
+                    self.profiler = TorchProfilerWrapper(
+                        profiler_config,
+                        worker_name=trace_name,
+                        local_rank=self.local_rank,
+                        activities=["CPU"],
+                    )
+                    logger.debug(
+                        "Starting torch profiler with trace name: %s", trace_name
+                    )
+                else:
+                    # Config validation should prevent this code being reached
+                    raise ValueError(
+                        f"Invalid profiler value of {self.profiler_config.profiler}"
+                    )
+            # If profiler already initialized, restart profiling but keep
+            # the original trace name from the first initialization.
             self.profiler.start()
         else:
+            if self.profiler is None:
+                logger.warning("Profiler was not started, nothing to stop.")
+                return
             self.profiler.stop()
 
     def execute_dummy_batch(self) -> None:
@@ -674,8 +692,9 @@ class QaicWorkerAoT(QaicWorker):
         """Load model from QEfficient Transformer library"""
         self.model_runner.load_model()
 
-    def compile_or_warm_up_model(self) -> None:
+    def compile_or_warm_up_model(self) -> CompilationTimes:
         self.model_runner._qaic_dummy_run()
+        return CompilationTimes(language_model=0.0, encoder=0.0)
 
     def reload_weights(self) -> None:
         logger.warning("reloading weights is not supported on QAIC in AoT mode.")
@@ -749,7 +768,6 @@ class QaicWorkerAoT(QaicWorker):
             1,
             1,
         )
-        ensure_kv_transfer_initialized(vllm_config)
 
     def execute_model(
         self,

@@ -6,14 +6,13 @@ Understanding and managing Qualcomm Cloud AI device topology.
 
 Each Cloud AI 100 Ultra card contains **4 QIDs** (Qualcomm device IDs), and each QID has **16 NSP cores**:
 
-```
+```text
 Cloud AI 100 Ultra Card (1 board serial)
 +-- QID 0  (16 NSP cores)
 +-- QID 1  (16 NSP cores)
 +-- QID 2  (16 NSP cores)
 +-- QID 3  (16 NSP cores)
-```
-
+```text
 Multiple cards in a system provide additional QID groups (e.g., QIDs 0-3, 4-7, 8-11...).
 
 ## Inspecting Device Status
@@ -27,8 +26,7 @@ Multiple cards in a system provide additional QID groups (e.g., QIDs 0-3, 4-7, 8
 # QID 1: Status Ready, Board Serial ABC123
 # QID 2: Status Busy, Board Serial ABC123
 # QID 3: Status Ready, Board Serial ABC123
-```
-
+```text
 ## Device Visibility
 
 Control which QIDs are accessible to your process:
@@ -42,8 +40,7 @@ export QAIC_VISIBLE_DEVICES=0,1,2,3
 
 # Specific devices on a multi-card system
 export QAIC_VISIBLE_DEVICES=4,5,6,7
-```
-
+```text
 ## Device Group Configuration
 
 The `device_group` field in `additional_config` specifies which QID(s) to use:
@@ -54,8 +51,7 @@ additional_config={"override_qaic_config": {"device_group": [0]}}
 
 # Tensor parallel across 4 QIDs (one Ultra card)
 additional_config={"override_qaic_config": {"device_group": [0, 1, 2, 3]}}
-```
-
+```text
 !!! tip "Same board serial"
     For tensor-parallel execution across multiple QIDs, always select QIDs that share
     the same board serial number (i.e., on the same physical card) for optimal
@@ -71,8 +67,7 @@ additional_config={
     "override_qaic_config": {"device_group": [0], "num_cores": 10},
     "draft_override_qaic_config": {"device_group": [0], "num_cores": 6},
 }
-```
-
+```text
 ## Multi-Card Deployment
 
 For large models requiring more than one card:
@@ -85,8 +80,7 @@ export QAIC_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 vllm serve meta-llama/Llama-3.1-70B-Instruct \
   --tensor-parallel-size 8 \
   --additional-config '{"override_qaic_config":{"device_group":[0,1,2,3,4,5,6,7]}}'
-```
-
+```text
 ## Device Recovery
 
 If a device is busy or unavailable:
@@ -100,7 +94,6 @@ If a device is in **Error** state, perform an SOC reset:
 
 ```bash
 sudo /opt/qti-aic/tools/qaic-util -s
-```
-
+```text
 !!! warning
     An SOC reset will affect all workloads running on the card. Ensure no other processes are using the device before resetting.

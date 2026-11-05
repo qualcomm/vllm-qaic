@@ -12,7 +12,7 @@ from typing import ClassVar
 import torch
 
 from vllm.config import VllmConfig
-from vllm.logger import init_logger
+from vllm_qaic.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -21,8 +21,8 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     AttentionType,
     CommonAttentionMetadata,
-    is_quantized_kv_cache,
 )
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backends.registry import (
     AttentionBackendEnum,
     register_backend,
@@ -92,7 +92,6 @@ class QAicTorchAttentionBackend(AttentionBackend):
 
 @dataclass
 class QAicAttentionMetadata:
-    isa: str
     num_actual_tokens: int  # Number of tokens excluding padding.
     max_query_len: int
     query_start_loc: torch.Tensor
@@ -145,7 +144,6 @@ class QAicAttentionMetadataBuilder(AttentionMetadataBuilder[QAicAttentionMetadat
         if self.window_size is None:
             self.window_size = -1
         self.block_size = vllm_config.cache_config.block_size
-        self.isa = _get_attn_isa(self.dtype, self.block_size, self.head_dim)
 
     def build(
         self,
@@ -153,7 +151,6 @@ class QAicAttentionMetadataBuilder(AttentionMetadataBuilder[QAicAttentionMetadat
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> QAicAttentionMetadata:
-        num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
         max_seq_len = common_attn_metadata.max_seq_len
@@ -178,7 +175,6 @@ class QAicAttentionMetadataBuilder(AttentionMetadataBuilder[QAicAttentionMetadat
                 decode_threshold=self.reorder_batch_threshold,
                 require_uniform=True,
             )
-            num_reqs = num_decodes
             seq_lens = seq_lens[:num_decodes]
             query_start_loc = query_start_loc[: num_decodes + 1]
             block_table_tensor = block_table_tensor[:num_decodes]
@@ -186,7 +182,6 @@ class QAicAttentionMetadataBuilder(AttentionMetadataBuilder[QAicAttentionMetadat
         scheduler_metadata = None
 
         attn_metadata = QAicAttentionMetadata(
-            isa=self.isa,
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
             query_start_loc=query_start_loc,
@@ -329,7 +324,6 @@ class QAicAttentionBackendImpl(AttentionImpl):
                 key_cache,
                 value_cache,
                 attn_metadata.slot_mapping,
-                attn_metadata.isa,
             )
 
         if attn_metadata.use_sdpa_prefill:
@@ -364,13 +358,12 @@ class QAicAttentionBackendImpl(AttentionImpl):
             )
         return output
 
-    def write_to_paged_cache(
-        self, key, value, key_cache, value_cache, slot_mapping, isa
-    ):
+    def write_to_paged_cache(self, key, value, key_cache, value_cache, slot_mapping):
         """
         write key and value into key_cache and value_cache based on the slot mapping
 
-        key_cache and value cache are shaped : [num_blocks, block_size, num_heads, head_dim]
+        key_cache and value cache are shaped:
+        [num_blocks, block_size, num_heads, head_dim]
         key and value are shaped: [num_tokens, num_heads, head_dim]
         """
         block_size = key_cache.shape[1]
@@ -430,7 +423,6 @@ class QAicAttentionBackendImpl(AttentionImpl):
             # FIXME key cache can be shaped like below's output from the start itself
             seq_len = seq_lens[seq_id]
             physical_block_indices = block_table[seq_id]
-            seq_arange = torch.arange(seq_len)
             num_valid_blocks = -1 * (-seq_len // block_size)
             block_ids = physical_block_indices[:num_valid_blocks]
             key = key_cache[block_ids]
@@ -439,8 +431,6 @@ class QAicAttentionBackendImpl(AttentionImpl):
             value = value.view(-1, value.shape[2], value.shape[3])
             key = key[:seq_len]
             value = value[:seq_len]
-            qlen = sdpa_start_loc[seq_id + 1] - sdpa_start_loc[seq_id]
-            kvlen = key.shape[0]
             key = key.movedim(0, key.dim() - 2)
             value = value.movedim(0, value.dim() - 2)
 
@@ -448,7 +438,6 @@ class QAicAttentionBackendImpl(AttentionImpl):
                 key = key.repeat_interleave(self.num_queries_per_kv, dim=-3)
                 value = value.repeat_interleave(self.num_queries_per_kv, dim=-3)
 
-            causal_attn = self.attn_type == AttentionType.DECODER
             mask = attn_masks[seq_id]
             start_q = sdpa_start_loc[seq_id]
             end_q = sdpa_start_loc[seq_id + 1]
@@ -480,6 +469,7 @@ class QAicAttentionBackendImpl(AttentionImpl):
     ) -> torch.Tensor:
         sdpa_start_loc = attn_metadata.sdpa_start_loc
         num_decode_tokens = attn_metadata.num_decode_tokens
+        assert sdpa_start_loc is not None
         sdpa_start_loc = sdpa_start_loc[num_decode_tokens:] - num_decode_tokens
 
         if self.alibi_slopes is not None:
@@ -586,20 +576,3 @@ def _make_sliding_window_bias(
         attn_biases.append(mask)
 
     return attn_biases
-
-
-def _get_attn_isa(
-    dtype: torch.dtype, block_size: int, head_size: int | None = None
-) -> str:
-    if head_size is not None and head_size % 32 != 0 and head_size % 16 == 0:
-        return "vec16"
-    supports_amx = torch._C._cpu._is_amx_tile_supported()
-    if supports_amx and dtype in (torch.bfloat16,) and block_size % 32 == 0:
-        return "amx"
-    elif block_size % 32 == 0:
-        if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
-            return "neon"
-        else:
-            return "vec"
-    else:
-        return "vec16"

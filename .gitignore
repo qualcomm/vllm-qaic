@@ -8,6 +8,9 @@ vllm/vllm_flash_attn/*
 # triton jit
 .triton
 
+# build output
+.build/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -94,6 +97,7 @@ ipython_config.py
 
 # generated files
 **/generated/**
+tests/e2e/ShareGPT_V3_unfiltered_cleaned_split.json
 
 # uv
 uv.lock

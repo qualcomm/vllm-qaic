@@ -6,28 +6,35 @@
 # SPDX-License-Identifier: Apache-2.0
 # Adapted from vllm/vllm/config/cache.py
 
-
-from typing import Literal
+from typing import Literal, TypeAlias, get_args
 
 import torch
 import vllm.config
+import vllm.config.cache
 import vllm.engine.arg_utils
+import vllm.v1.attention.selector
 from pydantic import ConfigDict, field_validator
 from pydantic.dataclasses import dataclass
 from vllm.config.cache import CacheConfig, CacheDType
 from vllm.config.device import DeviceConfig
 from vllm.config.utils import config
-from vllm.logger import init_logger
+from vllm_qaic.logger import init_logger
 
 logger = init_logger(__name__)
 
-QaicCacheDType = CacheDType | Literal["mxint8"]
+_QAIC_CACHE_DTYPES = ("mxint8",)
+# Flattened single Literal (not a Union), else the CLI exposes only "mxint8".
+QaicCacheDType: TypeAlias = Literal[  # type: ignore[valid-type]
+    tuple(dict.fromkeys((*get_args(CacheDType), *_QAIC_CACHE_DTYPES)))
+]
 
 
 @config
 @dataclass
 class QaicCacheConfig(CacheConfig):
     cache_dtype: QaicCacheDType = "auto"
+    """Data type for storing the KV cache. Extends the upstream
+    ``CacheConfig.cache_dtype`` choices with the QAIC-only ``mxint8`` option."""
 
     @field_validator("cache_dtype", mode="after")
     @classmethod
@@ -45,6 +52,11 @@ class QaicCacheConfig(CacheConfig):
 @config
 @dataclass(config=ConfigDict(arbitrary_types_allowed=True))
 class QaicDeviceConfig(DeviceConfig):
+    device: str | torch.device | None = "auto"
+    """Device type for vLLM execution."""
+    device_type: str = ""
+    """Device type resolved from the current platform."""
+
     def __post_init__(self):
         if self.device == "auto":
             # Automated device type detection
@@ -79,3 +91,8 @@ vllm.config.DeviceConfig = QaicDeviceConfig
 
 vllm.engine.arg_utils.DeviceConfig = QaicDeviceConfig
 vllm.engine.arg_utils.CacheConfig = QaicCacheConfig
+
+# get_attn_backend() asserts kv_cache_dtype in get_args(CacheDType); rebind that
+# Literal (in its module + the selector that imported it) to include mxint8.
+vllm.config.cache.CacheDType = QaicCacheDType
+vllm.v1.attention.selector.CacheDType = QaicCacheDType
