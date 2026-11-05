@@ -302,21 +302,26 @@ class QaicPlatform(Platform):
                         model_config.max_model_len
                     )  # reset to "no-op" default
                     cache_config.mamba_cache_mode = "none"  # reset to disabled
-                    cache_config.block_size = cls._pa_block_size(vllm_config)
+                    if vllm_config.kv_transfer_config:
+                        cache_config.block_size = override_qaic_config.get(
+                            "kv_block_size"
+                        )
+                    else:
+                        if override_qaic_config.get("prefill_seq_len") is not None:
+                            cache_config.block_size = override_qaic_config.get(
+                                "prefill_seq_len"
+                            )
+                        else:
+                            # If prefill_seq_len is not set, it defaults to 128 @qaic.py
+                            cache_config.block_size = min(
+                                128, model_config.max_model_len
+                            )
                 elif (
                     model_config.is_multimodal_model and model_config.is_encoder_decoder
                 ):
                     cache_config.block_size = 100000
                 else:
                     cache_config.block_size = model_config.max_model_len  # ctx_len
-
-        # disable async scheduling since Qaic does not yet support it
-        if scheduler_config.async_scheduling:
-            logger.warning(
-                "QAIC currently does not support async scheduling; "
-                "Falling back to non-async scheduling."
-            )
-            scheduler_config.async_scheduling = False
 
         if cls.is_aot:
             if model_config.hf_config.model_type == "whisper":
@@ -375,9 +380,6 @@ class QaicPlatform(Platform):
             # (now-overridden) max_num_batched_tokens when __post_init__
             # re-runs in the EngineCore subprocess (core.py:1038).
             scheduler_config.max_num_scheduled_tokens = None
-
-        if cache_config and cache_config.enable_prefix_caching:
-            cache_config.block_size = cls._pa_block_size(vllm_config)
 
         if cls.is_aot:
             # libiomp5.so (Intel's OpenMP runtime) OMP barrier/blocktime tuning —
@@ -439,6 +441,13 @@ class QaicPlatform(Platform):
                 "serving, other SPD types such as Turbo is not yet supported "
                 "with Disaggregated serving for QAIC backend"
             )
+            assert not (
+                vllm_config.kv_transfer_config.kv_role != "kv_producer"
+                and vllm_config.cache_config.enable_prefix_caching
+            ), (
+                "Prefix caching with KV-role 'kv_consumer' or 'kv_both' not "
+                "yet supported for QAIC backend"
+            )
             if (
                 on_device_sampling_en
                 and vllm_config.kv_transfer_config.kv_role == "kv_producer"
@@ -473,13 +482,6 @@ class QaicPlatform(Platform):
                 cls._configure_multimodal_model(
                     vllm_config, model_config, scheduler_config, model_type
                 )
-
-    @classmethod
-    def _pa_block_size(cls, vllm_config) -> int:
-        override = vllm_config.additional_config.get("override_qaic_config", {})
-        if vllm_config.kv_transfer_config:
-            return override.get("kv_block_size")
-        return override.get("prefill_seq_len")
 
     @classmethod
     def is_pin_memory_available(cls) -> bool:
@@ -574,21 +576,6 @@ class QaicPlatform(Platform):
             scheduler_config.encoder_cache_size = (
                 scheduler_config.max_num_batched_tokens
             )
-            cache_config = vllm_config.cache_config
-            if cache_config and cache_config.enable_prefix_caching:
-                if vllm_config.kv_transfer_config:
-                    cache_config.block_size = vllm_config.additional_config.get(
-                        "override_qaic_config", {}
-                    ).get("kv_block_size")
-                else:
-                    cache_config.block_size = vllm_config.additional_config.get(
-                        "override_qaic_config", {}
-                    ).get("prefill_seq_len")
-            if (
-                vllm_config.cache_config
-                and vllm_config.cache_config.enable_prefix_caching
-            ):
-                vllm_config.cache_config.block_size = cls._pa_block_size(vllm_config)
             if "override_qaic_config" not in vllm_config.additional_config:
                 additional_config["override_qaic_config"] = {}
             additional_config["override_qaic_config"].update(
