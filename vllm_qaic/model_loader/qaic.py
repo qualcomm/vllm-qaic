@@ -45,7 +45,12 @@ from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
 
-from vllm_qaic.utils.qaic_utils import _clean_config, compute_max_decode_tokens
+from vllm_qaic.utils.qaic_utils import (
+    DFLASH_MODEL_TYPES,
+    DFLASH_VLM_MODEL_TYPES,
+    _clean_config,
+    compute_max_decode_tokens,
+)
 
 logger = init_logger(__name__)
 
@@ -176,6 +181,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             if vllm_config.speculative_config
             else None
         )
+        self.is_dflash_target = _method == "dflash"
         self.is_kv_consumer: bool = bool(
             vllm_config.kv_transfer_config
             and vllm_config.kv_transfer_config.kv_role == "kv_consumer"
@@ -248,6 +254,10 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         tlm_prefill_hidden_chunks: list[np.ndarray] | None = None,
         dflash_decode_hidden_buf: np.ndarray | None = None,
     ) -> Queue | None:
+        if is_prompt and getattr(self, "dflash_hybrid", False):
+            # A new prompt must not inherit a pending prefix from a reused cache slot.
+            self._dflash_prefix_positions[:, batch_indices] = -1
+            self._dflash_decode_slots = None
         if self.is_pooling_model and not self.is_multimodal_model:
             output = self._run_encode(prefill_cum_sum, input_ids, positions)
             return output
@@ -363,6 +373,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         transparent: old QPCs compiled without a K=0 spec continue to work
         unchanged because ``decode_ks`` stays at ``[max_k]``.
         """
+        if self.is_dflash_target:
+            return list(self.decode_ks)
         try:
             input_idx = self.session.binding_index_map["input_ids"]
             ks: list[int] = []
@@ -449,13 +461,28 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         e = time.perf_counter() - s
         logger.info("Successfully loaded QPC in %s secs", e)
 
-        # DFlash TLM: bind a scratch hidden_states output on every run (required
-        # by the QPC even outside DFlash steps, e.g. the warm-up dummy run).
-        _hs_info = self.get_io_shape_and_dtype("hidden_states", is_input=False)
-        self._dflash_prefill_hidden_scratch: np.ndarray | None = None
+        # Bind exported hidden states even when no caller consumes them,
+        # including warm-up runs. The output name depends on the QPC.
+        self.tlm_hidden_states_name = (
+            "target_hidden_states"
+            if self.is_dflash_target
+            and "target_hidden_states" in self.session.output_names
+            else "hidden_states"
+        )
+        _hs_info = self.get_io_shape_and_dtype(
+            self.tlm_hidden_states_name, is_input=False
+        )
+        self.tlm_hidden_size = _hs_info[0][-1] if _hs_info is not None else None
+        if _hs_info is not None and self.is_dflash_target:
+            self.tlm_hidden_size = self._get_tlm_hidden_size()
+        self._prefill_hidden_scratch: np.ndarray | None = None
         if _hs_info is not None and not isinstance(self.prefill_seq_len, (list, tuple)):
-            _hidden_size = self.config.get_text_config().hidden_size
-            self._dflash_prefill_hidden_scratch = np.zeros(  # nosemgrep
+            _hidden_size = (
+                self.tlm_hidden_size
+                if self.is_dflash_target
+                else self.config.get_text_config().hidden_size
+            )
+            self._prefill_hidden_scratch = np.zeros(  # nosemgrep
                 (1, self.prefill_seq_len, _hidden_size), dtype=_hs_info[1]
             )
 
@@ -546,6 +573,24 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
     @property
     def kv_cache_info(self) -> list[tuple]:  # [(kv_shape, kv_type, kv_size)]
         return self.session.kv_cache_info
+
+    def _get_binding_shapes(self, name: str, is_input: bool = True):
+        # Prefer logical specialization shapes over potentially flattened bindings.
+        shapes = self.session.get_bindings_shapes([name]).get(name, [])
+        if not shapes and (
+            info := self.get_io_shape_and_dtype(name, is_input=is_input)
+        ):
+            shapes = [info[0]]
+        return shapes
+
+    def _get_tlm_hidden_size(self) -> int:
+        """Read the fixed feature width from logical hidden-state output shapes."""
+        shapes = self._get_binding_shapes(self.tlm_hidden_states_name, is_input=False)
+        if not shapes:
+            raise ValueError("Target QPC is missing target hidden states.")
+        if any(len(s) != 3 for s in shapes) or len({s[-1] for s in shapes}) != 1:
+            raise ValueError("Target hidden states require a fixed feature width.")
+        return shapes[0][-1]
 
     def get_io_shape_and_dtype(
         self, buffer_name: str, is_input: bool = True
@@ -806,6 +851,13 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 chunk_inputs["lora_ids"] = lora_index
             if mm_kwargs_list and (mm_kwargs := mm_kwargs_list[i]):
                 chunk_inputs.update(mm_kwargs)
+            if (
+                getattr(self, "is_dflash_vlm", False)
+                and "image_idx_output" in chunk_inputs
+            ):
+                # Keep a private buffer for input/output swapping so device
+                # writes cannot modify the shared initial image index.
+                chunk_inputs["image_idx"] = chunk_inputs["image_idx"].copy()
             # chunk the request
             n_chunks: int = iids.shape[-1] // self.prefill_seq_len
 
@@ -859,12 +911,14 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
 
                 # DFlash: bind per-chunk hidden-states output buffers for the DLM.
                 if tlm_prefill_hidden_chunks is not None:
-                    chunk_inputs["hidden_states"] = tlm_prefill_hidden_chunks[
-                        _dflash_chunk_idx
-                    ]
+                    chunk_inputs[self.tlm_hidden_states_name] = (
+                        tlm_prefill_hidden_chunks[_dflash_chunk_idx]
+                    )
                     _dflash_chunk_idx += 1
-                elif self._dflash_prefill_hidden_scratch is not None:
-                    chunk_inputs["hidden_states"] = self._dflash_prefill_hidden_scratch
+                elif self._prefill_hidden_scratch is not None:
+                    chunk_inputs[self.tlm_hidden_states_name] = (
+                        self._prefill_hidden_scratch
+                    )
 
                 if self.session.prefill_available_exec_objs.empty():
                     logger.debug(
@@ -877,6 +931,16 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 logger.debug("Ran prefill on %s", exec_obj_idx)
                 if not self.use_async_scheduling:
                     self.session.complete_inf(exec_obj_idx, True)
+                    if (
+                        getattr(self, "is_dflash_vlm", False)
+                        and "image_idx_output" in chunk_inputs
+                    ):
+                        # Reuse the completed output as the next input without
+                        # copying data or aliasing input and output storage.
+                        chunk_inputs["image_idx"], chunk_inputs["image_idx_output"] = (
+                            chunk_inputs["image_idx_output"],
+                            chunk_inputs["image_idx"],
+                        )
                 else:
                     time.sleep(0.01)
                     pending_exec_queue.put(exec_obj_idx)
@@ -905,10 +969,33 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         callback: Callable | None = None,
         dflash_decode_hidden_buf: np.ndarray | None = None,
     ) -> None:
+        hybrid = getattr(self, "dflash_hybrid", False)
+        if hybrid:
+            # Qwen3.5 commits the accepted prefix and verifies the new block
+            # in one TLM execution. Padded prefix positions remain -1.
+            block_size = self.num_spec_tokens + 1
+            rows = input_ids.size // block_size
+            batch_indices = np.asarray(batch_indices[:rows], dtype=np.int64)
+            self._dflash_decode_slots = batch_indices.copy()
+            input_ids = np.concatenate(
+                [
+                    self._dflash_prefix_ids[batch_indices],
+                    input_ids.reshape(rows, block_size),
+                ],
+                axis=-1,
+            ).reshape(-1)
+            positions = np.concatenate(
+                [
+                    self._dflash_prefix_positions[:, batch_indices],
+                    positions.reshape(4, rows, block_size),
+                ],
+                axis=-1,
+            ).reshape(4, -1)
+
         # Use the per-step K set by QaicModelRunner.  Falls back to max K so
         # the method is callable without a runner (e.g., unit tests).
         current_k = self.active_k
-        mdt = current_k + 1  # tokens per decode request for this step
+        mdt = (current_k + 1) * (2 if hybrid else 1)
         num_tokens = input_ids.shape[0]
         num_decodes = num_tokens // mdt  # number of decode requests
         batch_inputs = self.decode_batch_inputs_by_k[current_k]
@@ -924,8 +1011,9 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             )
         batch_inputs["logits"] = logits
         # DFlash: capture TLM decode hidden states for the DLM.
-        if dflash_decode_hidden_buf is not None:
-            batch_inputs["hidden_states"] = dflash_decode_hidden_buf
+        hidden_buf = self._dflash_decode_hidden if hybrid else dflash_decode_hidden_buf
+        if hidden_buf is not None:
+            batch_inputs[self.tlm_hidden_states_name] = hidden_buf
         if num_decodes < self.decode_bsz:
             batch_inputs["input_ids"][num_decodes:] = -1
             batch_inputs["position_ids"][..., num_decodes:, :] = -1
@@ -940,9 +1028,10 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             if num_decodes < self.decode_bsz:
                 batch_inputs["lora_ids"][num_decodes:] = -1
 
-        # For spec-decode target: include num_logits_to_keep in batch_inputs
-        # so the hardware knows how many token positions to compute logits for.
-        if self.is_spec_decode_target_model:
+        if (
+            self.is_spec_decode_target_model
+            and "num_logits_to_keep" in self.session.input_names
+        ):
             batch_inputs.update(self.decode_num_logits_buffer_by_k[current_k])
 
         if self.comp_ctx_lengths_decode is not None:
@@ -966,6 +1055,19 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
 
         if not self.use_async_scheduling:
             self.session.complete_inf(exec_obj_idx, is_prefill=False)
+        if hybrid:
+            # QEfficient right-aligns logits for a partial verification suffix.
+            valid_counts = (
+                positions[0].reshape(rows, 2 * block_size)[:, block_size:] >= 0
+            ).sum(axis=1)
+            for row, count in enumerate(valid_counts):
+                if 0 < count < block_size:
+                    logits[row, :count] = logits[row, -count:].copy()
+            if dflash_decode_hidden_buf is not None:
+                # The drafter needs only the new block, not the commit prefix.
+                dflash_decode_hidden_buf[:] = self._dflash_decode_hidden[
+                    :, -block_size:
+                ]
         return
 
     def _run_encode(self, prefill_cum_sum, input_ids, positions):
@@ -1309,7 +1411,10 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     self.decode_batch_inputs["comp_ctx_lengths"] = np.zeros(
                         self.comp_ctx_lengths_decode[-1], dtype=np.int64
                     )
-                if self.is_spec_decode_target_model:
+                if (
+                    self.is_spec_decode_target_model
+                    and "num_logits_to_keep" in self.session.input_names
+                ):
                     self.decode_batch_inputs.update(
                         self.decode_num_logits_buffer_by_k[self.active_k]
                     )
@@ -1330,6 +1435,11 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
 def _derive_dflash_config(vllm_config) -> None:
     """Derive DFlash metadata into additional_config['dflash_cfg'] (idempotent)."""
     spec_config = vllm_config.speculative_config
+    model_type = spec_config.target_model_config.hf_config.model_type
+    if model_type not in DFLASH_MODEL_TYPES:
+        raise ValueError(
+            f"DFlash is not supported for target model type {model_type!r}."
+        )
     additional_config = vllm_config.additional_config
     if additional_config is None:
         additional_config = {}
@@ -1376,6 +1486,7 @@ def _derive_dflash_config(vllm_config) -> None:
         "target_layer_ids": [i + 1 for i in target_layer_ids],
         "mask_token_id": mask_token_id,
         "tlm_repo": spec_config.target_model_config.model,
+        "tlm_model_type": spec_config.target_model_config.hf_config.model_type,
         "dlm_repo": spec_config.draft_model_config.model,
     }
 
@@ -1815,6 +1926,13 @@ def get_hf_model(
         # If tie_word_embeddings is not set correctly,
         # single QPC's output would be wrong
         hf_config.tie_word_embeddings = pretrained_hf_config.tie_word_embeddings
+    # Layer IDs request hidden-state extraction; the draft checkpoint selects
+    # DFlash's projection. Do not apply its loading policy to other SpD methods.
+    is_dflash_target = bool(
+        qaic_config
+        and qaic_config.get("target_layer_ids")
+        and qaic_config.get("dflash_dlm_repo")
+    )
     # For Gptoss models, vllm sets the quantization to gpt_oss_mxfp4 while qeff
     # needs mxfp4 quantization. Because of this mismatch, qeff do not adds MoE
     # weights to the graph and model generates garbage output
@@ -1859,7 +1977,11 @@ def get_hf_model(
         elif model_config.hf_config.model_type != "internvl_chat":
             # InternVL uses QEFFAutoModelForCausalLM (the default class)
             model_type = "imagetext"
-        # Speculative decoding not supported with multimodality
+        if is_dflash_target and hf_config.model_type in DFLASH_VLM_MODEL_TYPES:
+            # DFlash VLM QPCs use fixed batch slots (currently BS=1), not
+            # continuous-batching caches. Keep projection/norm loading in FP32.
+            args["continuous_batching"] = False
+            args["dtype"] = "float32"
         # On-device sampling is supported with multimodality
         # Continuous batching is supported for dual QPC VLMs
         # Continuous batching is not supported for audio models
@@ -1979,6 +2101,11 @@ def _get_qaic_compile_config(
     # Number of kv cache blocks should be same as num_gpu_blocks, if CPL==blk_size
     kv_cache_batch_size = vllm_config.cache_config.num_cpu_blocks
     additional_config = vllm_config.additional_config or {}
+    dflash_cfg = additional_config.get("dflash_cfg")
+    is_dflash_vlm = (
+        dflash_cfg is not None
+        and dflash_cfg.get("tlm_model_type") in DFLASH_VLM_MODEL_TYPES
+    )
     is_kv_consumer = bool(
         vllm_config.kv_transfer_config
         and vllm_config.kv_transfer_config.kv_role == "kv_consumer"
@@ -2015,7 +2142,7 @@ def _get_qaic_compile_config(
         "mxfp6_matmul": mxfp6_en,
         "mxint8_kv_cache": mxint8_en,
         "num_speculative_tokens": None,
-        "aic_enable_depth_first": True,
+        "aic_enable_depth_first": not is_dflash_vlm,
         "mos": -1,
         "prefill_only": prefill_only,
         "compile_only": False,
@@ -2101,7 +2228,6 @@ def _get_qaic_compile_config(
     if cfg["mos"] == -1:
         del cfg["mos"]
     num_logits_to_keep = None
-    dflash_cfg = additional_config.get("dflash_cfg")
     # DFlash DLM build: prefill-only with prefill_seq_len == block_size.
     if speculative_model_type == "draft" and dflash_cfg is not None:
         block_size = int(dflash_cfg["block_size"])
@@ -2206,11 +2332,51 @@ def _get_qaic_compile_config(
                 qaic_config = {}
             qaic_config["dflash_dlm"] = True
             qaic_config["dflash_tlm_repo"] = dflash_cfg["tlm_repo"]
+            if is_dflash_vlm:
+                # DFlashDLMTransform copies TLM embeddings into the draft; VLM
+                # checkpoints use this key instead of model.embed_tokens.weight.
+                qaic_config["dflash_tlm_embedding_key"] = (
+                    "model.language_model.embed_tokens.weight"
+                )
         elif speculative_model_type in ("target", "turbo"):
             if qaic_config is None:
                 qaic_config = {}
             qaic_config["target_layer_ids"] = dflash_cfg["target_layer_ids"]
             qaic_config["dflash_dlm_repo"] = dflash_cfg["dlm_repo"]
+            model_type = vllm_config.model_config.hf_config.model_type
+            if is_dflash_vlm:
+                # Export Gemma4 decoder blocks as subfunctions
+                # to avoid the slow flattened path with generated FP32 overrides.
+                cfg["use_onnx_subfunctions"] = model_type == "gemma4"
+                cfg["split_model_io"] = True
+                cfg.pop("full_batch_size", None)
+                cfg.pop("kv_cache_batch_size", None)
+                cfg.pop("num_speculative_tokens", None)
+                # Image features remain resident while language chunks advance.
+                cfg.pop("vision_size", None)
+            if model_type == "gemma4":
+                # Use FP32 for Gemma4 nodes that can overflow in FP16.
+                # QEfficient excludes MatMul from these precision overrides.
+                cfg["node_precision_info"] = True
+            if model_type in {"qwen3_5", "qwen3_5_moe"}:
+                block_size = dflash_cfg["block_size"]
+                if block_size < 2 or block_size & (block_size - 1):
+                    raise ValueError(
+                        "Qwen3.5 DFlash requires power-of-two block_size >= 2."
+                    )
+                if (
+                    cfg["prefill_seq_len"] < 2 * block_size
+                    or cfg["prefill_seq_len"] % block_size
+                ):
+                    raise ValueError(
+                        "Qwen3.5 DFlash prefill_seq_len must be divisible by "
+                        "block_size and >= 2 * block_size."
+                    )
+                # Qwen3.5 verification uses the multi-token prefill graph;
+                # prefill_only selects that graph, not a disaggregated role.
+                cfg["prefill_only"] = True
+                if model_type == "qwen3_5_moe":
+                    cfg["enable_chunking"] = True
     # On Device Sampling
     if cfg.get("aic_include_sampler") is not None:
         if qaic_config is None:

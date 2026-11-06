@@ -171,6 +171,10 @@ class QaicPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        spec_config = vllm_config.speculative_config
+        is_dflash = spec_config is not None and spec_config.method == "dflash"
+        if vllm_config.kv_transfer_config and is_dflash:
+            raise ValueError("DFlash requires running without kv_transfer_config.")
         additional_config = vllm_config.additional_config
         device_config = vllm_config.device_config
         if additional_config:
@@ -254,9 +258,21 @@ class QaicPlatform(Platform):
         assert not (vllm_config.lora_config and model_config.is_multimodal_model), (
             "LORA with Multi-modality is not yet supported for QAIC backend"
         )
-        assert not (
-            vllm_config.speculative_config and model_config.is_multimodal_model
-        ), "SPD with Multi-modality is not yet supported for QAIC backend"
+        if spec_config and model_config.is_multimodal_model:
+            from vllm_qaic.utils.qaic_utils import DFLASH_VLM_MODEL_TYPES
+
+            if (
+                not is_dflash
+                or model_config.hf_config.model_type not in DFLASH_VLM_MODEL_TYPES
+            ):
+                raise ValueError(
+                    "QAIC multimodal speculative decoding currently supports "
+                    "DFlash with Qwen3.5, Qwen3.5-MoE, Qwen3-VL, and Gemma4 only."
+                )
+            if scheduler_config.max_num_seqs != 1:
+                raise ValueError("Multimodal DFlash currently requires max_num_seqs=1.")
+            if scheduler_config.async_scheduling:
+                raise ValueError("Multimodal DFlash requires async_scheduling=False.")
 
         if (
             cls.is_aot
@@ -345,13 +361,19 @@ class QaicPlatform(Platform):
                 # budget.  Setting max_num_batched_tokens to this value simultaneously
                 # gives the scheduler the correct per-step budget AND sizes the buffers
                 # large enough to never overflow after decode expansion.
+                max_num_batched_tokens = scheduler_config.max_num_seqs * (
+                    max(__prefill_seq_len)
+                    if isinstance(__prefill_seq_len, (list, tuple))
+                    else __prefill_seq_len
+                )
+                if is_dflash:
+                    max_num_batched_tokens += (
+                        spec_config.max_num_new_slots_for_drafting
+                        * scheduler_config.max_num_seqs
+                    )
+                # Include drafting slots in the cap, not in the previous budget.
                 scheduler_config.max_num_batched_tokens = min(
-                    scheduler_config.max_num_seqs
-                    * (
-                        max(__prefill_seq_len)
-                        if isinstance(__prefill_seq_len, (list, tuple))
-                        else __prefill_seq_len
-                    ),
+                    max_num_batched_tokens,
                     scheduler_config.max_num_batched_tokens,
                 )
                 # Without chunked prefill a prompt is scheduled whole, so the

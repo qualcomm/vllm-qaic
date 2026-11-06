@@ -67,6 +67,7 @@ def make_model(monkeypatch):
             prefill_seq_len=256,
             vocab_size=8,
             is_multimodal_model=False,
+            is_dflash_target=False,
             get_io_shape_and_dtype=lambda *args, **kwargs: None,
             get_comp_ctx_lengths=lambda: (
                 (CCL_BUCKETS, CCL_BUCKETS) if ccl else (None, None)
