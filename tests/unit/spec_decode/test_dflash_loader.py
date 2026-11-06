@@ -114,7 +114,9 @@ def test_compile_only_builds_draft_before_exiting(monkeypatch, dflash, draft_err
         vllm_config=SimpleNamespace(
             additional_config={"override_qaic_config": {"prefill_seq_len": 128}}
         ),
-        speculative_config=SimpleNamespace(use_dflash=lambda: dflash)
+        speculative_config=SimpleNamespace(
+            use_dflash=lambda: dflash, uses_draft_model=lambda: False
+        )
         if dflash
         else None,
         drafter=draft,
@@ -125,7 +127,11 @@ def test_compile_only_builds_draft_before_exiting(monkeypatch, dflash, draft_err
     )
     with pytest.raises(error):
         QaicModelRunnerAoT.load_model(runner)
-    load.assert_called_once_with(runner.vllm_config, "target" if dflash else "default")
+    load.assert_called_once_with(
+        runner.vllm_config,
+        "target" if dflash else "default",
+        raise_on_compile_complete=True,
+    )
     assert not hasattr(runner, "model")
     assert draft.load_model.call_count == int(dflash)
     assert draft.tlm_prefill_seq_len == (128 if dflash else 16)

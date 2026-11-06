@@ -131,6 +131,7 @@ def test_decode_padding_ignores_stale_positive_token_ids(
     )
     for name in (
         "_prepare_qaic_inputs",
+        "_num_decode_rows_to_pad",
         "_get_cumsum_and_arange",
         "_calc_mrope_positions",
     ):

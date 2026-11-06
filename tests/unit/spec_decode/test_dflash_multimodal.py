@@ -11,7 +11,7 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 
-from vllm_qaic.model_loader.qaic import QaicCausalLM
+from vllm_qaic.model_loader.qaic import UINT16_MAX, QaicCausalLM
 from vllm_qaic.model_loader.qaic_multimodal import QaicMultiModal
 from vllm_qaic.platform_base import QaicPlatform
 
@@ -396,7 +396,7 @@ def test_shared_decode_without_hybrid(mrope, k, async_scheduling, capture_hidden
         model.session.complete_inf.assert_called_once_with(17, is_prefill=False)
     np.testing.assert_array_equal(inputs["input_ids"][0], ids)
     np.testing.assert_array_equal(inputs["position_ids"][..., 0, :], positions)
-    np.testing.assert_array_equal(inputs["batch_index"], [[3], [-1]])
+    np.testing.assert_array_equal(inputs["batch_index"], [[3], [UINT16_MAX]])
     assert np.all(inputs["input_ids"][1] == -1)
     assert np.all(inputs["position_ids"][..., 1, :] == -1)
     assert inputs["logits"] is logits
