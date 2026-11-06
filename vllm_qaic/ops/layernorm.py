@@ -45,7 +45,7 @@ class QAicRMSNorm(RMSNorm):
 
         # No residual: plain normalization only.
         if triton_op_enabled("RMS_NORM"):
-            from vllm.model_executor.layers.batch_invariant import (
+            from vllm.model_executor.determinism.batch_invariant import (
                 rms_norm_batch_invariant,
             )
 
