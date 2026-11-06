@@ -850,8 +850,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 getattr(self, "is_dflash_vlm", False)
                 and "image_idx_output" in chunk_inputs
             ):
-                # Keep request state and input/output storage separate; reuse
-                # this small counter buffer across all chunks of the request.
+                # Keep a private buffer for input/output swapping so device
+                # writes cannot modify the shared initial image index.
                 chunk_inputs["image_idx"] = chunk_inputs["image_idx"].copy()
             # chunk the request
             n_chunks: int = iids.shape[-1] // self.prefill_seq_len
@@ -930,8 +930,11 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                         getattr(self, "is_dflash_vlm", False)
                         and "image_idx_output" in chunk_inputs
                     ):
-                        np.copyto(
-                            chunk_inputs["image_idx"], chunk_inputs["image_idx_output"]
+                        # Reuse the completed output as the next input without
+                        # copying data or aliasing input and output storage.
+                        chunk_inputs["image_idx"], chunk_inputs["image_idx_output"] = (
+                            chunk_inputs["image_idx_output"],
+                            chunk_inputs["image_idx"],
                         )
                 else:
                     time.sleep(0.01)
@@ -949,10 +952,33 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         callback: Callable | None = None,
         dflash_decode_hidden_buf: np.ndarray | None = None,
     ) -> None:
+        hybrid = getattr(self, "dflash_hybrid", False)
+        if hybrid:
+            # Qwen3.5 commits the accepted prefix and verifies the new block
+            # in one TLM execution. Padded prefix positions remain -1.
+            block_size = self.num_spec_tokens + 1
+            rows = input_ids.size // block_size
+            batch_indices = np.asarray(batch_indices[:rows], dtype=np.int64)
+            self._dflash_decode_slots = batch_indices.copy()
+            input_ids = np.concatenate(
+                [
+                    self._dflash_prefix_ids[batch_indices],
+                    input_ids.reshape(rows, block_size),
+                ],
+                axis=-1,
+            ).reshape(-1)
+            positions = np.concatenate(
+                [
+                    self._dflash_prefix_positions[:, batch_indices],
+                    positions.reshape(4, rows, block_size),
+                ],
+                axis=-1,
+            ).reshape(4, -1)
+
         # Use the per-step K set by QaicModelRunner.  Falls back to max K so
         # the method is callable without a runner (e.g., unit tests).
         current_k = self.active_k
-        mdt = (current_k + 1) * (2 if getattr(self, "dflash_hybrid", False) else 1)
+        mdt = (current_k + 1) * (2 if hybrid else 1)
         num_tokens = input_ids.shape[0]
         num_decodes = num_tokens // mdt  # number of decode requests
         batch_inputs = self.decode_batch_inputs_by_k[current_k]
@@ -968,8 +994,9 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             )
         batch_inputs["logits"] = logits
         # DFlash: capture TLM decode hidden states for the DLM.
-        if dflash_decode_hidden_buf is not None:
-            batch_inputs[self.tlm_hidden_states_name] = dflash_decode_hidden_buf
+        hidden_buf = self._dflash_decode_hidden if hybrid else dflash_decode_hidden_buf
+        if hidden_buf is not None:
+            batch_inputs[self.tlm_hidden_states_name] = hidden_buf
         if num_decodes < self.decode_bsz:
             batch_inputs["input_ids"][num_decodes:] = -1
             batch_inputs["position_ids"][..., num_decodes:, :] = -1
@@ -1010,6 +1037,19 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
 
         if not self.use_async_scheduling:
             self.session.complete_inf(exec_obj_idx, is_prefill=False)
+        if hybrid:
+            # QEfficient right-aligns logits for a partial verification suffix.
+            valid_counts = (
+                positions[0].reshape(rows, 2 * block_size)[:, block_size:] >= 0
+            ).sum(axis=1)
+            for row, count in enumerate(valid_counts):
+                if 0 < count < block_size:
+                    logits[row, :count] = logits[row, -count:].copy()
+            if dflash_decode_hidden_buf is not None:
+                # The drafter needs only the new block, not the commit prefix.
+                dflash_decode_hidden_buf[:] = self._dflash_decode_hidden[
+                    :, -block_size:
+                ]
         return
 
     def _run_encode(self, prefill_cum_sum, input_ids, positions):
@@ -2286,6 +2326,8 @@ def _get_qaic_compile_config(
             qaic_config["dflash_dlm"] = True
             qaic_config["dflash_tlm_repo"] = dflash_cfg["tlm_repo"]
             if is_dflash_vlm:
+                # DFlashDLMTransform copies TLM embeddings into the draft; VLM
+                # checkpoints use this key instead of model.embed_tokens.weight.
                 qaic_config["dflash_tlm_embedding_key"] = (
                     "model.language_model.embed_tokens.weight"
                 )

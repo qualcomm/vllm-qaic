@@ -22,11 +22,17 @@ from vllm_qaic.worker.model_runner import QaicModelRunnerAoT
 
 
 @pytest.mark.parametrize("dflash", [False, True])
-def test_prefill_image_counter_reuses_storage_and_preserves_request(dflash):
+@pytest.mark.parametrize("initial_value", [0, 7])
+@pytest.mark.parametrize("increments", [(0,), (4,), (4, 0), (0, 4, 2), (4, 0, 2, 0)])
+def test_prefill_image_counter_reuses_storage_and_preserves_request(
+    dflash, initial_value, increments
+):
     seen = []
     pending = []
-    initial = np.array([[0]], dtype=np.int64)
+    initial = np.array([[initial_value]], dtype=np.int64)
     output = np.array([[0]], dtype=np.int64)
+    n_chunks = len(increments)
+    n_tokens = 4 * n_chunks
 
     def run(inputs, is_prefill):
         assert is_prefill
@@ -38,7 +44,7 @@ def test_prefill_image_counter_reuses_storage_and_preserves_request(dflash):
 
     def complete(index, wait):
         assert wait
-        pending[index][...] = seen[index][1] + 4
+        pending[index][...] = seen[index][1] + increments[index % n_chunks]
 
     model = SimpleNamespace(
         prefill_seq_len=4,
@@ -58,24 +64,34 @@ def test_prefill_image_counter_reuses_storage_and_preserves_request(dflash):
         ),
     )
     # Two requests share the default MM buffers; neither may inherit the
-    # previous request's final cursor. Each request has three prefill chunks.
+    # previous request's final cursor, for either odd or even chunk counts.
     QaicCausalLM._run_prefill(
         model,
-        input_ids=np.zeros(24, dtype=np.int64),
-        positions=np.tile(np.arange(12), 2),
+        input_ids=np.zeros(2 * n_tokens, dtype=np.int64),
+        positions=np.tile(np.arange(n_tokens), 2),
         batch_indices=np.arange(2),
-        prefill_cum_sum=np.array([12, 24]),
+        prefill_cum_sum=np.array([n_tokens, 2 * n_tokens]),
         pending_exec_queue=Queue(),
         logits=None,
         mm_kwargs_list=[{"image_idx": initial, "image_idx_output": output}] * 2,
     )
-    assert [value for _, value in seen] == ([0, 4, 8] * 2 if dflash else [0] * 6)
-    assert seen[0][0] is seen[1][0] is seen[2][0]
-    assert seen[3][0] is seen[4][0] is seen[5][0]
-    assert initial.item() == 0
+    expected = (
+        np.cumsum([initial_value, *increments[:-1]]).tolist()
+        if dflash
+        else [initial_value] * n_chunks
+    )
+    assert [value for _, value in seen] == expected * 2
+    assert initial.item() == initial_value
     if dflash:
-        assert seen[0][0] is not seen[3][0]
-        assert not np.shares_memory(seen[0][0], initial)
+        assert seen[0][0] is not seen[n_chunks][0]
+        for start in (0, n_chunks):
+            assert not np.shares_memory(seen[start][0], initial)
+            for index in range(start + 1, start + n_chunks):
+                assert seen[index][0] is pending[index - 1]
+                assert pending[index] is seen[index - 1][0]
+    else:
+        assert all(cursor is initial for cursor, _ in seen)
+        assert all(buffer is output for buffer in pending)
 
 
 @pytest.mark.parametrize("dflash", [False, True])

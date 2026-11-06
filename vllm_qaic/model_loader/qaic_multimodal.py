@@ -6,7 +6,7 @@
 import importlib
 import inspect
 import math
-from collections.abc import Callable, Iterator, Set
+from collections.abc import Iterator, Set
 
 import numpy as np
 import torch
@@ -245,71 +245,6 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
             (self.decode_bsz, decode_width, self.tlm_hidden_size),
             dtype=self._prefill_hidden_scratch.dtype,
         )
-
-    def _run_decode(
-        self,
-        input_ids: np.ndarray,
-        positions: np.ndarray,
-        batch_indices: np.ndarray,
-        logits: np.ndarray,
-        lora_ids: np.ndarray | None = None,
-        callback: Callable | None = None,
-        dflash_decode_hidden_buf: np.ndarray | None = None,
-    ) -> None:
-        """Commit accepted tokens and verify new drafts in one hybrid TLM call.
-
-        Qwen3.5's recurrent state must advance only through accepted tokens.
-        Input: [previous accepted prefix padded to B | current B-token block].
-        Invalid prefix positions are -1 and do not update retained state.
-        Non-hybrid models use the base decode path.
-        """
-        if not self.dflash_hybrid:
-            return super()._run_decode(
-                input_ids,
-                positions,
-                batch_indices,
-                logits,
-                lora_ids,
-                callback,
-                dflash_decode_hidden_buf,
-            )
-        # Fixed DLM checkpoint block size, validated during loading.
-        block_size = self.num_spec_tokens + 1
-        rows = input_ids.size // block_size
-        slots = np.asarray(batch_indices[:rows], dtype=np.int64)
-        # Keep the row-to-cache-slot mapping until rejection sampling finishes.
-        self._dflash_decode_slots = slots.copy()
-        input_ids = np.concatenate(
-            [self._dflash_prefix_ids[slots], input_ids.reshape(rows, block_size)],
-            axis=-1,
-        ).reshape(-1)
-        positions = np.concatenate(
-            [
-                self._dflash_prefix_positions[:, slots],
-                positions.reshape(4, rows, block_size),
-            ],
-            axis=-1,
-        ).reshape(4, -1)
-        super()._run_decode(
-            input_ids,
-            positions,
-            slots,
-            logits,
-            lora_ids,
-            callback,
-            self._dflash_decode_hidden,
-        )
-        # The QEfficient logit window ends at the last valid input. A partial
-        # verification suffix is right-aligned.
-        valid_counts = (
-            positions[0].reshape(rows, 2 * block_size)[:, block_size:] >= 0
-        ).sum(axis=1)
-        for row, count in enumerate(valid_counts):
-            if 0 < count < block_size:
-                logits[row, :count] = logits[row, -count:].copy()
-        if dflash_decode_hidden_buf is not None:
-            # The drafter needs the new block's hidden states, not the commit prefix.
-            dflash_decode_hidden_buf[:] = self._dflash_decode_hidden[:, -block_size:]
 
     def queue_dflash_prefix(self, sampled_token_ids: list[list[int]]) -> None:
         """Stage the accepted prefix after sampling; the next decode commits it."""

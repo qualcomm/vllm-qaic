@@ -11,6 +11,8 @@ partial and full acceptance; pretrained DLM/device parity belongs in the e2e sui
 
 import copy
 from itertools import cycle
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -23,7 +25,6 @@ from transformers import (
     Qwen3_5MoeForConditionalGeneration,
 )
 
-from vllm_qaic.model_loader.qaic import QaicCausalLM
 from vllm_qaic.model_loader.qaic_multimodal import QaicMultiModal
 
 from .test_patch_rejection_sampler import (
@@ -101,9 +102,7 @@ def _tiny_vlm(moe):
 @pytest.mark.parametrize("generation_len", [32, 256])
 @pytest.mark.parametrize("seed", [7, 23])
 @torch.no_grad()
-def test_qwen35_long_greedy_matches_vanilla(
-    moe, with_image, generation_len, seed, monkeypatch
-):
+def test_qwen35_long_greedy_matches_vanilla(moe, with_image, generation_len, seed):
     torch.manual_seed(seed)
     hf = _tiny_vlm(moe)
     reference = copy.deepcopy(hf)
@@ -179,28 +178,47 @@ def test_qwen35_long_greedy_matches_vanilla(
     model = QaicMultiModal.__new__(QaicMultiModal)
     model.dflash_hybrid = True
     model.num_spec_tokens = model.active_k = BLOCK - 1
+    model.decode_bsz = 1
+    model.uses_mrope = True
+    model.ignore_batch_index = False
+    model.is_spec_decode_target_model = True
+    model.comp_ctx_lengths_decode = None
+    model.use_async_scheduling = False
+    model.tlm_hidden_states_name = "tlm_hidden_states"
+    model.decode_batch_inputs_by_k = {
+        BLOCK - 1: {
+            "input_ids": np.zeros((1, 2 * BLOCK), dtype=np.int64),
+            "position_ids": np.full((4, 1, 2 * BLOCK), -1, dtype=np.int64),
+            "batch_index": np.zeros((1, 1), dtype=np.int64),
+            "cache_commit": np.zeros(1, dtype=np.int64),
+        }
+    }
+    model.decode_num_logits_buffer_by_k = {
+        BLOCK - 1: {"num_logits_to_keep": np.zeros((BLOCK, 1), dtype=np.int64)}
+    }
     model._dflash_prefix_ids = np.zeros((1, BLOCK), dtype=np.int64)
     model._dflash_prefix_positions = np.full((4, 1, BLOCK), -1, dtype=np.int64)
     model._dflash_decode_hidden = np.zeros((1, 2 * BLOCK, 32), dtype=np.float32)
     calls = 0
 
-    def cpu_session(self, ids, positions, slots, logits, lora, callback, hidden):
+    def cpu_session(batch_inputs, is_prefill):
         nonlocal cache, calls
+        assert not is_prefill
         calls += 1
         before = copy.deepcopy(cache)
         out = wrapper(
-            input_ids=torch.from_numpy(ids.reshape(1, 2 * BLOCK)),
-            position_ids=torch.from_numpy(positions.reshape(4, 1, 2 * BLOCK)),
+            input_ids=torch.from_numpy(batch_inputs["input_ids"]),
+            position_ids=torch.from_numpy(batch_inputs["position_ids"]),
             vision_embeds=vision,
             image_idx=image_idx,
             past_key_values=cache,
-            cache_commit=torch.zeros(1, dtype=torch.long),
-            num_logits_to_keep=torch.zeros((BLOCK, 1), dtype=torch.long),
+            cache_commit=torch.from_numpy(batch_inputs["cache_commit"]),
+            num_logits_to_keep=torch.from_numpy(batch_inputs["num_logits_to_keep"]),
         )
         cache = out[4]
         # Verification may read its suffix, but retained KV may only commit
         # the previous accepted prefix. Check both full-attention layers.
-        committed = positions[0, :BLOCK]
+        committed = batch_inputs["position_ids"][0, 0, :BLOCK]
         untouched = ~np.isin(np.arange(CTX), committed[committed >= 0])
         for layer in (1, 3):
             for new, old in zip(cache[layer], before[layer], strict=True):
@@ -210,16 +228,11 @@ def test_qwen35_long_greedy_matches_vanilla(
         if np.all(committed < 0):
             for layer in (0, 2):
                 torch.testing.assert_close(cache[layer], before[layer], rtol=0, atol=0)
-        logits[:] = out[0].numpy()
-        hidden[:] = out[3].numpy()
-        self.decode_batch_inputs_by_k = {
-            BLOCK - 1: {
-                "input_ids": ids.reshape(1, 2 * BLOCK),
-                "position_ids": positions.reshape(4, 1, 2 * BLOCK),
-            }
-        }
+        batch_inputs["logits"][:] = out[0].numpy()
+        batch_inputs["tlm_hidden_states"][:] = out[3].numpy()
+        return calls
 
-    monkeypatch.setattr(QaicCausalLM, "_run_decode", cpu_session)
+    model.session = SimpleNamespace(np_run=cpu_session, complete_inf=Mock())
     sampler = _make_rejection_sampler()
     actual = [prefill[0].argmax(-1).item()]
     assert actual == expected[:1]
@@ -261,5 +274,6 @@ def test_qwen35_long_greedy_matches_vanilla(
     assert len(actual) == generation_len
     assert actual == expected
     assert calls == len(counts)
+    assert model.session.complete_inf.call_count == calls
     if generation_len == 256:
         assert {1, 2, 8, 16} <= set(counts)

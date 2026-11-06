@@ -1714,8 +1714,8 @@ class QaicModelRunnerAoT(GPUModelRunner):
                     self.vllm_config, speculative_model_type
                 )
             except QaicCompilationComplete:
-                # Compile-only must build both models before exiting, without
-                # returning an unloaded target into the inference setup below.
+                # Standalone compile-only runs also need both TLM and DLM QPCs.
+                # Finish the draft before propagating the target's early exit.
                 if has_dflash_draft:
                     target_config = self.vllm_config.additional_config[
                         "override_qaic_config"

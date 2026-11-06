@@ -254,52 +254,154 @@ def test_vlm_rejects_multiple_prefill_lengths(length):
         QaicMultiModal._load_multimodal(model)
 
 
-@pytest.mark.parametrize("accepted", [1, 7, 16])
+@pytest.mark.parametrize("accepted", [0, 1, 7, 16])
 @pytest.mark.parametrize("valid_tokens", [1, 9, 16])
+@pytest.mark.parametrize("slot", [0, 2])
+@pytest.mark.parametrize("capture_hidden", [False, True])
 def test_concatenated_decode_commits_prefix_and_returns_suffix(
-    monkeypatch, accepted, valid_tokens
+    accepted, valid_tokens, slot, capture_hidden
 ):
     model = QaicMultiModal.__new__(QaicMultiModal)
     model.dflash_hybrid = True
     model.num_spec_tokens = 15
     model.active_k = 15
-    model._dflash_prefix_ids = np.arange(16).reshape(1, 16)
-    model._dflash_prefix_positions = np.full((4, 1, 16), -1, dtype=np.int64)
-    model._dflash_prefix_positions[:, :, :accepted] = np.arange(accepted)
+    model.decode_bsz = 1
+    model.uses_mrope = True
+    model.ignore_batch_index = False
+    model.is_spec_decode_target_model = True
+    model.comp_ctx_lengths_decode = None
+    model.use_async_scheduling = False
+    model.tlm_hidden_states_name = "tlm_hidden_states"
+    model.decode_batch_inputs_by_k = {
+        15: {
+            "input_ids": np.zeros((1, 32), dtype=np.int64),
+            "position_ids": np.full((4, 1, 32), -1, dtype=np.int64),
+            "batch_index": np.zeros((1, 1), dtype=np.int64),
+            "cache_commit": np.zeros(1, dtype=np.int64),
+        }
+    }
+    model.decode_num_logits_buffer_by_k = {
+        15: {"num_logits_to_keep": np.zeros((16, 1), dtype=np.int64)}
+    }
+    model._dflash_prefix_ids = np.arange(48).reshape(3, 16)
+    model._dflash_prefix_positions = np.full((4, 3, 16), -1, dtype=np.int64)
+    model._dflash_prefix_positions[:, slot, :accepted] = np.arange(accepted)
     model._dflash_decode_hidden = np.zeros((1, 32, 8), dtype=np.float32)
     current_ids = np.arange(100, 116)
     positions = np.tile(np.arange(accepted, accepted + 16), (4, 1))
     positions[:, valid_tokens:] = -1
-    calls = []
+    callback = Mock()
 
-    def run(self, ids, pids, slots, logits, lora, callback, hidden):
-        calls.append((ids.copy(), pids.copy()))
-        self.decode_batch_inputs_by_k = {
-            15: {
-                "input_ids": ids.reshape(1, 32),
-                "position_ids": pids.reshape(4, 1, 32),
-            }
-        }
-        hidden[:, :16] = 1
-        hidden[:, 16:] = 2
-        logits[:] = np.arange(16).reshape(1, 16, 1)
+    def complete(index, is_prefill):
+        callback.assert_called_once_with()
+        inputs = model.session.np_run.call_args.args[0]
+        inputs["tlm_hidden_states"][:, :16] = 1
+        inputs["tlm_hidden_states"][:, 16:] = 2
+        inputs["logits"][:] = np.arange(16).reshape(1, 16, 1)
 
-    monkeypatch.setattr(QaicCausalLM, "_run_decode", run)
+    model.session = SimpleNamespace(
+        np_run=Mock(return_value=17), complete_inf=Mock(side_effect=complete)
+    )
     logits = np.empty((1, 16, 32), dtype=np.float32)
-    hidden = np.empty((1, 16, 8), dtype=np.float32)
+    hidden = np.empty((1, 16, 8), dtype=np.float32) if capture_hidden else None
+    batch_indices = np.array([slot])
     model._run_decode(
-        current_ids, positions, np.array([0]), logits, dflash_decode_hidden_buf=hidden
+        current_ids,
+        positions,
+        batch_indices,
+        logits,
+        callback=callback,
+        dflash_decode_hidden_buf=hidden,
     )
-    assert len(calls) == 1
-    np.testing.assert_array_equal(calls[0][0][16:], current_ids)
+    assert QaicMultiModal._run_decode is QaicCausalLM._run_decode
+    model.session.np_run.assert_called_once()
+    assert model.session.np_run.call_args.kwargs == {"is_prefill": False}
+    model.session.complete_inf.assert_called_once_with(17, is_prefill=False)
+    inputs = model.session.np_run.call_args.args[0]
     np.testing.assert_array_equal(
-        calls[0][1][:, :16], model._dflash_prefix_positions[:, 0]
+        inputs["input_ids"][0, :16], model._dflash_prefix_ids[slot]
     )
-    assert np.all(hidden == 2)
+    np.testing.assert_array_equal(inputs["input_ids"][0, 16:], current_ids)
+    np.testing.assert_array_equal(
+        inputs["position_ids"][:, 0, :16], model._dflash_prefix_positions[:, slot]
+    )
+    np.testing.assert_array_equal(inputs["position_ids"][:, 0, 16:], positions)
+    assert inputs["batch_index"].item() == slot
+    assert inputs["cache_commit"].item() == 0
+    assert inputs["num_logits_to_keep"].shape == (16, 1)
+    if capture_hidden:
+        assert np.all(hidden == 2)
     np.testing.assert_array_equal(
         logits[0, :valid_tokens, 0], np.arange(16 - valid_tokens, 16)
     )
+    batch_indices[:] = -1
+    np.testing.assert_array_equal(model._dflash_decode_slots, [slot])
     model.queue_dflash_prefix([list(range(valid_tokens))])
-    np.testing.assert_array_equal(model._dflash_prefix_ids[0], current_ids)
-    np.testing.assert_array_equal(model._dflash_prefix_positions[:, 0], positions)
+    np.testing.assert_array_equal(model._dflash_prefix_ids[slot], current_ids)
+    np.testing.assert_array_equal(model._dflash_prefix_positions[:, slot], positions)
     assert model._dflash_decode_slots is None
+
+
+@pytest.mark.parametrize("mrope", [False, True])
+@pytest.mark.parametrize("k", [0, 15])
+@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.parametrize("capture_hidden", [False, True])
+def test_shared_decode_without_hybrid(mrope, k, async_scheduling, capture_hidden):
+    model_cls = QaicMultiModal if mrope else QaicCausalLM
+    model = model_cls.__new__(model_cls)
+    if mrope:
+        model.dflash_hybrid = False
+    model.active_k = k
+    model.decode_bsz = 2
+    model.uses_mrope = mrope
+    model.ignore_batch_index = False
+    model.is_spec_decode_target_model = k > 0
+    model.comp_ctx_lengths_decode = None
+    model.use_async_scheduling = async_scheduling
+    model.tlm_hidden_states_name = "tlm_hidden_states"
+    width = k + 1
+    inputs = {
+        "input_ids": np.zeros((2, width), dtype=np.int64),
+        "position_ids": np.zeros(
+            (4, 2, width) if mrope else (2, width), dtype=np.int64
+        ),
+        "batch_index": np.zeros((2, 1), dtype=np.int64),
+    }
+    model.decode_batch_inputs_by_k = {k: inputs}
+    model.decode_num_logits_buffer_by_k = {
+        k: {"num_logits_to_keep": np.zeros((width, 1), dtype=np.int64)}
+    }
+    model.session = SimpleNamespace(np_run=Mock(return_value=17), complete_inf=Mock())
+    ids = np.arange(width)
+    positions = np.arange(20, 20 + width)
+    if mrope:
+        positions = np.tile(positions, (4, 1))
+    logits = np.empty((2, width, 32), dtype=np.float32)
+    hidden = np.empty((2, width, 8), dtype=np.float32) if capture_hidden else None
+    callback = Mock()
+    model._run_decode(
+        ids,
+        positions,
+        np.array([3]),
+        logits,
+        callback=callback,
+        dflash_decode_hidden_buf=hidden,
+    )
+    model.session.np_run.assert_called_once()
+    assert model.session.np_run.call_args.args[0] is inputs
+    callback.assert_called_once_with()
+    if async_scheduling:
+        model.session.complete_inf.assert_not_called()
+    else:
+        model.session.complete_inf.assert_called_once_with(17, is_prefill=False)
+    np.testing.assert_array_equal(inputs["input_ids"][0], ids)
+    np.testing.assert_array_equal(inputs["position_ids"][..., 0, :], positions)
+    np.testing.assert_array_equal(inputs["batch_index"], [[3], [-1]])
+    assert np.all(inputs["input_ids"][1] == -1)
+    assert np.all(inputs["position_ids"][..., 1, :] == -1)
+    assert inputs["logits"] is logits
+    if capture_hidden:
+        assert inputs["tlm_hidden_states"] is hidden
+    else:
+        assert "tlm_hidden_states" not in inputs
+    assert not hasattr(model, "_dflash_decode_slots")
