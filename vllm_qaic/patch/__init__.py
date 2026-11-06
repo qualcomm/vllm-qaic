@@ -85,11 +85,10 @@
 #    How:
 #       Reassign both `apply` methods to a wrapper that calls
 #       linear_batch_invariant for all linear layers when
-#       VLLM_QAIC_TRITON_LINEAR is set, or only the GDN projection layers when
-#       VLLM_QAIC_TRITON_GDN_LINEAR is set; otherwise use the original
+#       VLLM_QAIC_TRITON_LINEAR is set; otherwise use the original
 #       dispatch_unquantized_gemm path.
 #    Note:
-#       Imported when either linear Triton flag is set (see below). Requires the
+#       Imported when the linear Triton flag is set (see below). Requires the
 #       QAIC platform to implement num_compute_units (matmul_persistent reads
 #       it) — added in platform_base.py.
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -164,7 +163,6 @@ if not (qaic_envs.VLLM_QAIC_ENABLE_TRITON_ATTN and _HAS_TRITON):
 else:
     import vllm_qaic.patch.patch_reshape_and_cache  # noqa
 
-# Install the dispatcher for either global linear routing or the scoped GDN
-# projection route. The wrapper selects the requested path per call.
-if qaic_envs.VLLM_QAIC_TRITON_LINEAR or qaic_envs.VLLM_QAIC_TRITON_GDN_LINEAR:
+# Install the dispatcher when the global linear Triton flag is set.
+if qaic_envs.VLLM_QAIC_TRITON_LINEAR:
     import vllm_qaic.patch.patch_linear  # noqa

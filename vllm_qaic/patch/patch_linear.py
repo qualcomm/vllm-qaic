@@ -39,21 +39,8 @@ from vllm_qaic.ops._triton_flags import triton_op_enabled
 _orig_linear_apply = UnquantizedLinearMethod.apply
 _orig_embedding_apply = UnquantizedEmbeddingMethod.apply
 
-GDN_PROJECTION_SUFFIXES = (
-    "linear_attn.in_proj_qkvz",
-    "linear_attn.in_proj_ba",
-    "linear_attn.out_proj",
-)
-
 
 def _qaic_linear_apply(self, layer, x, bias=None):
-    # Invoke GEMM only for the GDN qkvz/ba MergedColumnParallelLinear layers
-    # and the out_proj RowParallelLinear layer.
-    # Enabling LINEAR directly will invoke GEMM for all linear layers
-    if triton_op_enabled("GDN_LINEAR") and layer.prefix.endswith(
-        GDN_PROJECTION_SUFFIXES
-    ):
-        return linear_batch_invariant(x, layer.weight, bias)
     if triton_op_enabled("LINEAR"):
         return linear_batch_invariant(x, layer.weight, bias)
     return _orig_linear_apply(self, layer, x, bias)
