@@ -519,6 +519,10 @@ class QaicPlatform(Platform):
                     f" ({stages}) when prefill streaming is enabled"
                 )
 
+        if not cls.is_aot and model_config.hf_config.model_type == "gemma4":
+            # Load the existing Gemma4 encoder memory guard in eager mode too.
+            import vllm_qaic.model_loader.qaic_custom_mm_processor  # noqa: F401
+
         if cls.is_aot:
             model_type = model_config.hf_config.model_type
             if model_config.is_multimodal_model and model_type != "whisper":
