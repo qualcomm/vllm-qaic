@@ -371,9 +371,7 @@ def _grouped_topk_router_op(
 
     num_tokens = x.shape[0]
     num_experts = x.shape[1]
-    topk_weights = torch.empty(
-        (num_tokens, topk), dtype=torch.float32, device=x.device
-    )
+    topk_weights = torch.empty((num_tokens, topk), dtype=torch.float32, device=x.device)
     topk_ids = torch.empty((num_tokens, topk), dtype=torch.int32, device=x.device)
 
     kernel = _kernel("multinsp_multithreaded_grouped_topk_router")
@@ -441,9 +439,7 @@ def _topk_router_op(
 
     num_tokens = x.shape[0]
     num_experts = x.shape[1]
-    topk_weights = torch.empty(
-        (num_tokens, topk), dtype=torch.float32, device=x.device
-    )
+    topk_weights = torch.empty((num_tokens, topk), dtype=torch.float32, device=x.device)
     topk_ids = torch.empty((num_tokens, topk), dtype=torch.int32, device=x.device)
 
     kernel = _kernel("multinsp_multithreaded_topk_router")
@@ -490,9 +486,7 @@ def _gemma4_topk_router_op(
 
     num_tokens = x.shape[0]
     num_experts = x.shape[1]
-    topk_weights = torch.empty(
-        (num_tokens, topk), dtype=torch.float32, device=x.device
-    )
+    topk_weights = torch.empty((num_tokens, topk), dtype=torch.float32, device=x.device)
     topk_ids = torch.empty((num_tokens, topk), dtype=torch.int32, device=x.device)
 
     kernel = _kernel("multinsp_multithreaded_gemma4_topk_router")
@@ -988,6 +982,8 @@ def paged_attention(
         causal,
         write_cache,
     )
+
+
 def gemma4_topk(
     x: Tensor,
     topk: int,

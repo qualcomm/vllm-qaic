@@ -906,8 +906,7 @@ inline void bitonic_sort_step_sf_i32(unsigned step_idx,
 
   const HVX_VectorPred idx_swap_pred = bitonic_sort_step_swap_mask_w(
       step_idx, step_masks_i32, idx_shuffle_even, idx_shuffle_odd);
-  const HVX_Vector idx_cmp_result =
-      Q6_V_vand_QR(idx_swap_pred, 0x01010101);
+  const HVX_Vector idx_cmp_result = Q6_V_vand_QR(idx_swap_pred, 0x01010101);
 
   HVX_Vector even_dup;
   HVX_Vector odd_dup;
@@ -976,8 +975,8 @@ inline void bitonic_sort_hf_i32(const HVX_Vector& step_masks_hf,
 
 template <bool DataAscending, bool IdxAscending>
 // Sort one HVX candidate vector by fp32 value and int32 id.
-inline void bitonic_sort_sf_i32(const HVX_Vector& step_masks,
-                                HVX_Vector& vals, HVX_Vector& idx) {
+inline void bitonic_sort_sf_i32(const HVX_Vector& step_masks, HVX_Vector& vals,
+                                HVX_Vector& idx) {
   HVX_Vector empty = Q6_V_vzero();
   HVX_Vector full = Q6_V_vsplat_R(0xffffffff);
   HVX_VectorPair pair;
@@ -1068,9 +1067,11 @@ inline void bitonic_sort_merge_keep_first_hf_i32(
 
 template <bool DataAscending, bool IdxAscending>
 // Merge two sorted fp32 candidate vectors and keep the first vector.
-inline void bitonic_sort_merge_keep_first_sf_i32(
-    const HVX_Vector& step_masks, HVX_Vector& v1, HVX_Vector& v1_idx,
-    const HVX_Vector& v2, const HVX_Vector& v2_idx) {
+inline void bitonic_sort_merge_keep_first_sf_i32(const HVX_Vector& step_masks,
+                                                 HVX_Vector& v1,
+                                                 HVX_Vector& v1_idx,
+                                                 const HVX_Vector& v2,
+                                                 const HVX_Vector& v2_idx) {
   HVX_VectorPred swap_mask_pred;
   if (DataAscending) {
     if (IdxAscending) {
@@ -1621,8 +1622,7 @@ inline void route_gemma4_token_sf(const float* token_logits,
   const HVX_Vector scale_v =
       LoadUnaligned<HVX_Vector>((const int8_t*)&selected_scales[0]);
   const HVX_Vector out_weights_v = Q6_Vsf_vmpy_VsfVsf(weights_v, scale_v);
-  StoreUnalignedHVX((int8_t*)out_weights, out_weights_v,
-                    topk * sizeof(float));
+  StoreUnalignedHVX((int8_t*)out_weights, out_weights_v, topk * sizeof(float));
 
   const HVX_Vector selected_ids_v =
       LoadUnaligned<HVX_Vector>((const int8_t*)&selected_ids[0]);
