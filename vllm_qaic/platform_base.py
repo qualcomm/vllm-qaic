@@ -127,7 +127,22 @@ class QaicPlatform(Platform):
     @functools.cache
     def get_num_cores(cls, device_id: int = 0) -> int:
         if not cls.is_aot:
-            return torch_qaic.qaic.get_device_info(device_id).num_cores
+            try:
+                import qaicrt
+            except ImportError:
+                import platform
+                import sys
+
+                sys.path.append(f"/opt/qti-aic/dev/lib/{platform.machine()}")
+                import qaicrt
+
+            qid = torch_qaic.qaic.get_device_info(device_id).qid_index
+            status, resources = qaicrt.Util().getResourceInfo(qid)
+            if status != qaicrt.QStatus.QS_SUCCESS:
+                raise RuntimeError(
+                    f"QAIC resource query failed for QID {qid}: {status}"
+                )
+            return resources.nspTotal
         raise NotImplementedError(
             "get_num_cores is only supported in eager (non-AOT) mode"
         )
@@ -179,10 +194,13 @@ class QaicPlatform(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         from vllm.triton_utils import HAS_TRITON
 
-        if HAS_TRITON:
-            # Set default QAIC_NUM_CORES=16 and QAIC_NUM_THREADS=4 for AI 100
-            os.environ.setdefault("QAIC_NUM_CORES", "16")
-            os.environ.setdefault("QAIC_NUM_THREADS", "4")
+        if HAS_TRITON and not cls.is_aot:
+            if "QAIC_NUM_CORES" not in os.environ:
+                os.environ.setdefault("QAIC_NUM_CORES", str(cls.get_num_cores()))
+            if "QAIC_NUM_THREADS" not in os.environ:
+                os.environ.setdefault(
+                    "QAIC_NUM_THREADS", str(cls.get_num_hvx_threads())
+                )
         additional_config = vllm_config.additional_config
         device_config = vllm_config.device_config
         if additional_config:
