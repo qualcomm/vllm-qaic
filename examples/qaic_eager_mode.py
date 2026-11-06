@@ -46,6 +46,7 @@ def main():
         async_scheduling=False,
         long_prefill_token_threshold=seq_len,
         tensor_parallel_size=1,
+        pipeline_parallel_size=1,
         # buffers
     )
     # Generate texts from the prompts. The output is a list of RequestOutput
