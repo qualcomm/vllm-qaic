@@ -232,7 +232,9 @@ def test_qwen35_long_greedy_matches_vanilla(moe, with_image, generation_len, see
         batch_inputs["tlm_hidden_states"][:] = out[3].numpy()
         return calls
 
-    model.session = SimpleNamespace(np_run=cpu_session, complete_inf=Mock())
+    model.session = SimpleNamespace(
+        input_names=["num_logits_to_keep"], np_run=cpu_session, complete_inf=Mock()
+    )
     sampler = _make_rejection_sampler()
     actual = [prefill[0].argmax(-1).item()]
     assert actual == expected[:1]

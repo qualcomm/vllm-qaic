@@ -9,6 +9,7 @@
 from typing import TYPE_CHECKING
 
 import numpy as np
+from QEfficient.generation.text_generation_inference import get_compilation_dims
 
 from vllm.config import VllmConfig
 from vllm_qaic.logger import init_logger
@@ -148,11 +149,19 @@ class QaicDFlashProposer:
         )
         self.model = load_qaic_model(self._draft_vllm_config, "draft")
         cache_shapes = [shape for shape, _, _ in self.model.kv_cache_info]
-        if not cache_shapes or any(len(s) != 4 or s[2] <= 0 for s in cache_shapes):
+        if any(len(s) != 4 or s[2] <= 0 for s in cache_shapes):
             raise ValueError(
                 "DFlash DLM QPC requires rank-4 KV caches with positive capacity."
             )
-        self.max_model_len = min(self.max_model_len, *(s[2] for s in cache_shapes))
+        # Standalone QPCs can keep KV internal, with no transfer bindings.
+        capacity = (
+            min(s[2] for s in cache_shapes)
+            if cache_shapes
+            else get_compilation_dims(self.model.qpc_path)[1]
+        )
+        if capacity <= 0:
+            raise ValueError("DFlash DLM QPC requires positive KV capacity.")
+        self.max_model_len = min(self.max_model_len, capacity)
         target_info = self.model.get_io_shape_and_dtype("target_hidden")
         position_info = self.model.get_io_shape_and_dtype("position_ids_target")
         if target_info is None or position_info is None:

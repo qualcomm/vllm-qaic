@@ -136,63 +136,7 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
             self.decode_batch_inputs.update(self.default_mm_kwargs)
 
         if self.is_dflash_vlm:
-            # Reject stale QPCs: verification needs B tokens, or 2B for
-            # Qwen3.5's accepted-prefix commit plus new verification block.
-            block_size = self.num_spec_tokens + 1
-            input_shapes = self._get_binding_shapes("input_ids")
-            sequence_lengths = {
-                shape[1]
-                for shape in input_shapes
-                if len(shape) == 2 and shape[0] == self.decode_bsz
-            }
-            decode_width = block_size * (2 if self.dflash_hybrid else 1)
-            required_lengths = {self.prefill_seq_len, decode_width}
-            if not required_lengths.issubset(sequence_lengths):
-                raise ValueError(
-                    f"DFlash VLM QPC needs input lengths {sorted(required_lengths)} "
-                    f"at batch_size={self.decode_bsz} required; found {input_shapes}."
-                )
-            logits_shapes = self._get_binding_shapes("logits", is_input=False)
-            # Rejection sampling needs full vocabulary logits, not token IDs
-            # from a QPC compiled with greedy sampling.
-            if not logits_shapes or any(
-                len(shape) != 3 or shape[-1] != self.vocab_size
-                for shape in logits_shapes
-            ):
-                raise ValueError("DFlash target QPC must return vocabulary logits.")
-            for decode_k, inputs in self.decode_batch_inputs_by_k.items():
-                if "mm_token_type_ids" in self.session.input_names:
-                    inputs["mm_token_type_ids"] = np.zeros(
-                        (self.decode_bsz, decode_k + 1), dtype=np.int64
-                    )
-            if self.config.model_type == "gemma4":
-                text_config = self.config.text_config
-                capacity = min(
-                    self.ctx_len,
-                    text_config.sliding_window
-                    + max(self.prefill_seq_len, block_size)
-                    - 1,
-                )
-                for index, kind in enumerate(text_config.layer_types):
-                    if kind != "sliding_attention":
-                        continue
-                    name = f"past_key.{index}"
-                    name = next(
-                        (
-                            candidate
-                            for candidate in self.session.input_names
-                            if candidate == name or candidate.startswith(f"{name}_")
-                        ),
-                        name,
-                    )
-                    shapes = self._get_binding_shapes(name)
-                    if not shapes or any(
-                        len(shape) != 4 or shape[2] < capacity for shape in shapes
-                    ):
-                        raise ValueError(
-                            f"Recompile Gemma4 DFlash QPC: {name} requires cache "
-                            f"capacity >= {capacity}; found {shapes}."
-                        )
+            self._load_multimodal_dflash_vlm()
 
         if self.dflash_hybrid:
             self._load_multimodal_dflash_hybrid(self.num_spec_tokens + 1)
@@ -207,6 +151,58 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
                         _shape, dtype=v[1]
                     )
             self.decode_batch_inputs.update(self.default_mm_kwargs)
+
+    def _load_multimodal_dflash_vlm(self) -> None:
+        """Validate DFlash VLM QPC shapes and initialize decode token-type masks."""
+        # Reject stale QPCs: verification needs B tokens, or 2B for
+        # Qwen3.5's accepted-prefix commit plus new verification block.
+        block_size = self.num_spec_tokens + 1
+        input_shapes = self._get_binding_shapes("input_ids")
+        decode_width = block_size * (2 if self.dflash_hybrid else 1)
+        # Prefill stays per request; verification uses the full decode batch.
+        required_shapes = {(1, self.prefill_seq_len), (self.decode_bsz, decode_width)}
+        if not required_shapes.issubset(map(tuple, input_shapes)):
+            raise ValueError(f"QPC needs input shapes {sorted(required_shapes)}.")
+        if self.decode_bsz > 1 and "batch_index" not in self.session.input_names:
+            raise ValueError("Batched DFlash VLM QPC requires batch_index.")
+        logits_shapes = self._get_binding_shapes("logits", is_input=False)
+        # Rejection sampling needs full vocabulary logits, not token IDs
+        # from a QPC compiled with greedy sampling.
+        if not logits_shapes or any(
+            len(shape) != 3 or shape[-1] != self.vocab_size for shape in logits_shapes
+        ):
+            raise ValueError("DFlash target QPC must return vocabulary logits.")
+        for decode_k, inputs in self.decode_batch_inputs_by_k.items():
+            if "mm_token_type_ids" in self.session.input_names:
+                inputs["mm_token_type_ids"] = np.zeros(
+                    (self.decode_bsz, decode_k + 1), dtype=np.int64
+                )
+        if self.config.model_type == "gemma4":
+            text_config = self.config.text_config
+            capacity = min(
+                self.ctx_len,
+                text_config.sliding_window + max(self.prefill_seq_len, block_size) - 1,
+            )
+            for index, kind in enumerate(text_config.layer_types):
+                if kind != "sliding_attention":
+                    continue
+                name = f"past_key.{index}"
+                name = next(
+                    (
+                        candidate
+                        for candidate in self.session.input_names
+                        if candidate == name or candidate.startswith(f"{name}_")
+                    ),
+                    name,
+                )
+                shapes = self._get_binding_shapes(name)
+                if not shapes or any(
+                    len(shape) != 4 or shape[2] < capacity for shape in shapes
+                ):
+                    raise ValueError(
+                        f"Recompile Gemma4 DFlash QPC: {name} requires cache "
+                        f"capacity >= {capacity}; found {shapes}."
+                    )
 
     def _load_multimodal_dflash_hybrid(self, block_size: int) -> None:
         """Initialize accepted-prefix commit and verification buffers for Qwen3.5."""

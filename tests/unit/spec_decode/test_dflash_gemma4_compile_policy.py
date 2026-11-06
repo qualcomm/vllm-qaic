@@ -27,8 +27,9 @@ from vllm_qaic.model_loader.qaic import _get_qaic_compile_config
         ("llama", False),
     ],
 )
+@pytest.mark.parametrize("batch_size", [1, 2, 4, 8])
 def test_subfunction_policy_is_specific_to_dflash_gemma4(
-    monkeypatch, role, dflash, model_type, moe
+    monkeypatch, role, dflash, model_type, moe, batch_size
 ):
     monkeypatch.setattr(
         "vllm_qaic.model_loader.qaic.QAIC_DEVICE_CONFIG",
@@ -50,9 +51,9 @@ def test_subfunction_policy_is_specific_to_dflash_gemma4(
             runner_type="generate",
         ),
         cache_config=SimpleNamespace(
-            cache_dtype="auto", num_cpu_blocks=1, enable_prefix_caching=False
+            cache_dtype="auto", num_cpu_blocks=batch_size, enable_prefix_caching=False
         ),
-        scheduler_config=SimpleNamespace(max_num_seqs=1),
+        scheduler_config=SimpleNamespace(max_num_seqs=batch_size),
         kv_transfer_config=SimpleNamespace(kv_role=role) if role else None,
         speculative_config=(
             SimpleNamespace(method="dflash", num_speculative_tokens=15)
@@ -86,7 +87,9 @@ def test_subfunction_policy_is_specific_to_dflash_gemma4(
         assert result.qaic_config["target_layer_ids"] == [1, 3]
         if is_vlm:
             assert result.cfg["split_model_io"] is True
-            assert "full_batch_size" not in result.cfg
+            assert result.cfg["full_batch_size"] == batch_size
+            assert result.cfg["batch_size"] == 1
+            assert "vision_batch_size" not in result.cfg
         config.kv_transfer_config = None
         draft = _get_qaic_compile_config(config, "draft")
         assert not draft.cfg.get("use_onnx_subfunctions", False)

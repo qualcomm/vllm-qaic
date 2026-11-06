@@ -269,8 +269,6 @@ class QaicPlatform(Platform):
                     "QAIC multimodal speculative decoding currently supports "
                     "DFlash with Qwen3.5, Qwen3.5-MoE, Qwen3-VL, and Gemma4 only."
                 )
-            if scheduler_config.max_num_seqs != 1:
-                raise ValueError("Multimodal DFlash currently requires max_num_seqs=1.")
             if scheduler_config.async_scheduling:
                 raise ValueError("Multimodal DFlash requires async_scheduling=False.")
 

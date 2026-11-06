@@ -23,9 +23,10 @@ from vllm_qaic.worker.model_runner import QaicModelRunnerAoT
 
 @pytest.mark.parametrize("dflash", [False, True])
 @pytest.mark.parametrize("initial_value", [0, 7])
+@pytest.mark.parametrize("hybrid", [False, True])
 @pytest.mark.parametrize("increments", [(0,), (4,), (4, 0), (0, 4, 2), (4, 0, 2, 0)])
 def test_prefill_image_counter_reuses_storage_and_preserves_request(
-    dflash, initial_value, increments
+    dflash, initial_value, increments, hybrid
 ):
     seen = []
     pending = []
@@ -53,6 +54,8 @@ def test_prefill_image_counter_reuses_storage_and_preserves_request(
         config=SimpleNamespace(model_type="qwen3_5"),
         ignore_batch_index=True,
         is_dflash_vlm=dflash,
+        dflash_hybrid=hybrid,
+        _dflash_prefix_positions=np.full((4, 4, 16), 17, dtype=np.int64),
         comp_ctx_lengths_prefill=None,
         _prefill_hidden_scratch=None,
         use_async_scheduling=False,
@@ -69,7 +72,7 @@ def test_prefill_image_counter_reuses_storage_and_preserves_request(
         model,
         input_ids=np.zeros(2 * n_tokens, dtype=np.int64),
         positions=np.tile(np.arange(n_tokens), 2),
-        batch_indices=np.arange(2),
+        batch_indices=np.array([2, 0]),
         prefill_cum_sum=np.array([n_tokens, 2 * n_tokens]),
         pending_exec_queue=Queue(),
         logits=None,
@@ -82,6 +85,8 @@ def test_prefill_image_counter_reuses_storage_and_preserves_request(
     )
     assert [value for _, value in seen] == expected * 2
     assert initial.item() == initial_value
+    assert np.all(model._dflash_prefix_positions[:, [1, 3]] == 17)
+    assert np.all(model._dflash_prefix_positions[:, [0, 2]] == (-1 if hybrid else 17))
     if dflash:
         assert seen[0][0] is not seen[n_chunks][0]
         for start in (0, n_chunks):
@@ -142,7 +147,10 @@ def test_compile_only_builds_draft_before_exiting(monkeypatch, dflash, draft_err
     ["gemma4", "qwen3_vl", "qwen3_5", "qwen3_5_moe", "qwen3", "llama", "gpt_oss"],
 )
 @pytest.mark.parametrize("metadata", ["none", "layers_only", "repo_only", "dflash"])
-def test_hf_loading_defaults_require_dflash_metadata(monkeypatch, model_type, metadata):
+@pytest.mark.parametrize("continuous_batching", [None, False, True])
+def test_hf_loading_defaults_require_dflash_metadata(
+    monkeypatch, model_type, metadata, continuous_batching
+):
     import QEfficient
     from vllm_qaic.model_loader import qaic
 
@@ -170,12 +178,22 @@ def test_hf_loading_defaults_require_dflash_metadata(monkeypatch, model_type, me
         qaic_config["target_layer_ids"] = [1, 3]
     if metadata in {"repo_only", "dflash"}:
         qaic_config["dflash_dlm_repo"] = "draft"
-    get_hf_model(config, qaic_config=qaic_config, kv_offload=vlm)
+    get_hf_model(
+        config,
+        qaic_config=qaic_config,
+        kv_offload=vlm,
+        additional_config={
+            "override_qaic_config": {"continuous_batching": continuous_batching}
+        }
+        if continuous_batching is not None
+        else None,
+    )
     args = load.call_args.kwargs
     specialized = metadata == "dflash" and vlm
     assert args.get("dtype") == ("float32" if specialized else None)
-    if vlm:
-        assert args["continuous_batching"] is (metadata != "dflash")
+    assert args["continuous_batching"] is (
+        True if continuous_batching is None else continuous_batching
+    )
 
 
 def test_dflash_registry_separates_vlm_from_text_architectures():

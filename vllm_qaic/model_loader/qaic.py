@@ -540,15 +540,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             self.prefill_num_logits_buffer = dict(
                 num_logits_to_keep=np.empty((1, 1), dtype=np.int64)
             )
-            if (
-                self.is_dflash_target
-                and "num_logits_to_keep" not in self.session.input_names
-            ):
-                # Some QPCs fix the logit count in each specialization, so they
-                # have no runtime count input. Do not bind a nonexistent buffer.
-                self.prefill_num_logits_buffer.clear()
-                for buffer in self.decode_num_logits_buffer_by_k.values():
-                    buffer.clear()
         # CCL state for disaggregated prefill: dict keyed by exec-object slot id, value
         # is the bucket currently in flight on that slot (0 = idle). Used by
         # _run_pipeline_prefill to pick one CCL per batch =
@@ -823,6 +814,9 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         # DFlash: global chunk counter into the per-chunk hidden-state buffers.
         _dflash_chunk_idx = 0
         for i, idx_end in enumerate(prefill_cum_sum):
+            # A new prompt must not inherit the previous request's staged prefix.
+            if getattr(self, "dflash_hybrid", False):
+                self._dflash_prefix_positions[:, batch_indices[i]] = -1
             # extract indices of specific request
             iids = input_ids[idx_start:idx_end]
             pids = positions[..., idx_start:idx_end]
@@ -1037,9 +1031,10 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             if num_decodes < self.decode_bsz:
                 batch_inputs["lora_ids"][num_decodes:] = -1
 
-        # For spec-decode target: include num_logits_to_keep in batch_inputs
-        # so the hardware knows how many token positions to compute logits for.
-        if self.is_spec_decode_target_model:
+        if (
+            self.is_spec_decode_target_model
+            and "num_logits_to_keep" in self.session.input_names
+        ):
             batch_inputs.update(self.decode_num_logits_buffer_by_k[current_k])
 
         if self.comp_ctx_lengths_decode is not None:
@@ -1419,7 +1414,10 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     self.decode_batch_inputs["comp_ctx_lengths"] = np.zeros(
                         self.comp_ctx_lengths_decode[-1], dtype=np.int64
                     )
-                if self.is_spec_decode_target_model:
+                if (
+                    self.is_spec_decode_target_model
+                    and "num_logits_to_keep" in self.session.input_names
+                ):
                     self.decode_batch_inputs.update(
                         self.decode_num_logits_buffer_by_k[self.active_k]
                     )
@@ -1983,9 +1981,7 @@ def get_hf_model(
             # InternVL uses QEFFAutoModelForCausalLM (the default class)
             model_type = "imagetext"
         if is_dflash_target and hf_config.model_type in DFLASH_VLM_MODEL_TYPES:
-            # DFlash VLM QPCs use fixed batch slots (currently BS=1), not
-            # continuous-batching caches. Keep projection/norm loading in FP32.
-            args["continuous_batching"] = False
+            # Keep DFlash's projection/norm loading in FP32.
             args["dtype"] = "float32"
         # On-device sampling is supported with multimodality
         # Continuous batching is supported for dual QPC VLMs
@@ -2354,14 +2350,12 @@ def _get_qaic_compile_config(
                 # to avoid the slow flattened path with generated FP32 overrides.
                 cfg["use_onnx_subfunctions"] = model_type == "gemma4"
                 cfg["split_model_io"] = True
-                cfg.pop("full_batch_size", None)
-                cfg.pop("kv_cache_batch_size", None)
                 cfg.pop("num_speculative_tokens", None)
                 # Image features remain resident while language chunks advance.
                 cfg.pop("vision_size", None)
             if model_type == "gemma4":
-                # Generate Gemma4's per-node precision overrides for numerical
-                # stability; QEfficient excludes MatMul from these FP32 overrides.
+                # Use FP32 for Gemma4 nodes that can overflow in FP16.
+                # QEfficient excludes MatMul from these precision overrides.
                 cfg["node_precision_info"] = True
             if model_type in {"qwen3_5", "qwen3_5_moe"}:
                 block_size = dflash_cfg["block_size"]

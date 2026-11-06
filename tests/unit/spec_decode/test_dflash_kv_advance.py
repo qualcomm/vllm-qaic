@@ -4,6 +4,7 @@
 # ------------------------------------------------------------------
 """Unit-level regression test for the DFlash decode-side KV-advance-on-skip fix."""
 
+import json
 from types import SimpleNamespace
 
 import numpy as np
@@ -590,17 +591,33 @@ def test_update_prefill_kv_checks_final_prompt_boundary(prompt_len, target_width
 
 
 @pytest.mark.parametrize("compiled_ctx", [2048, 4096, 8192])
-def test_dlm_context_limit_uses_loaded_cache_capacity(monkeypatch, compiled_ctx):
+@pytest.mark.parametrize("cache_bindings", [True, False])
+@pytest.mark.parametrize("named_specialization", [True, False])
+def test_dlm_context_limit_uses_loaded_cache_capacity(
+    monkeypatch, tmp_path, compiled_ctx, cache_bindings, named_specialization
+):
     proposer, _ = _make_proposer(2, 16)
     proposer.tlm_prefill_seq_len = 128
     proposer._draft_vllm_config = SimpleNamespace(
         additional_config={}, model_config=SimpleNamespace(model="draft")
     )
     model = proposer.model
-    model.kv_cache_info = [
-        ((2, 1, capacity, 8), np.float32, 0)
-        for capacity in (compiled_ctx, compiled_ctx + 128)
-    ]
+    model.kv_cache_info = (
+        [
+            ((2, 1, capacity, 8), np.float32, 0)
+            for capacity in (compiled_ctx, compiled_ctx + 128)
+        ]
+        if cache_bindings
+        else []
+    )
+    model.qpc_path = str(tmp_path / "qpc")
+    symbols = {"batch_size": "2", "ctx_len": str(compiled_ctx)}
+    specialization = (
+        {"name": "Prefill", "symbols": symbols} if named_specialization else symbols
+    )
+    (tmp_path / "specializations.json").write_text(
+        json.dumps({"specializations": [specialization]})
+    )
     model.get_io_shape_and_dtype = lambda name: (
         [2, 128, 8] if name == "target_hidden" else [2, 128],
         np.float32,
