@@ -363,8 +363,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         return comp_ctx_lengths_prefill or None, comp_ctx_lengths_decode or None
 
     def get_num_kv_blocks_per_batch(self):
-        if "block_table" not in self.session.input_names:
-            return None
         block_table_idx = self.session.binding_index_map["block_table"]
         return self.session.allowed_shapes[0][block_table_idx][1][1]
 
