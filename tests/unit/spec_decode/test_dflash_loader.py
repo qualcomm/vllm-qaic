@@ -14,7 +14,9 @@ import pytest
 from vllm_qaic.model_loader.qaic import (
     QaicCausalLM,
     QaicCompilationComplete,
+    _derive_dflash_config,
     get_hf_model,
+    load_qaic_model,
 )
 from vllm_qaic.worker.model_runner import QaicModelRunnerAoT
 
@@ -114,34 +116,16 @@ def test_compile_only_builds_draft_before_exiting(monkeypatch, dflash, draft_err
 
 
 @pytest.mark.parametrize(
-    "model_type,quantizer_object",
-    [
-        ("gemma4", False),
-        ("qwen3_vl", False),
-        ("qwen3_5", False),
-        ("qwen3_5_moe", False),
-        ("gpt_oss", False),
-        ("gpt_oss", True),
-        ("qwen3", False),
-        ("llama", False),
-    ],
+    "model_type",
+    ["gemma4", "qwen3_vl", "qwen3_5", "qwen3_5_moe", "qwen3", "llama", "gpt_oss"],
 )
 @pytest.mark.parametrize("metadata", ["none", "layers_only", "repo_only", "dflash"])
-def test_hf_loading_defaults_require_dflash_metadata(
-    monkeypatch, model_type, metadata, quantizer_object
-):
+def test_hf_loading_defaults_require_dflash_metadata(monkeypatch, model_type, metadata):
     import QEfficient
     from vllm_qaic.model_loader import qaic
 
     vlm = model_type in {"gemma4", "qwen3_vl", "qwen3_5", "qwen3_5_moe"}
     hf_config = SimpleNamespace(model_type=model_type)
-    if model_type == "gpt_oss":
-        hf_config.architectures = ["GptOssForCausalLM"]
-        hf_config.quantization_config = (
-            SimpleNamespace(quant_method="gpt_oss_mxfp4")
-            if quantizer_object
-            else {"quant_method": "gpt_oss_mxfp4"}
-        )
     config = SimpleNamespace(
         hf_config=hf_config,
         model="target",
@@ -166,22 +150,10 @@ def test_hf_loading_defaults_require_dflash_metadata(
         qaic_config["dflash_dlm_repo"] = "draft"
     get_hf_model(config, qaic_config=qaic_config, kv_offload=vlm)
     args = load.call_args.kwargs
-    specialized = metadata == "dflash" and (vlm or model_type == "gpt_oss")
+    specialized = metadata == "dflash" and vlm
     assert args.get("dtype") == ("float32" if specialized else None)
     if vlm:
         assert args["continuous_batching"] is (metadata != "dflash")
-    if model_type == "gpt_oss":
-        original_quantizer = hf_config.quantization_config
-        loaded_quantizer = args["config"].quantization_config
-        if quantizer_object:
-            original_quantizer = vars(original_quantizer)
-            loaded_quantizer = vars(loaded_quantizer)
-        assert loaded_quantizer["quant_method"] == "mxfp4"
-        assert original_quantizer["quant_method"] == (
-            "gpt_oss_mxfp4" if specialized else "mxfp4"
-        )
-        if specialized:
-            assert args["config"] is not hf_config
 
 
 def test_dflash_registry_separates_vlm_from_text_architectures():
@@ -189,3 +161,59 @@ def test_dflash_registry_separates_vlm_from_text_architectures():
 
     assert {"gemma4", "qwen3_vl", "qwen3_5", "qwen3_5_moe"} == DFLASH_VLM_MODEL_TYPES
     assert {"qwen3", "llama", "gpt_oss"} == DFLASH_MODEL_TYPES - DFLASH_VLM_MODEL_TYPES
+
+
+@pytest.mark.parametrize("cached", [False, True])
+@pytest.mark.parametrize("role", ["target", "draft"])
+def test_dflash_rejects_unsupported_target_before_loading(cached, role):
+    config = SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            method="dflash",
+            target_model_config=SimpleNamespace(
+                hf_config=SimpleNamespace(model_type="unsupported")
+            ),
+        ),
+        # Cached metadata must not bypass validation of the actual target.
+        additional_config={"dflash_cfg": {"tlm_model_type": "qwen3"}}
+        if cached
+        else None,
+    )
+    with pytest.raises(
+        ValueError, match="not supported for target model type 'unsupported'"
+    ):
+        load_qaic_model(config, role)
+
+
+@pytest.mark.parametrize(
+    "model_type",
+    ["qwen3", "llama", "gemma4", "qwen3_vl", "qwen3_5", "qwen3_5_moe", "gpt_oss"],
+)
+def test_dflash_derivation_validates_target_not_draft(model_type):
+    draft = SimpleNamespace(
+        model="draft",
+        hf_config=SimpleNamespace(
+            model_type="dflash",
+            dflash_config={
+                "block_size": 16,
+                "target_layer_ids": [0, 2],
+                "mask_token_id": 7,
+            },
+        ),
+    )
+    config = SimpleNamespace(
+        model_config=draft,
+        speculative_config=SimpleNamespace(
+            target_model_config=SimpleNamespace(
+                model="target", hf_config=SimpleNamespace(model_type=model_type)
+            ),
+            draft_model_config=draft,
+            num_speculative_tokens=15,
+        ),
+        additional_config={"override_qaic_config": {"prefill_seq_len": 128}},
+    )
+    _derive_dflash_config(config)
+    derived = config.additional_config["dflash_cfg"]
+    assert derived["tlm_model_type"] == model_type
+    assert derived["target_layer_ids"] == [1, 3]
+    _derive_dflash_config(config)
+    assert config.additional_config["dflash_cfg"] is derived

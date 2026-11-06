@@ -87,11 +87,6 @@ def test_subfunction_policy_is_specific_to_dflash_gemma4(
         if is_vlm:
             assert result.cfg["split_model_io"] is True
             assert "full_batch_size" not in result.cfg
-        if model_type == "gpt_oss":
-            assert [
-                (s["seq_len"], s["num_logits_to_keep"])
-                for s in result.cfg["specializations"]
-            ] == [(128, 1), (16, 16)]
         config.kv_transfer_config = None
         draft = _get_qaic_compile_config(config, "draft")
         assert not draft.cfg.get("use_onnx_subfunctions", False)

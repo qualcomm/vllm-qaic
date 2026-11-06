@@ -10,7 +10,6 @@ import os
 import threading
 import time
 from collections.abc import Callable
-from copy import deepcopy
 from dataclasses import dataclass
 from queue import Queue
 from typing import Any
@@ -47,6 +46,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
 
 from vllm_qaic.utils.qaic_utils import (
+    DFLASH_MODEL_TYPES,
     DFLASH_VLM_MODEL_TYPES,
     _clean_config,
     compute_max_decode_tokens,
@@ -1435,6 +1435,11 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
 def _derive_dflash_config(vllm_config) -> None:
     """Derive DFlash metadata into additional_config['dflash_cfg'] (idempotent)."""
     spec_config = vllm_config.speculative_config
+    model_type = spec_config.target_model_config.hf_config.model_type
+    if model_type not in DFLASH_MODEL_TYPES:
+        raise ValueError(
+            f"DFlash is not supported for target model type {model_type!r}."
+        )
     additional_config = vllm_config.additional_config
     if additional_config is None:
         additional_config = {}
@@ -1913,9 +1918,6 @@ def get_hf_model(
         and qaic_config.get("target_layer_ids")
         and qaic_config.get("dflash_dlm_repo")
     )
-    if hf_config.model_type == "gpt_oss" and is_dflash_target:
-        # Apply the shared quantizer fix without changing vLLM's DFlash config.
-        hf_config = deepcopy(hf_config)
     # For Gptoss models, vllm sets the quantization to gpt_oss_mxfp4 while qeff
     # needs mxfp4 quantization. Because of this mismatch, qeff do not adds MoE
     # weights to the graph and model generates garbage output
@@ -1953,10 +1955,6 @@ def get_hf_model(
         override_qaic_config.pop("pretrained_extra_args")
 
     model_type = "lora" if lora_config else "default"
-    if hf_config.model_type == "gpt_oss" and is_dflash_target:
-        # Load target weights and the injected projection/norm in FP32 before
-        # QEfficient applies the selected export/compiler precision policy.
-        args["dtype"] = "float32"
     if model_config.is_multimodal_model:
         if model_config.hf_config.model_type == "whisper":
             model_type = "speech"
@@ -2295,32 +2293,6 @@ def _get_qaic_compile_config(
             qaic_config["target_layer_ids"] = dflash_cfg["target_layer_ids"]
             qaic_config["dflash_dlm_repo"] = dflash_cfg["dlm_repo"]
             model_type = vllm_config.model_config.hf_config.model_type
-            # GPT-OSS/Qwen3.5 verification needs the multi-token prefill graph.
-            # prefill_only below selects that graph, not a disaggregated role.
-            if model_type == "gpt_oss":
-                cfg["qaic_config"] = qaic_config
-                block_size = int(dflash_cfg["block_size"])
-                sliding_window = vllm_config.model_config.hf_config.sliding_window
-                cfg["prefill_only"] = True
-                cfg["enable_chunking"] = True
-                cfg["use_onnx_subfunctions"] = False
-                # GPT-OSS defaults to single-token decode; the chunked prefill
-                # graph needs an explicit block-verification specialization.
-                cfg["specializations"] = [
-                    {
-                        "batch_size": batch,
-                        "full_batch_size": cfg.get("kv_cache_batch_size")
-                        or cfg["full_batch_size"],
-                        "seq_len": length,
-                        "ctx_len": cfg["ctx_len"],
-                        "sliding_window": sliding_window,
-                        "num_logits_to_keep": num_logits,
-                    }
-                    for batch, length, num_logits in (
-                        (1, cfg["prefill_seq_len"], 1),
-                        (cfg["full_batch_size"], block_size, block_size),
-                    )
-                ]
             if is_dflash_vlm:
                 # Export Gemma4 decoder blocks as subfunctions
                 # to avoid the slow flattened path with generated FP32 overrides.
@@ -2349,6 +2321,8 @@ def _get_qaic_compile_config(
                         "Qwen3.5 DFlash prefill_seq_len must be divisible by "
                         "block_size and >= 2 * block_size."
                     )
+                # Qwen3.5 verification uses the multi-token prefill graph;
+                # prefill_only selects that graph, not a disaggregated role.
                 cfg["prefill_only"] = True
                 if model_type == "qwen3_5_moe":
                     cfg["enable_chunking"] = True
