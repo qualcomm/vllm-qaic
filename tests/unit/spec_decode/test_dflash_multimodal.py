@@ -129,6 +129,9 @@ def _vlm_model(model_type="qwen3_vl", missing_phase=None):
         _prefill_hidden_scratch=np.zeros((1, 128, 8), dtype=np.float32),
     )
     model._get_binding_shapes = MethodType(QaicCausalLM._get_binding_shapes, model)
+    model._load_multimodal_dflash_vlm = MethodType(
+        QaicMultiModal._load_multimodal_dflash_vlm, model
+    )
     model._load_multimodal_dflash_hybrid = MethodType(
         QaicMultiModal._load_multimodal_dflash_hybrid, model
     )
@@ -258,8 +261,9 @@ def test_vlm_rejects_multiple_prefill_lengths(length):
 @pytest.mark.parametrize("valid_tokens", [1, 9, 16])
 @pytest.mark.parametrize("slot", [0, 2])
 @pytest.mark.parametrize("capture_hidden", [False, True])
+@pytest.mark.parametrize("has_num_logits_input", [False, True])
 def test_concatenated_decode_commits_prefix_and_returns_suffix(
-    accepted, valid_tokens, slot, capture_hidden
+    accepted, valid_tokens, slot, capture_hidden, has_num_logits_input
 ):
     model = QaicMultiModal.__new__(QaicMultiModal)
     model.dflash_hybrid = True
@@ -300,7 +304,9 @@ def test_concatenated_decode_commits_prefix_and_returns_suffix(
         inputs["logits"][:] = np.arange(16).reshape(1, 16, 1)
 
     model.session = SimpleNamespace(
-        np_run=Mock(return_value=17), complete_inf=Mock(side_effect=complete)
+        input_names=["num_logits_to_keep"] if has_num_logits_input else [],
+        np_run=Mock(return_value=17),
+        complete_inf=Mock(side_effect=complete),
     )
     logits = np.empty((1, 16, 32), dtype=np.float32)
     hidden = np.empty((1, 16, 8), dtype=np.float32) if capture_hidden else None
@@ -328,7 +334,9 @@ def test_concatenated_decode_commits_prefix_and_returns_suffix(
     np.testing.assert_array_equal(inputs["position_ids"][:, 0, 16:], positions)
     assert inputs["batch_index"].item() == slot
     assert inputs["cache_commit"].item() == 0
-    assert inputs["num_logits_to_keep"].shape == (16, 1)
+    assert ("num_logits_to_keep" in inputs) == has_num_logits_input
+    if has_num_logits_input:
+        assert inputs["num_logits_to_keep"].shape == (16, 1)
     if capture_hidden:
         assert np.all(hidden == 2)
     np.testing.assert_array_equal(
@@ -346,7 +354,10 @@ def test_concatenated_decode_commits_prefix_and_returns_suffix(
 @pytest.mark.parametrize("k", [0, 15])
 @pytest.mark.parametrize("async_scheduling", [False, True])
 @pytest.mark.parametrize("capture_hidden", [False, True])
-def test_shared_decode_without_hybrid(mrope, k, async_scheduling, capture_hidden):
+@pytest.mark.parametrize("has_num_logits_input", [False, True])
+def test_shared_decode_without_hybrid(
+    mrope, k, async_scheduling, capture_hidden, has_num_logits_input
+):
     model_cls = QaicMultiModal if mrope else QaicCausalLM
     model = model_cls.__new__(model_cls)
     if mrope:
@@ -371,7 +382,11 @@ def test_shared_decode_without_hybrid(mrope, k, async_scheduling, capture_hidden
     model.decode_num_logits_buffer_by_k = {
         k: {"num_logits_to_keep": np.zeros((width, 1), dtype=np.int64)}
     }
-    model.session = SimpleNamespace(np_run=Mock(return_value=17), complete_inf=Mock())
+    model.session = SimpleNamespace(
+        input_names=["num_logits_to_keep"] if has_num_logits_input else [],
+        np_run=Mock(return_value=17),
+        complete_inf=Mock(),
+    )
     ids = np.arange(width)
     positions = np.arange(20, 20 + width)
     if mrope:
@@ -389,6 +404,7 @@ def test_shared_decode_without_hybrid(mrope, k, async_scheduling, capture_hidden
     )
     model.session.np_run.assert_called_once()
     assert model.session.np_run.call_args.args[0] is inputs
+    assert ("num_logits_to_keep" in inputs) == (k > 0 and has_num_logits_input)
     callback.assert_called_once_with()
     if async_scheduling:
         model.session.complete_inf.assert_not_called()
