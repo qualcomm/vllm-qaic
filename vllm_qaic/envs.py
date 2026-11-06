@@ -44,8 +44,6 @@ if TYPE_CHECKING:
     # ParallelLinear, ParallelLMHead, LogitsProcessor matmul) to vLLM's
     # batch-invariant Triton GEMM (linear_batch_invariant) via patch_linear.
     VLLM_QAIC_TRITON_LINEAR: bool = False
-    # Debug: Route only unquantized linear/GEMM for GatedDeltaNet projection layers
-    VLLM_QAIC_TRITON_GDN_LINEAR: bool = False
     # Route the sampler's top-k/top-p logits masking to vLLM's Triton kernel
     # (apply_top_k_top_p_triton) via patch_topk_topp_sampler; when unset the
     # PyTorch sort implementation is used regardless of batch size.
@@ -72,8 +70,6 @@ qaic_environment_variables: dict[str, Callable[[], Any]] = {
     )
     == "1",
     "VLLM_QAIC_TRITON_ALL_OPS_EN": lambda: os.getenv("VLLM_QAIC_TRITON_ALL_OPS_EN", "0")
-    == "1",
-    "VLLM_QAIC_TRITON_GDN_LINEAR": lambda: os.getenv("VLLM_QAIC_TRITON_GDN_LINEAR", "0")
     == "1",
 }
 
