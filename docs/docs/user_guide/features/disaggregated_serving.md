@@ -33,7 +33,8 @@ Stage      Stage
              v
       Streaming tokens
       back to client
-```text
+```
+
 The disaggregation is invisible to the client — a single OpenAI-compatible endpoint is exposed.
 
 ## Docker Deployment
@@ -42,7 +43,8 @@ Qualcomm ships a dedicated container with a pre-configured `qaic_disagg` entrypo
 
 ```bash
 docker pull ghcr.io/quic/cloud_ai_inference_vllm_disagg:1.21.2.0
-```text
+```
+
 Launch prefill-decode disaggregation:
 
 ```bash
@@ -71,7 +73,8 @@ docker run --rm -it \
   --decode-override-qaic-config "split_retained_state_io:True mxfp6_matmul:True" \
   --generation-config vllm \
   --kv-cache-dtype mxint8 -v -v -v
-```text
+```
+
 ## Speculative Decoding with Disaggregated Serving
 
 SpD can be layered onto disaggregated serving — proposals are generated and verified entirely on the decode node:
@@ -83,7 +86,8 @@ Prefill Stage (Device Group 0..15)
 Decode Stage (Device Group 16..23)
   +-- Draft model proposes tokens
   +-- Target model verifies and streams output
-```text
+```
+
 Enable with `--decode-speculative-config`:
 
 ```bash
@@ -105,12 +109,14 @@ docker run --rm -it \
   --decode-speculative-config '{"speculative_model":"meta-llama/Llama-3.2-1B-Instruct","num_speculative_tokens":3,"draft_override_qaic_config":{"device_group":[0],"num_cores":6}}' \
   --kv-cache-dtype mxint8 \
   --generation-config vllm
-```text
+```
+
 For n-gram without a draft model:
 
 ```bash
 --decode-speculative-config '{"method":"ngram","num_speculative_tokens":5}'
-```text
+```
+
 ## Disaggregation Modes
 
 | Configuration | Encode | Prefill | Decode | Status |
