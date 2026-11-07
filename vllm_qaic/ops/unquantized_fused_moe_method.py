@@ -23,6 +23,8 @@ if TYPE_CHECKING:
     )
 from vllm_qaic.ops._triton_flags import triton_op_enabled
 
+triton_en = triton_op_enabled("FUSED_MOE")
+
 
 class QAicUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     """QAIC OOT implementation for unquantized fused MoE."""
@@ -58,7 +60,7 @@ class QAicUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # Biases (has_bias) are threaded through via biased_moe_quant_config; the
         # activation string is parsed to the MoEActivation enum. Flag off -> the
         # QAIC NSP path below, bit-for-bit.
-        if triton_op_enabled("FUSED_MOE"):
+        if triton_en:
             from vllm.model_executor.layers.fused_moe.activation import (
                 MoEActivation,
             )

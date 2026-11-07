@@ -17,6 +17,8 @@ from vllm.model_executor.layers.layernorm import (
 from vllm_qaic._custom_ops import rms_norm_hexagon as _call_hexagon_rms_norm
 from vllm_qaic.ops._triton_flags import triton_op_enabled
 
+triton_en = triton_op_enabled("RMS_NORM")
+
 
 class QAicRMSNorm(RMSNorm):
     """RMSNorm with a fast-path to the Hexagon NSP fused add+norm kernel.
@@ -44,8 +46,8 @@ class QAicRMSNorm(RMSNorm):
             return normed, new_residual
 
         # No residual: plain normalization only.
-        if triton_op_enabled("RMS_NORM"):
-            from vllm.model_executor.layers.batch_invariant import (
+        if triton_en:
+            from vllm.model_executor.determinism.batch_invariant import (
                 rms_norm_batch_invariant,
             )
 

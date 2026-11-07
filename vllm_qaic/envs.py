@@ -25,6 +25,9 @@ if TYPE_CHECKING:
     # Route the decoder paged-attention backend to vLLM's in-tree Triton
     # attention (unified_attention + triton_reshape_and_cache_flash)
     VLLM_QAIC_ENABLE_TRITON_ATTN: bool = False
+    # Master switch: default for every per-operator VLLM_QAIC_TRITON_<OP> flag
+    # below. An explicitly set per-op flag always overrides it.
+    VLLM_QAIC_TRITON_ALL_OPS_EN: bool = False
     # Per-operator opt-in flags: dispatch the CustomOp forward_oot to the
     # corresponding vLLM Triton kernel
     VLLM_QAIC_TRITON_RMS_NORM: bool = False
@@ -45,6 +48,7 @@ if TYPE_CHECKING:
     # PyTorch sort implementation is used regardless of batch size.
     VLLM_QAIC_TRITON_TOPK_TOPP: bool = False
 
+
 # --8<-- [start:env-vars-definition]
 qaic_environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_QAIC_COMPILER_ARGS": lambda: os.getenv("VLLM_QAIC_COMPILER_ARGS", None),
@@ -64,26 +68,47 @@ qaic_environment_variables: dict[str, Callable[[], Any]] = {
         "VLLM_QAIC_ENABLE_TRITON_ATTN", "0"
     )
     == "1",
-    "VLLM_QAIC_TRITON_RMS_NORM": lambda: os.getenv("VLLM_QAIC_TRITON_RMS_NORM", "0")
-    == "1",
-    "VLLM_QAIC_TRITON_MM_ENCODER_ATTENTION": lambda: os.getenv(
-        "VLLM_QAIC_TRITON_MM_ENCODER_ATTENTION", "0"
-    )
-    == "1",
-    "VLLM_QAIC_TRITON_MROTARY_EMBEDDING": lambda: os.getenv(
-        "VLLM_QAIC_TRITON_MROTARY_EMBEDDING", "0"
-    )
-    == "1",
-    "VLLM_QAIC_TRITON_SILU_AND_MUL": lambda: os.getenv(
-        "VLLM_QAIC_TRITON_SILU_AND_MUL", "0"
-    )
-    == "1",
-    "VLLM_QAIC_TRITON_FUSED_MOE": lambda: os.getenv("VLLM_QAIC_TRITON_FUSED_MOE", "0")
-    == "1",
-    "VLLM_QAIC_TRITON_LINEAR": lambda: os.getenv("VLLM_QAIC_TRITON_LINEAR", "0") == "1",
-    "VLLM_QAIC_TRITON_TOPK_TOPP": lambda: os.getenv("VLLM_QAIC_TRITON_TOPK_TOPP", "0")
+    "VLLM_QAIC_TRITON_ALL_OPS_EN": lambda: os.getenv("VLLM_QAIC_TRITON_ALL_OPS_EN", "0")
     == "1",
 }
+
+# Per-op Triton flags default to VLLM_QAIC_TRITON_ALL_OPS_EN (read once, when
+# this module is imported); an explicitly set per-op variable overrides it.
+_triton_all_ops_en = qaic_environment_variables["VLLM_QAIC_TRITON_ALL_OPS_EN"]()
+qaic_environment_variables.update(
+    {
+        "VLLM_QAIC_TRITON_RMS_NORM": lambda: os.getenv(
+            "VLLM_QAIC_TRITON_RMS_NORM", "1" if _triton_all_ops_en else "0"
+        )
+        == "1",
+        "VLLM_QAIC_TRITON_MM_ENCODER_ATTENTION": lambda: os.getenv(
+            "VLLM_QAIC_TRITON_MM_ENCODER_ATTENTION",
+            "1" if _triton_all_ops_en else "0",
+        )
+        == "1",
+        "VLLM_QAIC_TRITON_MROTARY_EMBEDDING": lambda: os.getenv(
+            "VLLM_QAIC_TRITON_MROTARY_EMBEDDING",
+            "1" if _triton_all_ops_en else "0",
+        )
+        == "1",
+        "VLLM_QAIC_TRITON_SILU_AND_MUL": lambda: os.getenv(
+            "VLLM_QAIC_TRITON_SILU_AND_MUL", "1" if _triton_all_ops_en else "0"
+        )
+        == "1",
+        "VLLM_QAIC_TRITON_FUSED_MOE": lambda: os.getenv(
+            "VLLM_QAIC_TRITON_FUSED_MOE", "1" if _triton_all_ops_en else "0"
+        )
+        == "1",
+        "VLLM_QAIC_TRITON_LINEAR": lambda: os.getenv(
+            "VLLM_QAIC_TRITON_LINEAR", "1" if _triton_all_ops_en else "0"
+        )
+        == "1",
+        "VLLM_QAIC_TRITON_TOPK_TOPP": lambda: os.getenv(
+            "VLLM_QAIC_TRITON_TOPK_TOPP", "1" if _triton_all_ops_en else "0"
+        )
+        == "1",
+    }
+)
 environment_variables.update(qaic_environment_variables)
 # --8<-- [end:env-vars-definition]
 

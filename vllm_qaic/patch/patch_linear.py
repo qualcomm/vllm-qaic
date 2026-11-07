@@ -20,13 +20,13 @@ to a wrapper that calls ``linear_batch_invariant`` when
 shape, so all four linear variants and the logits matmul route through it.
 
 Note: this file is imported only when ``VLLM_QAIC_TRITON_LINEAR`` is set (see
-vllm_qaic/patch/__init__.py), but the wrapper still re-checks the flag per call
-so the flag remains authoritative. The QAIC platform must implement
-``num_compute_units`` (see platform_base.py) or matmul_persistent raises
+vllm_qaic/patch/__init__.py), but the wrapper still checks the flag (resolved once
+at import into ``triton_en``) so the flag remains authoritative. The QAIC platform
+must implement ``num_compute_units`` (see platform.py) or matmul_persistent raises
 NotImplementedError at launch.
 """
 
-from vllm.model_executor.layers.batch_invariant import linear_batch_invariant
+from vllm.model_executor.determinism.batch_invariant import linear_batch_invariant
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod,
@@ -34,18 +34,20 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 
 from vllm_qaic.ops._triton_flags import triton_op_enabled
 
+triton_en = triton_op_enabled("LINEAR")
+
 _orig_linear_apply = UnquantizedLinearMethod.apply
 _orig_embedding_apply = UnquantizedEmbeddingMethod.apply
 
 
 def _qaic_linear_apply(self, layer, x, bias=None):
-    if triton_op_enabled("LINEAR"):
+    if triton_en:
         return linear_batch_invariant(x, layer.weight, bias)
     return _orig_linear_apply(self, layer, x, bias)
 
 
 def _qaic_embedding_apply(self, layer, x, bias=None):
-    if triton_op_enabled("LINEAR"):
+    if triton_en:
         return linear_batch_invariant(x, layer.weight, bias)
     return _orig_embedding_apply(self, layer, x, bias)
 

@@ -13,7 +13,7 @@ Upstream ``apply_top_k_top_p`` picks its implementation implicitly, from
 >= 8, the PyTorch sort below it. This replaces the function with a version where the
 flag is the only thing that decides: ``VLLM_QAIC_TRITON_TOPK_TOPP=1`` routes to
 ``apply_top_k_top_p_triton`` at any batch size, and anything else routes to the
-PyTorch implementation. The flag is resolved per call through
+PyTorch implementation. The flag is resolved once at import through
 ``triton_op_enabled()``, the same infrastructure as the per-op CustomOp flags.
 """
 
@@ -23,6 +23,8 @@ from vllm.v1.sample.ops import topk_topp_sampler
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p_pytorch
 
 from vllm_qaic.ops._triton_flags import triton_op_enabled
+
+triton_en = triton_op_enabled("TOPK_TOPP")
 
 
 def _qaic_apply_top_k_top_p(
@@ -37,7 +39,7 @@ def _qaic_apply_top_k_top_p(
     if p is None and k is None:
         return logits
 
-    if triton_op_enabled("TOPK_TOPP"):
+    if triton_en:
         from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
 
         return apply_top_k_top_p_triton(logits, k, p)

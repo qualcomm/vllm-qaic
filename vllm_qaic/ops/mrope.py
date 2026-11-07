@@ -14,6 +14,8 @@ from vllm.model_executor.layers.rotary_embedding.mrope import (
 
 from vllm_qaic.ops._triton_flags import triton_op_enabled
 
+triton_en = triton_op_enabled("MROTARY_EMBEDDING")
+
 
 class QAicMRotaryEmbedding(MRotaryEmbedding):
     def forward_oot(
@@ -47,7 +49,7 @@ class QAicMRotaryEmbedding(MRotaryEmbedding):
         # 1D text-only positions use the PyTorch path below
         # (triton_mrope requires 2D positions).
         # ------------------------------------------------------------------
-        if positions.ndim == 2 and triton_op_enabled("MROTARY_EMBEDDING"):
+        if positions.ndim == 2 and triton_en:
             from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
 
             assert self.mrope_section

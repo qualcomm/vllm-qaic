@@ -11,6 +11,8 @@ from vllm.model_executor.layers.activation import SiluAndMul
 
 from vllm_qaic.ops._triton_flags import triton_op_enabled
 
+triton_en = triton_op_enabled("SILU_AND_MUL")
+
 
 class QAicSiluAndMul(SiluAndMul):
     """
@@ -54,7 +56,7 @@ class QAicSiluAndMul(SiluAndMul):
         # already feeds 2D [num_tokens, 2*intermediate], but flatten any leading
         # dims to be safe and restore the original shape afterwards. Flag off ->
         # the QAIC NSP swiglu op below, bit-for-bit.
-        if triton_op_enabled("SILU_AND_MUL"):
+        if triton_en:
             from vllm.model_executor.layers.activation import (
                 swiglustep_and_mul_triton,
             )

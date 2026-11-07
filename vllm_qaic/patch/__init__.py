@@ -113,7 +113,7 @@
 #       no way to opt out and no way to exercise it below batch 8.
 #    How:
 #       Replace apply_top_k_top_p with a version gated solely on
-#       VLLM_QAIC_TRITON_TOPK_TOPP (read per call via triton_op_enabled):
+#       VLLM_QAIC_TRITON_TOPK_TOPP (resolved at import via triton_op_enabled):
 #       set to 1 -> apply_top_k_top_p_triton at any batch size, otherwise ->
 #       apply_top_k_top_p_pytorch.
 #    Note:

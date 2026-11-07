@@ -39,6 +39,8 @@ from vllm.model_executor.layers.attention.mm_encoder_attention import (
 
 from vllm_qaic.ops._triton_flags import triton_op_enabled
 
+triton_en = triton_op_enabled("MM_ENCODER_ATTENTION")
+
 
 def _batched_sdpa(
     q: torch.Tensor,
@@ -264,7 +266,7 @@ class QAicMMEncoderAttention(MMEncoderAttention):
             key = torch.repeat_interleave(key, num_repeat, dim=2)
             value = torch.repeat_interleave(value, num_repeat, dim=2)
 
-        if triton_op_enabled("MM_ENCODER_ATTENTION"):
+        if triton_en:
             # Dispatch to vLLM's Triton ViT prefill kernel (context_attention_fwd)
             # via the registered custom op, mirroring upstream _forward_triton.
 

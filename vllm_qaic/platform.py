@@ -18,6 +18,8 @@ from vllm.platforms import Platform, PlatformEnum
 from vllm.utils.import_utils import PlaceholderModule
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
+from vllm_qaic.ops._triton_flags import triton_op_enabled
+
 from .utils import (
     QAIC_GPT_OSS_MXFP4_METHOD,
     QAIC_KV_CACHE_DTYPE,
@@ -92,6 +94,7 @@ class QaicPlatform(Platform):
     device_type: str = "cpu" if isinstance(qaic, PlaceholderModule) else "qaic"
     device_control_env_var: str = "QAIC_VISIBLE_DEVICES"
     supported_quantization: list[str] = QAIC_QUANTIZATION_LIST
+    triton_mm_encoder_attn_en: bool = triton_op_enabled("MM_ENCODER_ATTENTION")
     # for eager mode
     simple_compile_backend: str = "eager"
 
@@ -635,9 +638,7 @@ class QaicPlatform(Platform):
         Reporting TRITON_ATTN here keeps the metadata consistent with the kernel
         actually being invoked.
         """
-        from vllm_qaic.ops._triton_flags import triton_op_enabled
-
-        if backend is None and triton_op_enabled("MM_ENCODER_ATTENTION"):
+        if backend is None and cls.triton_mm_encoder_attn_en:
             logger.info_once(
                 "VLLM_QAIC_TRITON_MM_ENCODER_ATTENTION=1: using %s for vit attention",
                 AttentionBackendEnum.TRITON_ATTN,
