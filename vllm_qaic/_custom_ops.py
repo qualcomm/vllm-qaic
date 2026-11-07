@@ -774,8 +774,15 @@ def _paged_attention_op(
     scale: float,
     causal: bool,
     write_cache: bool,
+    sinks: Tensor | None = None,
+    window_left: int = -1,
 ) -> Tensor:
-    """Run QAIC paged attention over vLLM block-cache metadata."""
+    """Run QAIC paged attention over vLLM block-cache metadata.
+
+    ``sinks`` holds one logit per query head that joins the softmax
+    denominator without a value row (gpt-oss). ``window_left`` limits each
+    query to keys at most that many positions behind it; -1 disables it.
+    """
     query = query.contiguous()
     if write_cache:
         key = key.contiguous()
@@ -812,6 +819,17 @@ def _paged_attention_op(
         seq_lens = seq_lens.to(device=query.device, dtype=torch.int32).contiguous()
 
     output = torch.empty_like(query)
+
+    has_sinks = sinks is not None
+    if sinks is not None:
+        if sinks.shape != (query.shape[1],):
+            raise ValueError(
+                f"sinks must have shape ({query.shape[1]},), got {tuple(sinks.shape)}"
+            )
+        sinks = sinks.to(device=query.device, dtype=torch.float32).contiguous()
+    else:
+        sinks = torch.empty((1,), dtype=torch.float32, device=query.device)
+    sink_window_args = (int(has_sinks), int(window_left))
 
     num_tokens = query.shape[0]
     num_heads = query.shape[1]
@@ -888,6 +906,8 @@ def _paged_attention_op(
             block_size,
             *cache_strides,
         )
+    # Argument order must match CachedArgs / DirectArgs in
+    # csrc/paged_attention/paged_attention.cpp.
     if use_hmx and not write_cache:
         attn_kernel[_NSP_COUNT, _HMX_THREAD_COUNT](
             query,
@@ -897,6 +917,7 @@ def _paged_attention_op(
             block_table,
             query_start_loc,
             seq_lens,
+            sinks,
             num_reqs,
             num_tokens,
             num_heads,
@@ -907,6 +928,7 @@ def _paged_attention_op(
             int(causal),
             float(scale),
             *cache_strides,
+            *sink_window_args,
         )
     elif use_hmx:
         attn_kernel[_NSP_COUNT, _HMX_THREAD_COUNT](
@@ -920,6 +942,7 @@ def _paged_attention_op(
             block_table,
             query_start_loc,
             seq_lens,
+            sinks,
             num_reqs,
             num_tokens,
             num_heads,
@@ -930,6 +953,7 @@ def _paged_attention_op(
             int(causal),
             float(scale),
             *cache_strides,
+            *sink_window_args,
         )
     else:
         attn_kernel[_NSP_COUNT, _THREAD_COUNT](
@@ -940,6 +964,7 @@ def _paged_attention_op(
             block_table,
             query_start_loc,
             seq_lens,
+            sinks,
             num_reqs,
             num_tokens,
             num_heads,
@@ -950,6 +975,7 @@ def _paged_attention_op(
             int(causal),
             float(scale),
             *cache_strides,
+            *sink_window_args,
         )
     return output
 
@@ -967,6 +993,8 @@ def paged_attention(
     scale: float,
     causal: bool = True,
     write_cache: bool = True,
+    sinks: Tensor | None = None,
+    window_left: int = -1,
 ) -> Tensor:
     return _paged_attention_op(
         query,
@@ -981,6 +1009,8 @@ def paged_attention(
         scale,
         causal,
         write_cache,
+        sinks,
+        window_left,
     )
 
 

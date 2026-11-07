@@ -19,6 +19,7 @@ from vllm.utils.import_utils import PlaceholderModule
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .utils import (
+    QAIC_GPT_OSS_MXFP4_METHOD,
     QAIC_KV_CACHE_DTYPE,
     QAIC_QUANTIZATION_LIST,
     QAIC_QUANTIZATION_METHOD,
@@ -88,6 +89,14 @@ class QaicPlatform(Platform):
         if not cls.is_aot:
             import vllm_qaic.patch.patch_qaic_triton_import  # noqa
 
+        # gpt_oss_mxfp4 is only supported in eager mode: AOT compilation has
+        # no path to dequantize/run the packed MXFP4 MoE weights.
+        if (
+            not cls.is_aot
+            and QAIC_GPT_OSS_MXFP4_METHOD not in cls.supported_quantization
+        ):
+            cls.supported_quantization.append(QAIC_GPT_OSS_MXFP4_METHOD)
+
         if parser is not None:  # For synchronous vLLM engine
             # disable prefix caching as QAIC backend plugin does not support it
             parser.set_defaults(enable_prefix_caching=False)
@@ -114,6 +123,11 @@ class QaicPlatform(Platform):
         from vllm_qaic.quantization.quant_config import (  # noqa: F401
             QaicQuantConfig,
         )
+
+        if not cls.is_aot:
+            from vllm_qaic.quantization.qaic_gpt_oss_mxfp4_config import (  # noqa: F401
+                QaicGptOssMxfp4Config,
+            )
 
     @classmethod
     def import_kernels(cls) -> None:
