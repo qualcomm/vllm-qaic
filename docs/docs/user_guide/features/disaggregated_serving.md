@@ -126,6 +126,10 @@ LMCache turns the KV cache into a fleet-wide resource, enabling cache sharing ac
 - KV cache extracted from device memory to CPU/disk/distributed stores
 - Reused across requests (long system prompts, RAG context, multi-turn chats)
 
+## Encoder Cache (EC) for Multimodal Models
+
+For multimodal deployments (xEyPzD), the **Encoder Cache connector** shares encoder embeddings from encode instances to prefill instances through a shared-memory store instead of HTTP, keyed by multimodal hash. Enable it with `--ec-connector QaicECConnector` and its own handoff port. See [Encoder Cache](encoder_cache.md) for details.
+
 ## Key Configuration Parameters
 
 | Parameter | Description |

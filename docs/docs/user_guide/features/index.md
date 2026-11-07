@@ -28,7 +28,8 @@ Status of vLLM features on Qualcomm Cloud AI hardware.
 | DFlash (block-diffusion draft) | ✅ | ❌ | Separate DLM |
 | **Advanced Features** | | | |
 | LoRA adapters | ✅ | ❌ | Hot-swap adapters |
-| Disaggregated serving | ✅ | ❌ | xEyPzD prefill/decode split |
+| Disaggregated serving | ✅ | ❌ | xEyPzD encode/prefill/decode split |
+| Encoder Cache (EC) | ✅ | ❌ | Shared-memory encoder embeddings cache for xEyPzD deployments |
 | Multimodal (VLM) | ✅ | 🧪 | kv_offload architecture |
 | Embedding models | ✅ | ❌ | Pooling tasks (Score, embed, classify, rerank) |
 | Encoder-decoder | ✅ | ❌ | Whisper |
