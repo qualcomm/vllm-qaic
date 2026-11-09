@@ -289,13 +289,11 @@ class QAICInferenceSession:
             if self._is_kv_cache_name(name) and name.endswith("_RetainedState"):
                 size = aic_to_np_dtype_mapping[binding.type]
                 base_name = name.replace("_RetainedState", "")
-                is_recurrent = "recurrent" in name
-                is_conv = "conv" in name
-
-                if is_recurrent or is_conv:
-                    dimspec = _full_state_dim_spec
-                else:
+                kv_kind = self._classify_kv_binding(name)
+                if kv_kind == KVCacheKind.FA:
                     dimspec = _full_attn_dim_spec
+                else:
+                    dimspec = _full_state_dim_spec
 
                 buffer_specs.append(
                     {
