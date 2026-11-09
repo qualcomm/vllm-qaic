@@ -1618,23 +1618,24 @@ def load_qaic_model(
                     "skip_lang" in qaic_compile_config.cfg
                     and qaic_compile_config.cfg["skip_lang"]
                 ):
-                    qpc_path = qpc_path.get("vision_qpc_path")
+                    _qpc = qpc_path.get("vision_qpc_path")
                 elif (
                     "prefill_only" in qaic_compile_config.cfg
                     and qaic_compile_config.cfg["prefill_only"]
                 ):
-                    qpc_path = qpc_path.get("lang_prefill_qpc_path")
+                    _qpc = qpc_path.get("lang_prefill_qpc_path")
                 elif (
                     "prefill_seq_len" in qaic_compile_config.cfg
                     and qaic_compile_config.cfg["prefill_seq_len"] == 1
                 ):
-                    qpc_path = qpc_path.get("lang_decode_qpc_path")
+                    _qpc = qpc_path.get("lang_decode_qpc_path")
                 else:
-                    qpc_path = qpc_path.get("lang_qpc_path")
-                if qpc_path is None:
+                    _qpc = qpc_path.get("lang_qpc_path")
+                if _qpc is None:
                     raise ValueError(
                         "Failed to extract QPC path from compilation result dictionary"
                     )
+                qpc_path = _qpc
         except Exception as e:
             logger.error("Failed to transform and compile the model! %s", e)
             raise e
