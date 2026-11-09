@@ -50,7 +50,7 @@ fi
 ../contrib/configure-release "${UCX_CONFIG_FLAGS[@]}"
 
 # build
-make -j$(nproc)
+make -j"$(nproc)"
 
 # install
 sudo make install

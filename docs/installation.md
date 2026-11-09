@@ -293,7 +293,7 @@ All `ARG`s are global (declared before the first `FROM`) and re-declared inside 
 | `VLLM_PR` | *(empty)* | Any target: vLLM PR number to fetch (takes priority over `VLLM_BRANCH` and `VLLM_VERSION`) |
 | `VLLM_BRANCH` | *(empty)* | Any target: vLLM branch to clone instead of the pinned `VLLM_VERSION` tag |
 | `VLLM_QAIC_VERSION` | `1.23` | vllm-qaic SDK/version tag (wheel tag/version suffix) |
-| `QEFF_BRANCH` | `release/v1.23.0` | QEfficient branch/tag to install |
+| `QEFF_BRANCH` | `release/v1.23.4` | QEfficient branch/tag to install |
 | `TORCH_VERSION_AOT` | `2.7.0+cpu` | CPU torch version for AOT |
 | `TORCHVISION_VERSION_AOT` | `0.22.0+cpu` | torchvision version for AOT |
 | `TRITON_CPU` | `0` | Set to `1` to build the optional triton-cpu backend (Numba/Triton rejection-sampler parity tests only; not needed for AOT SpD) |
@@ -341,7 +341,7 @@ docker build --target release -f docker/Dockerfile.pyt -t vllm-qaic-pyt:1.22 .
 
 # Release (override version / device arch)
 docker build --target release -f docker/Dockerfile.aot \
-  --build-arg VLLM_QAIC_GIT_REF=v1.23 --build-arg QEFF_BRANCH=release/v1.23.0 \
+  --build-arg VLLM_QAIC_GIT_REF=v1.23 --build-arg QEFF_BRANCH=release/v1.23.4 \
   -t vllm-qaic-aot:1.23 .
 docker build --target release -f docker/Dockerfile.pyt \
   --build-arg QAIC_DEVICE_ARCH=v81 -t vllm-qaic-pyt:1.22-v81 .
@@ -509,7 +509,7 @@ All version constants are defined in [`scripts/utility.sh`](../scripts/utility.s
 | `TORCH_VERSION_PYT` | `2.13.0+cpu` | CPU torch for PYT |
 | `TORCHVISION_VERSION_PYT` | `0.28.0+cpu` | torchvision for PYT (keep in sync with torch) |
 | `TORCHAUDIO_VERSION_PYT` | `2.11.0+cpu` | torchaudio for PYT (keep in sync with torch) |
-| `QEFF_BRANCH` | `release/v1.23.0` | QEfficient branch/tag |
+| `QEFF_BRANCH` | `release/v1.23.4` | QEfficient branch/tag |
 | `TORCH_QAIC_VERSION` | `0.1.0` | torch_qaic wheel version |
 | `VLLM_TARGET_DEVICE_AOT` | `empty` | vLLM build target for AOT mode |
 | `VLLM_TARGET_DEVICE_PYT` | `empty` | vLLM build target for PYT mode |
