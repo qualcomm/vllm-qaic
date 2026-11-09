@@ -26,7 +26,6 @@ def _run_multichat(
         async_scheduling=False,
         dg=dg,
         enable_prefix_caching=prefix_caching,
-        num_gpu_blocks_override=KV_CACHE_SZ if prefix_caching else None,
     ) as runner:
         # Warmup the device without seeding the prefix cache with text reused by
         # the measured turns.
@@ -92,7 +91,6 @@ def test_multichat_correctness(
     make_runner, device_group, decode_bsz, seq_len, ctx_len, sharegpt_prompts
 ):
     """Verify that multi-turn chat reuses prompt tokens with prefix caching."""
-    assert decode_bsz <= KV_CACHE_SZ, "kv cache size should >= decode_bsz"
     assert (seq_len + MAX_END_TOKENS) * ITERATIONS <= ctx_len
 
     cached_with, hit_rate_with = _run_multichat(
