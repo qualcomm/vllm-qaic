@@ -28,7 +28,6 @@ from .utils import (
 )
 
 try:
-    import torch_qaic
     import torch_qaic.qaic as qaic
 except ImportError:
     qaic = PlaceholderModule("qaic")
@@ -287,36 +286,70 @@ class QaicPlatform(Platform):
 
     @classmethod
     @functools.cache
-    def get_num_cores(cls, device_id: int = 0) -> int:
-        if not cls.is_aot:
-            try:
-                import qaicrt
-            except ImportError:
-                import platform
-                import sys
+    def _get_device_compute_info(cls, device_id: int = 0) -> tuple[int, int, int]:
+        """Return NSP cores, hardware threads/core, and HVX threads/core."""
+        import ctypes
+        import platform
 
-                sys.path.append(f"/opt/qti-aic/dev/lib/{platform.machine()}")
-                import qaicrt
+        class QAicAppsDeviceInfo(ctypes.Structure):
+            # Mirrors QAicAppsDeviceInfo in the installed QAicMLTypes.h.
+            _fields_ = [
+                ("deviceId", ctypes.c_int32),
+                ("deviceQID", ctypes.c_int32),
+                ("numCores", ctypes.c_uint32),
+                ("numThreads", ctypes.c_uint32),
+                ("totalDDRSizeKB", ctypes.c_uint64),
+                ("perCoreVTCMSizeByte", ctypes.c_uint64),
+                ("perCoreHVXThreadCount", ctypes.c_uint32),
+                ("hmxThreadId", ctypes.c_int64),
+                ("nspArchVersion", ctypes.c_int),
+                ("isSimDevice", ctypes.c_bool),
+                ("hasBF16", ctypes.c_bool),
+                ("pciBusID", ctypes.c_char * 13),
+                ("deviceName", ctypes.c_char * 128),
+            ]
 
-            qid = torch_qaic.qaic.get_device_info(device_id).qid_index
-            status, resources = qaicrt.Util().getResourceInfo(qid)
-            if status != qaicrt.QStatus.QS_SUCCESS:
-                raise RuntimeError(
-                    f"QAIC resource query failed for QID {qid}: {status}"
-                )
-            return resources.nspTotal
-        raise NotImplementedError(
-            "get_num_cores is only supported in eager (non-AOT) mode"
-        )
+        library = ctypes.CDLL(f"/opt/qti-aic/dev/lib/{platform.machine()}/libQAicML.so")
+        get_device_count = library.qaicGetDeviceCount
+        get_device_count.argtypes = [ctypes.POINTER(ctypes.c_uint32)]
+        get_device_count.restype = ctypes.c_uint
+        count = ctypes.c_uint32()
+        status = get_device_count(ctypes.byref(count))
+        if status != 0:
+            raise RuntimeError(
+                f"QAIC device count query failed with SDK status {status}"
+            )
+        if not 0 <= device_id < count.value:
+            raise RuntimeError(
+                f"QAIC device index {device_id} is unavailable; "
+                f"{count.value} device(s) are visible"
+            )
+
+        get_device_info = library.qaicAppsGetDeviceInfo
+        get_device_info.argtypes = [
+            ctypes.c_int32,
+            ctypes.POINTER(QAicAppsDeviceInfo),
+        ]
+        get_device_info.restype = ctypes.c_uint
+        info = QAicAppsDeviceInfo()
+        status = get_device_info(device_id, ctypes.byref(info))
+        if status != 0:
+            raise RuntimeError(
+                f"QAIC device info query failed for device index {device_id}: "
+                f"SDK status {status}"
+            )
+        return info.numCores, info.numThreads, info.perCoreHVXThreadCount
 
     @classmethod
-    @functools.cache
+    def get_num_cores(cls, device_id: int = 0) -> int:
+        num_cores, _, _ = cls._get_device_compute_info(device_id)
+        return num_cores
+
+    @classmethod
     def get_num_hvx_threads(cls, device_id: int = 0) -> int:
-        if not cls.is_aot:
-            return torch_qaic.qaic.get_device_info(device_id).per_core_hvx_thread_count
-        raise NotImplementedError(
-            "get_num_hvx_threads is only supported in eager (non-AOT) mode"
-        )
+        """Return the number of HVX threads per NSP core."""
+        _, _, num_hvx_threads = cls._get_device_compute_info(device_id)
+        return num_hvx_threads
 
     @classmethod
     def num_compute_units(cls, device_id: int = 0) -> int:
