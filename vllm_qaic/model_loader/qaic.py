@@ -471,7 +471,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
 
         if "block_table" in self.session.input_names:
             self.num_gpu_blocks_per_batch = self.get_num_kv_blocks_per_batch()
-            logger.info("Num GPU blocks per batch: %s", self.num_gpu_blocks_per_batch)
 
         e = time.perf_counter() - s
         logger.info("Successfully loaded QPC in %s secs", e)
