@@ -49,7 +49,7 @@ from qaic_disagg.kv_handoff.protocol import (
     QaicKvHandOffPutReq,
     QaicKvHandOffReqType,
 )
-
+from vllm_qaic.utils.qaic_utils import KVCacheKind
 from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -57,7 +57,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
 )
 from vllm_qaic.logger import init_logger
-from vllm_qaic.utils.qaic_utils import KVCacheKind
 from vllm.utils.network_utils import is_valid_ipv6_address, make_zmq_socket
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
@@ -259,11 +258,7 @@ class ShmBuffer:
             return tuple(kv_shape)
         # Recurrent and convolutional state tensors have rank 4, but their
         # third dimension is not a context dimension. Slice only FA caches.
-        if (
-            not use_full_kv_transfer
-            and kv_kind == KVCacheKind.FA
-            and len(kv_shape) > 3
-        ):
+        if not use_full_kv_transfer and kv_kind == KVCacheKind.FA and len(kv_shape) > 3:
             seq_len = min(num_tokens, kv_shape[2])
             return (1, kv_shape[1], seq_len) + kv_shape[3:]
         # Use batch size 1 and keep other dims intact.

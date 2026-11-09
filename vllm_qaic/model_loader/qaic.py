@@ -143,7 +143,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             # Encoder-decoder models have chunked prefill disabled by vllm,
             # but QAIC still requires a prefill sequence length.
             # For whisper, the prefill sequence length is fixed to 1.
-            self.prefill_seq_len: int = 1
+            self.prefill_seq_len = 1
         else:
             assert "prefill_seq_len" in override_qaic_config, (
                 "Prefill seq_len missing in override_qaic_config"
@@ -1618,24 +1618,24 @@ def load_qaic_model(
                     "skip_lang" in qaic_compile_config.cfg
                     and qaic_compile_config.cfg["skip_lang"]
                 ):
-                    selected_qpc_path = qpc_path.get("vision_qpc_path")
+                    compiled_qpc_path = qpc_path.get("vision_qpc_path")
                 elif (
                     "prefill_only" in qaic_compile_config.cfg
                     and qaic_compile_config.cfg["prefill_only"]
                 ):
-                    selected_qpc_path = qpc_path.get("lang_prefill_qpc_path")
+                    compiled_qpc_path = qpc_path.get("lang_prefill_qpc_path")
                 elif (
                     "prefill_seq_len" in qaic_compile_config.cfg
                     and qaic_compile_config.cfg["prefill_seq_len"] == 1
                 ):
-                    selected_qpc_path = qpc_path.get("lang_decode_qpc_path")
+                    compiled_qpc_path = qpc_path.get("lang_decode_qpc_path")
                 else:
-                    selected_qpc_path = qpc_path.get("lang_qpc_path")
-                if selected_qpc_path is None:
+                    compiled_qpc_path = qpc_path.get("lang_qpc_path")
+                if compiled_qpc_path is None:
                     raise ValueError(
                         "Failed to extract QPC path from compilation result dictionary"
                     )
-                qpc_path = str(selected_qpc_path)
+                qpc_path = compiled_qpc_path
         except Exception as e:
             logger.error("Failed to transform and compile the model! %s", e)
             raise e

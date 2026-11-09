@@ -12,6 +12,7 @@ from typing import Any
 import numpy as np
 
 from vllm_qaic.logger import init_logger
+from vllm_qaic.utils.qaic_utils import KVCacheKind
 
 try:
     import qaicrt
@@ -252,14 +253,14 @@ class QAICInferenceSession:
     def _classify_kv_binding(
         self,
         name: str,
-    ) -> str:
+    ) -> KVCacheKind:
         name = name.lower()
         if "conv" in name:
-            return "LA_CONV"
+            return KVCacheKind.LA_CONV
         elif "recurrent" in name:
-            return "LA_RECURRENT"
+            return KVCacheKind.LA_RECURRENT
         else:
-            return "FA"
+            return KVCacheKind.FA
 
     def _is_kv_cache_name(self, name: str) -> bool:
         if self.use_legacy_slicing_spec:
