@@ -525,6 +525,7 @@ def test_paged_attention_single_image(
         enable_mm_embeds=True,
         limit_mm_per_prompt={"image": 1},
         enable_prefix_caching=False,
+        enable_chunked_prefill=True,
         **mm_kwargs,
     ) as qllm_gen:
         outputs = qllm_gen.llm.generate(gen_inputs, sampling_params=sampling_params)
@@ -538,6 +539,7 @@ def test_paged_attention_single_image(
         enable_mm_embeds=True,
         limit_mm_per_prompt={"image": 1},
         enable_prefix_caching=True,
+        enable_chunked_prefill=True,
         **mm_kwargs,
     ) as qllm_gen_pa:
         outputs_pa = qllm_gen_pa.llm.generate(
