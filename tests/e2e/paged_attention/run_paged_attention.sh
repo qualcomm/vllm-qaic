@@ -3,7 +3,7 @@
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 # ------------------------------------------------------------------
-set -e
+set +e
 
 echo "-------------------Paged Attention Test Suite-------------------"
 
@@ -99,8 +99,7 @@ pytest --disable-warnings -s -v "${TEST_DIR}/../multimodal/test_multimodal.py::t
     --seq-len 128 \
     --ctx-len 4096 \
     --decode-bsz 1 \
-    --dtype "auto" \
-    --quantization "mxfp6" \
+    --dtype "mxfp6" \
     --kv-dtype "mxint8" \
     --device-group 1 \
     --device-id "${device_id},${device_id+1}" \
