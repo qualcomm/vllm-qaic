@@ -303,6 +303,9 @@ class QaicPlatform(Platform):
                     )  # reset to "no-op" default
                     cache_config.mamba_cache_mode = "none"  # reset to disabled
                     if vllm_config.kv_transfer_config:
+                        assert override_qaic_config.get("kv_block_size") is not None, (
+                            "kv_block_size must be set when prefix caching is enabled"
+                        )
                         cache_config.block_size = override_qaic_config.get(
                             "kv_block_size"
                         )
@@ -316,10 +319,6 @@ class QaicPlatform(Platform):
                             cache_config.block_size = min(
                                 128, model_config.max_model_len
                             )
-                elif (
-                    model_config.is_multimodal_model and model_config.is_encoder_decoder
-                ):
-                    cache_config.block_size = 100000
                 else:
                     cache_config.block_size = model_config.max_model_len  # ctx_len
             from vllm.utils.math_utils import cdiv

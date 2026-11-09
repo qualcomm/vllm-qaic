@@ -463,7 +463,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
 
         if "block_table" in self.session.input_names:
             self.num_gpu_blocks_per_batch = self.get_num_kv_blocks_per_batch()
-            logger.info("Num GPU blocks per batch: %s", self.num_gpu_blocks_per_batch)
             # Set block table to INT64_MAX
             self.decode_batch_inputs["block_table"] = np.full(
                 (self.decode_bsz, self.num_gpu_blocks_per_batch),
