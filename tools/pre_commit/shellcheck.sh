@@ -10,7 +10,8 @@ set -euo pipefail
 scversion="stable"
 
 if [ -d "shellcheck-${scversion}" ]; then
-    export PATH="$PATH:$(pwd)/shellcheck-${scversion}"
+    scdir="$(pwd)/shellcheck-${scversion}"
+    export PATH="$PATH:${scdir}"
 fi
 
 if ! [ -x "$(command -v shellcheck)" ]; then
@@ -21,7 +22,8 @@ if ! [ -x "$(command -v shellcheck)" ]; then
 
     # automatic local install if linux x86_64
     wget -qO- "https://github.com/koalaman/shellcheck/releases/download/${scversion?}/shellcheck-${scversion?}.linux.x86_64.tar.xz" | tar -xJv
-    export PATH="$PATH:$(pwd)/shellcheck-${scversion}"
+    scdir="$(pwd)/shellcheck-${scversion}"
+    export PATH="$PATH:${scdir}"
 fi
 
 # SC1091: shellcheck cannot follow sourced files (e.g. `source ./utility.sh`)

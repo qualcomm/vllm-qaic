@@ -37,7 +37,7 @@
 #   # Release (override version):
 #   docker build --target release \
 #     --build-arg VLLM_QAIC_GIT_REF=v1.23 \
-#     --build-arg QEFF_BRANCH=release/v1.23.0 \
+#     --build-arg QEFF_BRANCH=release/v1.23.4 \
 #     -t vllm-qaic-aot:1.23 .
 #
 #   # CI (current checkout):
@@ -111,7 +111,7 @@ ARG RUST_IMAGE="docker.io/library/rust:${RUST_VERSION}-slim"
 # ---------------------------------------------------------------------------
 ARG VLLM_VERSION="0.23.0"
 ARG VLLM_QAIC_VERSION="1.23"
-ARG QEFF_BRANCH="release/v1.23.0"
+ARG QEFF_BRANCH="release/v1.23.4"
 ARG TORCH_VERSION_AOT="2.7.0+cpu"
 ARG TORCHVISION_VERSION_AOT="0.22.0+cpu"
 ARG VLLM_TARGET_DEVICE_AOT="empty"
@@ -241,7 +241,7 @@ ARG VENV="/opt/venv-aot"
 ARG PYTHON_VERSION="3.12"
 ARG VLLM_VERSION="0.23.0"
 ARG VLLM_QAIC_VERSION="1.23"
-ARG QEFF_BRANCH="release/v1.23.0"
+ARG QEFF_BRANCH="release/v1.23.4"
 ARG TORCH_VERSION_AOT="2.7.0+cpu"
 ARG TORCHVISION_VERSION_AOT="0.22.0+cpu"
 ARG VLLM_TARGET_DEVICE_AOT="empty"
@@ -473,7 +473,7 @@ FROM aot-base AS dev-builder
 ARG VENV="/opt/venv-aot"
 ARG VLLM_VERSION="0.23.0"
 ARG VLLM_QAIC_VERSION="1.23"
-ARG QEFF_BRANCH="release/v1.23.0"
+ARG QEFF_BRANCH="release/v1.23.4"
 ARG QEFF_PR=""
 ARG VLLM_TARGET_DEVICE_AOT="empty"
 ARG VLLM_PR=""

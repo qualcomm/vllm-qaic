@@ -22,6 +22,12 @@
 #       For QAIC in AOT mode, the torch device should be `cpu` instead of `qaic`.
 #     How:
 #       Extend DeviceConfig and update __post_init__.
+#    3. vllm.config.vllm.VllmConfig
+#     Why:
+#       QAIC prefill runs its pipeline stages on-device, so vLLM sees PP=1 and
+#       limits the batch queue to 2, leaving most of the stages idle.
+#     How:
+#       Extend VllmConfig and update max_concurrent_batches.
 #
 # ** 2. File: patch_parallel_state.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
