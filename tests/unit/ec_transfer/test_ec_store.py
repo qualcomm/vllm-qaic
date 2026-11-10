@@ -127,11 +127,6 @@ def test_duplicate_add_keeps_existing_and_releases_new(make_entry):
     assert not _segment_exists(second_name)
 
 
-@pytest.mark.xfail(
-    reason="QaicECStore.add() subtracts the rejected duplicate's bytes from "
-    "_total_bytes even though they were never added",
-    strict=True,
-)
 def test_duplicate_add_keeps_byte_accounting(make_entry):
     store = _store(10 * ENTRY_BYTES)
     store.add("h", make_entry()[0])
