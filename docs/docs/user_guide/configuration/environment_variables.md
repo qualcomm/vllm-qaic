@@ -26,6 +26,30 @@ QAIC-specific environment variables that control plugin behavior.
 | `VLLM_TORCH_PROFILER_DIR` | Output directory for profiling data. Enables `torch_qaic.profile.ProfileForwardWithSampling` device-level latency tracing in the QAIC model runner. |
 | `LD_PRELOAD` | If set to include `libiomp5.so`, triggers automatic OpenMP tuning for CPU-bound SpD proposers in AOT mode — see [Speculative Decoding](../features/speculative_decoding.md) |
 
+## torch.compile (PYT Mode)
+
+Unless `enforce_eager=True`, PYT mode runs the model with `torch.compile`. The QAIC
+platform maps vLLM's default compilation mode to `DYNAMO_TRACE_ONCE` with the `inductor`
+backend (similar to the vLLM CPU platform), disables CUDA graphs, keeps QAIC custom ops
+enabled and runs attention as an opaque custom op. The inductor path is selected by
+torch_qaic:
+
+| Variable | Description |
+|----------|-------------|
+| `QAIC_INDUCTOR_LEVEL` | `0` (default): `qaic-inference` fast path, `1`: inductor + Triton, `2`: `qaic-graphs`. Read when torch_qaic is imported, so it **must be exported before launching vLLM**. |
+| `QAIC_INDUCTOR_EXTRA_FALLBACK_OPS` | Additional aten ops to run as eager fallbacks with `QAIC_INDUCTOR_LEVEL=1`. Must be exported before launch. |
+| `TORCHINDUCTOR_COMPILE_THREADS` | Defaults to `1` (set by the platform when compiling). |
+| `VLLM_USE_AOT_COMPILE` | Defaults to `0` (set by the platform when compiling); torch_qaic backends do not produce serializable artifacts. |
+
+```bash
+# Inductor + Triton path
+export QAIC_INDUCTOR_LEVEL=1
+vllm serve <model>
+
+# Pure eager mode
+vllm serve <model> --enforce-eager
+```
+
 ## Usage Examples
 
 ```bash
