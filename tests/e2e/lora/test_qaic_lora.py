@@ -97,6 +97,7 @@ def test_llm_lora_offline_init_caching(
     ctx_len,
     decode_bsz,
     dtype,
+    model_dtype,
     kv_dtype,
 ):
     """Test offline LoRA initialization and QPC caching."""
@@ -110,6 +111,7 @@ def test_llm_lora_offline_init_caching(
         max_num_seqs=decode_bsz,
         max_model_len=ctx_len,
         long_prefill_token_threshold=seq_len,
+        dtype=model_dtype,
         quantization=dtype,
         kv_cache_dtype=kv_dtype,
         gpu_memory_utilization=1.0,
@@ -175,6 +177,7 @@ def test_llm_lora_online_openai_init(
     ctx_len,
     decode_bsz,
     dtype,
+    model_dtype,
     kv_dtype,
 ):
     """Test online LoRA initialization with OpenAI API server."""
@@ -194,6 +197,7 @@ def test_llm_lora_online_openai_init(
         dtype,
         kv_dtype,
         additional_config,
+        model_dtype=model_dtype,
         timeout=SERVER_STARTUP_TIMEOUT,
         enable_lora=True,
         max_loras=2,

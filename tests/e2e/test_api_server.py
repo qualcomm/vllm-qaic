@@ -17,6 +17,7 @@ def api_server(
     ctx_len,
     decode_bsz,
     dtype,
+    model_dtype,
     kv_dtype,
     device_group,
     override_qaic_config,
@@ -38,6 +39,7 @@ def api_server(
         dtype,
         kv_dtype,
         additional_config,
+        model_dtype=model_dtype,
     ) as server:
         yield server.base_url
 
