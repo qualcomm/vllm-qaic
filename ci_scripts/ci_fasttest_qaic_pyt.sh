@@ -24,6 +24,7 @@ fi
 
 HOST="localhost"
 TIMEOUT="1800"
+MODEL_DTYPE="auto"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -33,6 +34,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --device-ids)
             DEVICE_IDS_ARG="$2"
+            shift 2
+            ;;
+        --model-dtype)
+            MODEL_DTYPE="$2"
             shift 2
             ;;
         --timeout)
@@ -72,6 +77,7 @@ DEVICE_POOL_SIZE=$(($(tr -cd ',' <<< "$DEVICE_IDS" | wc -c) + 1))
 python3 "$SCRIPT_DIR/collect_jobs.py" tests/e2e --output "$JOBS_FILE" -- \
     --ignore=tests/e2e/lora/test_qaic_lora.py \
     --device-pool-size "$DEVICE_POOL_SIZE" \
+    --model-dtype "$MODEL_DTYPE" \
     --host "$HOST"
 COLLECT_STATUS=$?
 if [[ $COLLECT_STATUS -ne 0 ]]; then

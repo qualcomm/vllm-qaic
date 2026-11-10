@@ -153,6 +153,13 @@ def pytest_addoption(parser):
     parser.addoption("--decode-bsz", type=int, default=4)
     parser.addoption("--dtype", type=str, default=None)
     parser.addoption("--kv-dtype", type=str, default="auto")
+    parser.addoption(
+        "--model-dtype",
+        type=str,
+        default="auto",
+        help="Model dtype (vLLM --dtype, e.g. float16). Not the quantization "
+        "setting: that is the 'dtype' marker key / quantization fixture.",
+    )
     parser.addoption("--dataset", type=str, default=None)
     parser.addoption(
         "--device-id",
@@ -295,6 +302,13 @@ def dtype(request, pytestconfig):
 
 
 @pytest.fixture(scope="function")
+def model_dtype(request, pytestconfig):
+    return _resolve_qaic_test_config_value(
+        request, pytestconfig, "model_dtype", default="auto"
+    )
+
+
+@pytest.fixture(scope="function")
 def quantization(request, pytestconfig):
     return _resolve_qaic_test_config_value(request, pytestconfig, "quantization")
 
@@ -391,6 +405,7 @@ def make_runner(
     ctx_len,
     seq_len,
     dtype,
+    model_dtype,
     kv_dtype,
     override_qaic_config,
 ):
@@ -422,6 +437,7 @@ def make_runner(
                 if long_prefill_token_threshold is None
                 else long_prefill_token_threshold
             ),
+            dtype=model_dtype,
             quantization=quantization,
             kv_cache_dtype=kv_cache_dtype,
             additional_config=additional_config,
@@ -502,6 +518,9 @@ def qaic_model(
     )
     ctx_len = _resolve_qaic_test_config_value(request, pytestconfig, "ctx_len")
     dtype = _resolve_qaic_test_config_value(request, pytestconfig, "dtype")
+    model_dtype = _resolve_qaic_test_config_value(
+        request, pytestconfig, "model_dtype", default="auto"
+    )
     kv_dtype = _resolve_qaic_test_config_value(
         request, pytestconfig, "kv_dtype", default="auto"
     )
@@ -557,6 +576,7 @@ def qaic_model(
             max_num_seqs=decode_bsz,
             max_model_len=ctx_len,
             long_prefill_token_threshold=seq_len,
+            dtype=model_dtype,
             quantization=dtype,
             kv_cache_dtype=kv_dtype,
             enable_prefix_caching=False,
@@ -573,7 +593,7 @@ def qaic_model(
 
 
 @pytest.fixture
-def qaic_runner_factory(vllm_runner, device_pool_ids):
+def qaic_runner_factory(vllm_runner, device_pool_ids, model_dtype):
     """Build a QAIC VllmRunner from an explicit config, acquiring/releasing its
     device slice around a `with` block. Unlike `qaic_model` (one config off the
     qaic_test_config marker), this lets a single test stand up several models in
@@ -612,6 +632,7 @@ def qaic_runner_factory(vllm_runner, device_pool_ids):
                 max_num_seqs=decode_bsz,
                 max_model_len=ctx_len,
                 long_prefill_token_threshold=seq_len,
+                dtype=model_dtype,
                 quantization=quantization,
                 kv_cache_dtype=kv_dtype,
                 enable_prefix_caching=False,
@@ -710,6 +731,7 @@ class ServerRunner:
         lora_modules: list[str] | None = None,
         max_num_batched_tokens: int | None = None,
         trust_remote_code: bool = False,
+        model_dtype: str | None = None,
     ):
         self.base_url = f"http://{host}:{port}"
 
@@ -725,6 +747,8 @@ class ServerRunner:
         ]
         if dtype is not None:
             cmd += ["--quantization", dtype]
+        if model_dtype is not None:
+            cmd += ["--dtype", model_dtype]
         cmd += [
             "--kv-cache-dtype",
             kv_dtype,
