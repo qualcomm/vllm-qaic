@@ -35,16 +35,18 @@ def _num_devices(representative, config) -> int:
     """Device requirement for a scope. Two mutually-exclusive shapes exist:
     - `device_groups`-style tests: num_device_groups * device_group_size.
     - disaggregated-serving tests (`disagg_server`/`_disagg_test_config`):
+      num_encode_workers*encode_device_group_size +
       num_prefill_workers*prefill_device_group_size +
       num_decode_workers*decode_device_group_size.
     """
     marker = representative.get_closest_marker(_MARKER)
     kwargs = marker.kwargs if marker is not None else {}
-    if "num_prefill_workers" in kwargs or "num_decode_workers" in kwargs:
-        return kwargs.get("num_prefill_workers", 0) * kwargs.get(
-            "prefill_device_group_size", 1
-        ) + kwargs.get("num_decode_workers", 0) * kwargs.get(
-            "decode_device_group_size", 1
+    roles = ("encode", "prefill", "decode")
+    if any(f"num_{role}_workers" in kwargs for role in roles):
+        return sum(
+            kwargs.get(f"num_{role}_workers", 0)
+            * kwargs.get(f"{role}_device_group_size", 1)
+            for role in roles
         )
     num_device_groups = _resolve(representative, config, "num_device_groups", default=1)
     device_group_size = _resolve(representative, config, "device_group_size", default=1)
