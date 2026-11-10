@@ -12,7 +12,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from queue import Queue
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -128,8 +128,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 self.is_qaic_pooler = True
                 self.normalize = bool(override_qaic_config.get("normalize", False))
                 self.softmax = bool(override_qaic_config.get("softmax", False))
-            # upstream vllm v0.23 removed "score" as a PoolingTask; cross-encoder
-            # scoring maps to "classify" instead.
+            # Upstream vLLM v0.23 removed "score" as a PoolingTask;
+            # cross-encoder scoring maps to "classify" instead.
             _raw_task: str | None = override_qaic_config.get("task", None)
             self.task = "classify" if _raw_task == "score" else _raw_task
 
@@ -137,20 +137,23 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
 
         self.config = config
         self.vocab_size = config.get_text_config().vocab_size
-        # `override_qaic_config["prefill_seq_len"]` defines the prefill chunk length
+        # `override_qaic_config["prefill_seq_len"]` defines the prefill chunk length.
+        self.prefill_seq_len: int
         if self.config.model_type == "whisper":
             # Encoder-decoder models have chunked prefill disabled by vllm,
             # but QAIC still requires a prefill sequence length.
             # For whisper, the prefill sequence length is fixed to 1.
-            self.prefill_seq_len: int = 1
+            self.prefill_seq_len = 1
         else:
             assert "prefill_seq_len" in override_qaic_config, (
                 "Prefill seq_len missing in override_qaic_config"
             )
-            self.prefill_seq_len = (  # type: ignore[assignment]
-                override_qaic_config["prefill_seq_len"]  # type: ignore[assignment]
-                if isinstance(override_qaic_config["prefill_seq_len"], (list, tuple))
-                else int(override_qaic_config["prefill_seq_len"])
+            prefill_seq_len = override_qaic_config["prefill_seq_len"]
+            self.prefill_seq_len = cast(
+                int,
+                prefill_seq_len
+                if isinstance(prefill_seq_len, (list, tuple))
+                else int(prefill_seq_len),
             )
 
         self.ctx_len = model_config.max_model_len
@@ -544,7 +547,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         return allowed_seqlens
 
     @property
-    def kv_cache_info(self) -> list[tuple]:  # [(kv_shape, kv_type, kv_size)]
+    def kv_cache_info(self) -> list[tuple]:
+        # [(kv_shape, kv_type, kv_size, kv_kind)]
         return self.session.kv_cache_info
 
     def get_io_shape_and_dtype(
@@ -704,7 +708,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     if comp_ctx_val is not None:
                         chunk_inputs["comp_ctx_lengths"] = comp_ctx_val
                     # TODO: Workaround for CCL—LRT requires a buffer matching
-                    # logits shape
+                    # logits shape.
                     if logits is not None:
                         chunk_inputs["logits"] = logits[index : index + 1]
 
@@ -854,7 +858,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     ]
 
                 if "num_logits_to_keep" in self.session.input_names:
-                    # SpD target QPC: prefill keeps 1 logit (last token position).
+                    # SpD target QPC: prefill keeps 1 logit (last token
+                    # position).
                     chunk_inputs["num_logits_to_keep"] = np.array([[1]], dtype=np.int64)
 
                 # DFlash: bind per-chunk hidden-states output buffers for the DLM.
@@ -1041,6 +1046,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
 
         Called either immediately (sync path) or after complete_inf (async path).
         """
+        assert self.encode_num_logits_buffer is not None
         output = self.encode_num_logits_buffer
         assert output is not None, "encode buffer not initialized"
         output_array = output[output_key][: len(prefill_cum_sum)]
@@ -1118,6 +1124,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         assert encode_num_logits_buffer is not None, (
             "run_encode requires an output buffer"
         )
+        assert output_key is not None
         if (
             self.encode_num_logits_buffer is None
             or encode_num_logits_buffer[output_key].shape
@@ -1125,6 +1132,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         ):
             self.encode_num_logits_buffer = encode_num_logits_buffer
 
+        assert self.encode_num_logits_buffer is not None
         encode_exec_obj_idx = self.session.np_run(
             {**qpc_inputs, **self.encode_num_logits_buffer}
         )
@@ -1134,6 +1142,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         else:
             self.encode_execObj_idx = encode_exec_obj_idx
 
+        assert self.encode_num_logits_buffer is not None
         return self.encode_num_logits_buffer
 
     def disagg_dummy_run(self):
@@ -1272,7 +1281,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     if self.is_multimodal_model and self.default_mm_kwargs:
                         prefill_inputs.update(self.default_mm_kwargs)
                     KvCache_buff = []
-                    for kv_shape, kv_type, _ in self.kv_cache_info:
+                    for kv_shape, kv_type, _, _ in self.kv_cache_info:
                         _kv_shape = (1,) + kv_shape[1:]
                         KvCache_buff.append(np.empty(shape=_kv_shape, dtype=kv_type))
                     if self.comp_ctx_lengths_prefill is not None:
@@ -1291,7 +1300,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             if self.session.cluster_id == "decode":
                 logger.info("Running dummy decode run with bsz %s", self.decode_bsz)
                 KvCache_buff = []
-                for kv_shape, kv_type, _ in self.kv_cache_info:
+                for kv_shape, kv_type, _, _ in self.kv_cache_info:
                     KvCache_buff.append(np.empty(shape=kv_shape, dtype=kv_type))
 
                 decode_logits_shape = (
@@ -2167,8 +2176,8 @@ def _get_qaic_compile_config(
             cfg["prefill_seq_len"] = 1
 
         if kv_offload:
-            # Dual QPC approach: select which QPC to load based on which path
-            # is skipped.
+            # Dual QPC approach: select which QPC to load based on which
+            # path is skipped.
             skip_lang = cfg.get("skip_lang", False)
             skip_vision = cfg.get("skip_vision", False)
             if not skip_lang and not skip_vision:
