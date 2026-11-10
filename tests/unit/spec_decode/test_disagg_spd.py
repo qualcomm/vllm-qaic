@@ -125,6 +125,34 @@ def test_constructor_rejects_unsupported_speculative_method(runner_config):
         QaicModelRunnerAoT(config, torch.device("cpu"))
 
 
+def test_dflash_draft_config_does_not_inherit_target_handoff(runner_config):
+    config = runner_config("dflash", "kv_consumer")
+    config.additional_config = {
+        "override_qaic_config": {"compile_only": True},
+        "draft_override_qaic_config": {"device_group": [8, 9, 10, 11]},
+    }
+    init_patch, postprocess_patch = _patch_runner_init()
+    with (
+        init_patch,
+        postprocess_patch,
+        patch(
+            "vllm.config.utils.replace",
+            side_effect=lambda value, **kw: SimpleNamespace(**{**vars(value), **kw}),
+        ) as replace,
+        patch(
+            "vllm_qaic.spec_decode.dflash_draft_model.QaicDFlashProposer"
+        ) as proposer,
+    ):
+        QaicModelRunnerAoT(config, torch.device("cpu"))
+    assert replace.call_args_list[0].kwargs["kv_transfer_config"] is None
+    draft_config = proposer.call_args.args[0]
+    assert draft_config.kv_transfer_config is None
+    assert config.kv_transfer_config.kv_role == "kv_consumer"
+    assert draft_config.scheduler_config is not config.scheduler_config
+    assert draft_config.additional_config["override_qaic_config"]["compile_only"]
+    assert "compile_only" not in config.additional_config["draft_override_qaic_config"]
+
+
 @pytest.mark.parametrize(
     ("num_decodes", "scheduled_tokens", "expected"),
     [
