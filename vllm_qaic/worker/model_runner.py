@@ -977,9 +977,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
         if (
             self.use_async_scheduling
             and self._pending_output is not None
-            and (
-                not self.is_kv_producer or self.model.has_no_available_prefill_exec_objs
-            )
+            and not self.is_kv_producer
         ):
             # Drain the previous batch's exec object. For kv producer drain only if
             # there are no available exec objs.
