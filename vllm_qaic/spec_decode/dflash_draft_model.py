@@ -104,38 +104,29 @@ class QaicDFlashProposer:
         self._req_state: dict[str, _ReqState] = {}
         self._prefill_pending: list[dict] = []
 
+    def _validate_target_width(self, width: int) -> None:
+        if width < self.block_size or width % self.block_size:
+            raise ValueError("DLM target width must be a positive block_size multiple.")
+        if self.tlm_prefill_seq_len <= 0 or self.tlm_prefill_seq_len % width:
+            raise ValueError("DLM target width must divide the TLM prefill length.")
+
     def load_model(self) -> None:
-        override = (self._draft_vllm_config.additional_config or {}).get(
-            "override_qaic_config"
-        ) or {}
-        requested_target_seq_len = (override.get("qaic_config") or {}).get(
-            "dflash_target_seq_len"
-        )
-        target_seq_len = (
-            self.tlm_prefill_seq_len
-            if requested_target_seq_len is None
-            else requested_target_seq_len
-        )
-        if (
-            type(target_seq_len) is not int
-            or target_seq_len < self.block_size
-            or target_seq_len % self.block_size
-            or self.tlm_prefill_seq_len <= 0
-            or self.tlm_prefill_seq_len % target_seq_len
-        ):
-            raise ValueError(
-                "DFlash DLM target length must be a multiple of block_size "
-                "and divide the TLM prefill length."
-            )
+        additional = self._draft_vllm_config.additional_config or {}
+        override = additional.get("override_qaic_config") or {}
+        qaic_config = dict(override.get("qaic_config") or {})
+        requested_width = qaic_config.get("dflash_target_seq_len")
+        width = self.tlm_prefill_seq_len if requested_width is None else requested_width
+        if type(width) is not int:
+            raise ValueError("DLM target width must be an integer.")
+        self._validate_target_width(width)
         # Use the TLM width, not the draft's block-sized noise specialization.
         # Keep an omitted override compatible with legacy block-width QPCs.
-        qaic_config = dict(override.get("qaic_config") or {})
-        if target_seq_len != self.block_size:
-            qaic_config["dflash_target_seq_len"] = target_seq_len
+        if width != self.block_size:
+            qaic_config["dflash_target_seq_len"] = width
         else:
             qaic_config.pop("dflash_target_seq_len", None)
         self._draft_vllm_config.additional_config = {
-            **(self._draft_vllm_config.additional_config or {}),
+            **additional,
             "override_qaic_config": {**override, "qaic_config": qaic_config},
         }
         logger.info(
@@ -149,10 +140,8 @@ class QaicDFlashProposer:
         )
         self.model = load_qaic_model(self._draft_vllm_config, "draft")
         cache_shapes = [info[0] for info in self.model.kv_cache_info]
-        if any(len(s) != 4 or s[2] <= 0 for s in cache_shapes):
-            raise ValueError(
-                "DFlash DLM QPC requires rank-4 KV caches with positive capacity."
-            )
+        if any(len(s) != 4 for s in cache_shapes):
+            raise ValueError("DFlash DLM QPC requires rank-4 KV caches.")
         # Standalone QPCs can keep KV internal, with no transfer bindings.
         capacity = (
             min(s[2] for s in cache_shapes)
@@ -174,28 +163,13 @@ class QaicDFlashProposer:
             or position_info[0] != target_shape[:2]
         ):
             raise ValueError("DFlash DLM QPC target shapes do not match the model.")
-        self.target_seq_len = target_shape[1]
-        if (
-            requested_target_seq_len is not None
-            and requested_target_seq_len != self.target_seq_len
-        ):
-            raise ValueError(
-                f"DFlash DLM QPC target length is {self.target_seq_len}, but "
-                f"{requested_target_seq_len} was requested. Supply a matching QPC "
-                "or omit the DLM QPC path to compile one."
-            )
-        if (
-            self.target_seq_len < self.block_size
-            or self.target_seq_len % self.block_size
-            or self.tlm_prefill_seq_len % self.target_seq_len
-        ):
-            raise ValueError(
-                "DFlash DLM target length must be a multiple of block_size "
-                "and divide the TLM prefill length."
-            )
-        self.num_sub_blocks = self.tlm_prefill_seq_len // self.target_seq_len
+        width = self.target_seq_len = target_shape[1]
+        if requested_width is not None and requested_width != width:
+            raise ValueError(f"DLM width mismatch: {width} != {requested_width}.")
+        self._validate_target_width(width)
+        self.num_sub_blocks = self.tlm_prefill_seq_len // width
         self._dlm_position_ids_target = np.full(
-            (self.decode_bsz, self.target_seq_len), -1, dtype=np.int64
+            (self.decode_bsz, width), -1, dtype=np.int64
         )
         self._dlm_target_hidden = np.zeros(target_shape, dtype=np.float32)
         logger.info(

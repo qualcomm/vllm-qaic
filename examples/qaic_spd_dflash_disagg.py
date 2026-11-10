@@ -2,7 +2,7 @@
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 # ------------------------------------------------------------------
-"""Non-streaming DFlash disaggregation for Qwen3 and Llama text models.
+"""Non-streaming DFlash disaggregation for compatible dense text models.
 
 Requires qaic_disagg with speculative decoding support. Prompt features travel
 with the completed target KV handoff; DLM prefill runs on the decode side.
@@ -50,9 +50,7 @@ def main() -> None:
         getattr(config, "block_size", None) or config.dflash_config["block_size"]
     )
     if args.prefill_seq_len < block_size or args.prefill_seq_len % block_size:
-        parser.error(
-            "--prefill-seq-len must be a positive multiple of the draft block size."
-        )
+        parser.error("Prefill length must be a positive block_size multiple.")
     if args.decode_qpc and not args.dlm_qpc:
         parser.error("Pass --dlm-qpc with --decode-qpc, or omit both to compile.")
     groups = [
@@ -88,51 +86,36 @@ def main() -> None:
         "model": args.draft_model,
         "num_speculative_tokens": block_size - 1,
     }
-    command = [
-        sys.executable,
-        "-m",
-        "qaic_disagg",
-        "--model",
-        args.model,
-        "--prefill-port",
-        str(args.prefill_port),
-        "--decode-port",
-        str(args.decode_port),
-        "--prefill-device-group",
-        args.prefill_devices,
-        "--decode-device-group",
-        args.decode_devices,
-        "--prefill-max-num-seqs",
-        str(args.prefill_max_num_seqs),
-        "--decode-max-num-seqs",
-        str(args.decode_max_num_seqs),
-        "--prefill-pipeline-parallel-size",
-        str(args.prefill_pipeline_parallel_size),
-        "--max-model-len",
-        str(args.ctx_len),
-        "--prefill-max-num-batched-tokens",
-        str(args.prefill_max_num_seqs * (args.prefill_seq_len + block_size)),
-        "--max-num-batched-tokens",
-        str(
-            max(args.prefill_max_num_seqs, args.decode_max_num_seqs)
-            * (args.prefill_seq_len + block_size)
-        ),
-        "--no-async-scheduling",
-        "--no-enable-prefix-caching",
-        *(["--quantization", "mxfp6"] if args.mxfp6_matmul else []),
-        "--kv-cache-dtype",
-        "mxint8" if args.mxint8_kv_cache else "auto",
-        "--prefill-override-qaic-config",
-        json.dumps(prefill),
-        "--decode-override-qaic-config",
-        json.dumps(decode),
+    tokens_per_request = args.prefill_seq_len + block_size
+    max_batch = max(args.prefill_max_num_seqs, args.decode_max_num_seqs)
+    options = {
+        "model": args.model,
+        "prefill-port": args.prefill_port,
+        "decode-port": args.decode_port,
+        "prefill-device-group": args.prefill_devices,
+        "decode-device-group": args.decode_devices,
+        "prefill-max-num-seqs": args.prefill_max_num_seqs,
+        "decode-max-num-seqs": args.decode_max_num_seqs,
+        "prefill-pipeline-parallel-size": args.prefill_pipeline_parallel_size,
+        "max-model-len": args.ctx_len,
+        "prefill-max-num-batched-tokens": args.prefill_max_num_seqs
+        * tokens_per_request,
+        "max-num-batched-tokens": max_batch * tokens_per_request,
+        "quantization": "mxfp6" if args.mxfp6_matmul else None,
+        "kv-cache-dtype": "mxint8" if args.mxint8_kv_cache else "auto",
+        "prefill-override-qaic-config": json.dumps(prefill),
+        "decode-override-qaic-config": json.dumps(decode),
         # Prefill exports features; only decode loads the draft on its own devices.
-        "--speculative-config",
-        json.dumps(speculative),
-        "--decode-speculative-config",
-        json.dumps({**speculative, "draft_override_qaic_config": draft}),
-        *launcher_args,
-    ]
+        "speculative-config": json.dumps(speculative),
+        "decode-speculative-config": json.dumps(
+            {**speculative, "draft_override_qaic_config": draft}
+        ),
+    }
+    command = [sys.executable, "-m", "qaic_disagg"]
+    for name, value in options.items():
+        if value is not None:
+            command.extend((f"--{name}", str(value)))
+    command += ["--no-async-scheduling", "--no-enable-prefix-caching", *launcher_args]
     os.execv(sys.executable, command)
 
 

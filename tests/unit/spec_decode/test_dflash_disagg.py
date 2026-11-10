@@ -257,39 +257,136 @@ def test_prompt_features_are_not_bound_as_hardware_kv(dflash):
         assert buffers[0][-1] is features
 
 
-@pytest.mark.parametrize(
-    "change,message",
-    [
-        ({"model_type": "qwen3_moe"}, "text-only"),
-        ({"model_type": "qwen3_5"}, "text-only"),
-        ({"model_type": "gemma4"}, "text-only"),
-        ({"multimodal": True}, "text-only"),
-        ({"async_scheduling": True}, "synchronous"),
-        ({"connector": "QaicLMCacheConnectorV1"}, "QaicConnector"),
-        ({"role": "kv_both"}, "producer/consumer"),
-        ({"prefix_caching": True}, "prefix caching"),
-    ],
-)
-def test_disaggregation_rejects_unsupported_configuration(change, message):
-    config = SimpleNamespace(
-        speculative_config=SimpleNamespace(method="dflash"),
+@pytest.fixture
+def platform_config(monkeypatch):
+    monkeypatch.setattr(QaicPlatform, "is_aot", True)
+    return SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            method="dflash", max_num_new_slots_for_drafting=16
+        ),
         model_config=SimpleNamespace(
-            hf_config=SimpleNamespace(model_type=change.get("model_type", "qwen3")),
-            is_multimodal_model=change.get("multimodal", False),
+            hf_config=SimpleNamespace(model_type="future_dense"),
+            is_multimodal_model=False,
+            is_moe=False,
+            is_hybrid=False,
+            is_attention_free=False,
+            enforce_eager=False,
+            max_model_len=4096,
+            runner_type="generate",
         ),
         kv_transfer_config=SimpleNamespace(
-            kv_connector=change.get("connector", "QaicConnector"),
-            kv_role=change.get("role", "kv_producer"),
+            kv_connector="QaicConnector", kv_role="kv_producer"
         ),
         scheduler_config=SimpleNamespace(
-            async_scheduling=change.get("async_scheduling", False)
+            async_scheduling=False,
+            enable_chunked_prefill=True,
+            max_num_seqs=4,
+            max_num_batched_tokens=512,
+            long_prefill_token_threshold=128,
+            max_num_scheduled_tokens=999,
         ),
-        cache_config=SimpleNamespace(
-            enable_prefix_caching=change.get("prefix_caching", False)
-        ),
+        cache_config=SimpleNamespace(enable_prefix_caching=False),
+        device_config=SimpleNamespace(device_type="cpu"),
+        parallel_config=SimpleNamespace(worker_cls="auto", world_size=1),
+        additional_config={
+            "override_qaic_config": {"prefill_seq_len": 128, "stages": 2}
+        },
+        lora_config=None,
+        compilation_config=None,
     )
+
+
+@pytest.mark.parametrize(
+    "section,field,value,message",
+    [
+        ("model_config", "is_moe", True, "dense attention"),
+        ("model_config", "is_hybrid", True, "dense attention"),
+        ("model_config", "is_attention_free", True, "dense attention"),
+        ("scheduler_config", "async_scheduling", True, "synchronous"),
+        (
+            "kv_transfer_config",
+            "kv_connector",
+            "QaicLMCacheConnectorV1",
+            "QaicConnector",
+        ),
+        ("kv_transfer_config", "kv_role", "kv_both", "producer or consumer"),
+    ],
+)
+def test_disaggregation_rejects_unsupported_configuration(
+    platform_config, section, field, value, message
+):
+    setattr(getattr(platform_config, section), field, value)
     with pytest.raises(ValueError, match=message):
-        QaicPlatform.check_and_update_config(config)
+        QaicPlatform.check_and_update_config(platform_config)
+
+
+@pytest.mark.parametrize(
+    "key,value,message",
+    [
+        ("ccl_enabled", True, "CCL"),
+        ("comp_ctx_lengths_prefill", [128], "CCL"),
+        ("comp_ctx_lengths_decode", [128], "CCL"),
+        ("stages", 0, "positive"),
+        ("stages", -1, "positive"),
+    ],
+)
+def test_disaggregation_rejects_invalid_compile_options(
+    platform_config, key, value, message
+):
+    platform_config.additional_config["override_qaic_config"][key] = value
+    with pytest.raises(ValueError, match=message):
+        QaicPlatform.check_and_update_config(platform_config)
+
+
+@pytest.mark.parametrize("model_type", ["qwen3", "llama", "future_dense"])
+@pytest.mark.parametrize(
+    "role,pp,bs,ctx",
+    [
+        ("kv_producer", 1, 1, 4096),
+        ("kv_producer", 2, 2, 4096),
+        ("kv_producer", 4, 4, 256),
+        ("kv_consumer", 1, 4, 4096),
+        ("kv_consumer", 1, 8, 4096),
+    ],
+)
+def test_dense_model_names_do_not_limit_pipeline_or_batching(
+    platform_config, model_type, role, pp, bs, ctx
+):
+    cfg = platform_config
+    cfg.model_config.hf_config.model_type = model_type
+    cfg.model_config.max_model_len = ctx
+    cfg.kv_transfer_config.kv_role = role
+    cfg.scheduler_config.max_num_seqs = bs
+    cfg.additional_config["override_qaic_config"]["stages"] = pp
+    QaicPlatform.check_and_update_config(cfg)
+    window = min(ctx, 128 * (pp + 1))
+    budget = (
+        window + 16 * bs if role == "kv_producer" and pp > 1 else min(bs * 128, 512)
+    )
+    assert cfg.scheduler_config.max_num_batched_tokens == budget
+    assert cfg.scheduler_config.max_num_scheduled_tokens is None
+    if role == "kv_producer" and pp > 1:
+        assert cfg.scheduler_config.long_prefill_token_threshold == window
+
+
+def test_dflash_uses_common_prefix_cache_and_multimodal_checks(platform_config):
+    platform_config.cache_config.enable_prefix_caching = True
+    QaicPlatform.check_and_update_config(platform_config)
+    assert not platform_config.cache_config.enable_prefix_caching
+    platform_config.model_config.is_multimodal_model = True
+    with pytest.raises(AssertionError, match="SPD with Multi-modality"):
+        QaicPlatform.check_and_update_config(platform_config)
+
+
+@pytest.mark.parametrize("method", [None, "ngram", "draft_model", "suffix"])
+def test_dflash_guards_do_not_restrict_other_methods(platform_config, method):
+    platform_config.speculative_config = (
+        SimpleNamespace(method=method) if method else None
+    )
+    platform_config.model_config.is_moe = True
+    platform_config.model_config.is_hybrid = True
+    platform_config.additional_config["override_qaic_config"]["ccl_enabled"] = True
+    QaicPlatform.check_and_update_config(platform_config)
 
 
 @pytest.mark.parametrize("role", ["kv_producer", "kv_consumer"])

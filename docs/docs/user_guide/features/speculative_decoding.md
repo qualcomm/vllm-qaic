@@ -239,8 +239,10 @@ SpD can be combined with disaggregated serving — proposals are generated and v
 
 ### DFlash Text Models
 
-Qwen3 and Llama text models support non-streaming DFlash prefill with the existing
-`qaic_disagg` launcher and `QaicConnector`. No launcher or proxy changes are needed:
+Dense text models with QEfficient DFlash target support and a matching draft model
+can use non-streaming prefill through `qaic_disagg` and `QaicConnector`. Qwen3 and
+Llama are the examples below, not a model-name restriction. No launcher or proxy
+changes are needed:
 
 ```text
 Prefill worker: TLM prompt chunks -> completed KV + projected prompt features

@@ -584,9 +584,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     kv_caches[bidx][:-1] if self.dflash_disagg else kv_caches[bidx]
                 )
                 assert len(self.kv_cache_info) == len(target_kv), (
-                    f"KV buffer count mismatch: "
-                    f"expected {len(self.kv_cache_info)} buffers, "
-                    f"got {len(target_kv)}"
+                    "KV buffer count mismatch"
                 )
                 for buff_idx in range(len(target_kv)):
                     buf = target_kv[buff_idx]
@@ -633,12 +631,11 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         free_hidden = []
         if self.dflash_disagg:
             assert logits is not None
+            scratch = self._dflash_prefill_hidden_scratch
             if not self._dflash_pipeline_buffers:
                 self._dflash_pipeline_buffers = [
                     {
-                        "hidden_states": np.empty_like(
-                            self._dflash_prefill_hidden_scratch
-                        ),
+                        "hidden_states": np.empty_like(scratch),
                         "logits": np.empty_like(logits[:1]),
                     }
                     for _ in range(self.session.prefill_num_execObj)
@@ -709,12 +706,12 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 assert num_prompt_tokens_prefill is not None
                 assert self._dflash_prefill_hidden_scratch is not None
                 # Partial scheduler steps keep their features until the final chunk.
+                shape = (
+                    int(num_prompt_tokens_prefill[index]),
+                    self.config.get_text_config().hidden_size,
+                )
                 self._dflash_prefill_hidden[batch_index] = np.empty(
-                    (
-                        int(num_prompt_tokens_prefill[index]),
-                        self.config.get_text_config().hidden_size,
-                    ),
-                    dtype=self._dflash_prefill_hidden_scratch.dtype,
+                    shape, dtype=self._dflash_prefill_hidden_scratch.dtype
                 )
             if lora_ids is not None:
                 chunk_inputs["lora_ids"] = lora_ids
@@ -783,16 +780,13 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                         chunk_inputs.update(self.prefill_num_logits_buffer or {})
                     chunk_inputs.update(self._dflash_pipeline_buffers[buffer_index])
                 # Submit Chunk to LRT Queue
+                handoff = kv_caches[batch_index] if last_chunk else None
+                if self.dflash_disagg and handoff is not None:
+                    handoff = handoff[:-1]
                 exec_obj_idx = self.session.np_run_pipeline(
                     inputs=chunk_inputs,
                     last_chunk=last_chunk,
-                    kv_cache_buffers=(
-                        kv_caches[batch_index][:-1]
-                        if self.dflash_disagg
-                        else kv_caches[batch_index]
-                    )
-                    if last_chunk
-                    else None,
+                    kv_cache_buffers=handoff,
                 )
                 if self.dflash_disagg:
                     pending_hidden[exec_obj_idx] = (chunk_inputs, index, buffer_index)

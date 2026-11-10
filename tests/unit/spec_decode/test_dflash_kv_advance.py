@@ -593,8 +593,14 @@ def test_update_prefill_kv_checks_final_prompt_boundary(prompt_len, target_width
 @pytest.mark.parametrize("compiled_ctx", [2048, 4096, 8192])
 @pytest.mark.parametrize("cache_bindings", [True, False])
 @pytest.mark.parametrize("named_specialization", [True, False])
+@pytest.mark.parametrize("target_width", [16, 128])
 def test_dlm_context_limit_uses_loaded_cache_capacity(
-    monkeypatch, tmp_path, compiled_ctx, cache_bindings, named_specialization
+    monkeypatch,
+    tmp_path,
+    compiled_ctx,
+    cache_bindings,
+    named_specialization,
+    target_width,
 ):
     proposer, _ = _make_proposer(2, 16)
     proposer.tlm_prefill_seq_len = 128
@@ -619,7 +625,7 @@ def test_dlm_context_limit_uses_loaded_cache_capacity(
         json.dumps({"specializations": [specialization]})
     )
     model.get_io_shape_and_dtype = lambda name: (
-        [2, 128, 8] if name == "target_hidden" else [2, 128],
+        [2, target_width, 8] if name == "target_hidden" else [2, target_width],
         np.float32,
         0,
     )
@@ -628,6 +634,15 @@ def test_dlm_context_limit_uses_loaded_cache_capacity(
     )
     proposer.load_model()
     assert proposer.max_model_len == min(4096, compiled_ctx)
+    assert proposer.target_seq_len == target_width
+
+
+@pytest.mark.parametrize("width", [0, -16, 8, 24, 256])
+def test_dlm_target_width_rejects_invalid_chunk_shapes(width):
+    proposer, _ = _make_proposer(2, 16)
+    proposer.tlm_prefill_seq_len = 128
+    with pytest.raises(ValueError, match="DLM target width"):
+        proposer._validate_target_width(width)
 
 
 @pytest.mark.parametrize("method", ["dflash", "draft_model", "ngram", "suffix"])
@@ -642,18 +657,7 @@ def test_runner_context_gate_reserves_dflash_bonus_slot(method, seq_len):
         kv_connector_output=None,
         use_async_scheduling=False,
         is_kv_producer=False,
-        execute_model_state=(
-            scheduler,
-            None,
-            None,
-            metadata,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        ),
+        execute_model_state=(scheduler, None, None, metadata) + (None,) * 6,
         _sample=lambda *args: None,
         input_batch=SimpleNamespace(
             prev_sampled_token_ids=None, sampling_metadata=None
