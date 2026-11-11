@@ -212,6 +212,11 @@ class QaicPlatform(Platform):
         return False
 
     @classmethod
+    def support_hybrid_kv_cache(cls) -> bool:
+        """Enable hybrid caches for the upstream eager model runner."""
+        return not cls.is_aot_inference()
+
+    @classmethod
     @functools.cache
     def get_num_cores(cls, device_id: int = 0) -> int:
         if not cls.is_aot:
