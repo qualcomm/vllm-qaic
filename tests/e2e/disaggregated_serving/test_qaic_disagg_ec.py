@@ -4,14 +4,13 @@
 # ------------------------------------------------------------------
 """End-to-end disaggregated multimodal serving with the Encoder Cache (EC).
 
-Runs Qwen3.6-35B-A3B in E-P-D (1E/1P/1D) once with the EC connector and once
+Runs Qwen3-VL-2B-Instruct in E-PD (1E/1PD) once with the EC connector and once
 with the legacy embedding transfer, checks both serve image requests, and checks
 that both transports produce the same output for the same images.
-Precompiled QPCs can be supplied through QAIC_EC_TEST_{ENCODE,PREFILL,DECODE}_QPC.
 """
 
 import io
-import os
+import json
 from concurrent.futures import ThreadPoolExecutor
 
 import pybase64 as base64
@@ -19,93 +18,20 @@ import pytest
 import requests
 from PIL import Image
 
-MODEL_NAME = "Qwen/Qwen3.6-35B-A3B"
-CTX_LEN = 14336
-HEIGHTS = [120, 180, 240, 256, 354, 360, 480, 512, 576, 720, 1080, 2048]
-WIDTHS = [360, 320, 360, 454, 536, 640, 720, 910, 720, 1280, 1920, 2048]
+MODEL_NAME = "Qwen/Qwen3-VL-2B-Instruct"
+CTX_LEN = 4096
+SEQ_LEN = 128
+HEIGHTS = [140, 280, 420, 354]
+WIDTHS = [140, 280, 420, 536]
 
+MM_PROCESSOR_KWARGS = {"min_pixels": 4 * 28 * 28, "max_pixels": 1280 * 28 * 28}
 
-def _with_qpc(config, env_var):
-    qpc_path = os.environ.get(env_var)
-    return config | {"qpc_path": qpc_path} if qpc_path else config
-
-
-ENCODE_OVERRIDE = _with_qpc(
-    {
-        "height": HEIGHTS,
-        "width": WIDTHS,
-        "num_frames": [1] * len(HEIGHTS),
-        "mxfp6_matmul": False,
-        "mxint8_kv_cache": False,
-        "aic_enable_depth_first": True,
-        "split_model_io": True,
-        "use_onnx_subfunctions": True,
-        "pretrained_extra_args": {"dtype": "float16"},
-    },
-    "QAIC_EC_TEST_ENCODE_QPC",
-)
-PREFILL_OVERRIDE = _with_qpc(
-    {
-        "height": HEIGHTS,
-        "width": WIDTHS,
-        "num_frames": [1] * len(HEIGHTS),
-        "batch_size": 1,
-        "full_batch_size": 1,
-        "vision_batch_size": 1,
-        "user_tiled": True,
-        "mxfp6_matmul": True,
-        "mxint8_kv_cache": True,
-        "split_model_io": True,
-        "use_onnx_subfunctions": True,
-        "enable_chunking": True,
-        "retain_full_kv": True,
-        "kv_offload": True,
-        "prefill_seq_len": 512,
-        "qaic_config": {
-            "blocking_mode": "prefill_online",
-            "gdn_full_state_update": True,
-            "num_kv_blocks": 16,
-            "num_q_blocks": 4,
-            "n_rep_chunk": 1,
-            "skip_kv": True,
-            "gdn_chunk_size": 512,
-            "ctx_len": CTX_LEN,
-        },
-        "pretrained_extra_args": {"dtype": "float16"},
-    },
-    "QAIC_EC_TEST_PREFILL_QPC",
-)
-DECODE_OVERRIDE = _with_qpc(
-    {
-        "height": HEIGHTS,
-        "width": WIDTHS,
-        "num_frames": [1] * len(HEIGHTS),
-        "mxfp6_matmul": True,
-        "mxint8_kv_cache": True,
-        "split_model_io": True,
-        "use_onnx_subfunctions": True,
-        "user_tiled": True,
-        "enable_chunking": True,
-        "retain_full_kv": True,
-        "prefill_seq_len": 1,
-        "kv_offload": True,
-        "qaic_config": {
-            "blocking_mode": "kv_batch_fold",
-            "num_kv_blocks": 64,
-            "gdn_num_head_blocks": 8,
-            "skip_kv": True,
-            "moe_config": {
-                "flavour": "expert_parallel",
-                "cores_per_expert": 1,
-                "tree_reduce": False,
-                "expert_parallel_chunk_size": 256,
-            },
-            "ctx_len": CTX_LEN,
-        },
-        "pretrained_extra_args": {"dtype": "float16"},
-    },
-    "QAIC_EC_TEST_DECODE_QPC",
-)
+QAIC_OVERRIDE = {
+    "prefill_seq_len": SEQ_LEN,
+    "height": HEIGHTS,
+    "width": WIDTHS,
+    "split_model_io": True,
+}
 
 
 def _image_url(width, height, color):
@@ -114,9 +40,10 @@ def _image_url(width, height, color):
     return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
 
 
+COLORS = [(220, 30, 30), (30, 30, 220), (30, 180, 30), (230, 200, 30)]
 IMAGES = [
-    _image_url(910, 512, (220, 30, 30)),
-    _image_url(536, 354, (30, 30, 220)),
+    _image_url(width, height, color)
+    for width, height, color in zip(WIDTHS, HEIGHTS, COLORS, strict=True)
 ]
 
 _EC_OUTPUTS: list[str] = []
@@ -150,20 +77,24 @@ def _chat(server, image_url, max_tokens=32):
 @pytest.mark.qaic_test_config(
     model_name=MODEL_NAME,
     ctx_len=CTX_LEN,
-    decode_bsz=512,
+    decode_bsz=4,
     num_encode_workers=1,
     encode_device_group_size=1,
-    num_prefill_workers=1,
-    prefill_device_group_size=1,
     num_decode_workers=1,
-    decode_device_group_size=4,
-    encode_override_qaic_config=ENCODE_OVERRIDE,
-    prefill_override_qaic_config=PREFILL_OVERRIDE,
-    decode_override_qaic_config=DECODE_OVERRIDE,
-    extra_args=["--prefill-max-num-batched-tokens=512"],
+    decode_device_group_size=1,
+    encode_override_qaic_config=QAIC_OVERRIDE,
+    decode_override_qaic_config=QAIC_OVERRIDE,
+    extra_args=[
+        f"--mm-processor-kwargs={json.dumps(MM_PROCESSOR_KWARGS)}",
+        f"--max-num-batched-tokens={SEQ_LEN}",
+    ],
 )
 class TestDisaggregatedServingEC:
-    """E-P-D image serving, run once with EC and once with the legacy path."""
+    """E-PD image serving, run once with EC and then once with the legacy path.
+
+    The two transports run serially in the same pytest process, EC first, so
+    test_ec_matches_legacy can compare them.
+    """
 
     @pytest.mark.parametrize("image_index", range(len(IMAGES)))
     def test_image_request(self, ec_disagg_server, image_index):
@@ -178,13 +109,12 @@ class TestDisaggregatedServingEC:
         if ec_disagg_server["use_ec"]:
             _EC_OUTPUTS[:] = outputs
             return
-        if not _EC_OUTPUTS:
-            pytest.skip("EC outputs not available; run the [ec] transport first")
+        assert _EC_OUTPUTS, "[ec] transport must run before [legacy]"
         assert outputs == _EC_OUTPUTS
 
     def test_parallel_image_requests(self, ec_disagg_server):
-        urls = [IMAGES[i % len(IMAGES)] for i in range(16)]
-        with ThreadPoolExecutor(max_workers=8) as pool:
+        urls = [IMAGES[i % len(IMAGES)] for i in range(8)]
+        with ThreadPoolExecutor(max_workers=4) as pool:
             outputs = list(pool.map(lambda url: _chat(ec_disagg_server, url), urls))
         assert all(output.strip() for output in outputs)
 
