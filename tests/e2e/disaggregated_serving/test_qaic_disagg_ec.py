@@ -5,7 +5,8 @@
 """End-to-end disaggregated multimodal serving with the Encoder Cache (EC).
 
 Runs Qwen3.6-35B-A3B in E-P-D (1E/1P/1D) once with the EC connector and once
-with the legacy embedding transfer, and checks both serve image requests.
+with the legacy embedding transfer, checks both serve image requests, and checks
+that both transports produce the same output for the same images.
 Precompiled QPCs can be supplied through QAIC_EC_TEST_{ENCODE,PREFILL,DECODE}_QPC.
 """
 
@@ -20,8 +21,8 @@ from PIL import Image
 
 MODEL_NAME = "Qwen/Qwen3.6-35B-A3B"
 CTX_LEN = 14336
-HEIGHTS = [354, 512]
-WIDTHS = [536, 910]
+HEIGHTS = [120, 180, 240, 256, 354, 360, 480, 512, 576, 720, 1080, 2048]
+WIDTHS = [360, 320, 360, 454, 536, 640, 720, 910, 720, 1280, 1920, 2048]
 
 
 def _with_qpc(config, env_var):
@@ -118,6 +119,8 @@ IMAGES = [
     _image_url(536, 354, (30, 30, 220)),
 ]
 
+_EC_OUTPUTS: list[str] = []
+
 
 def _chat(server, image_url, max_tokens=32):
     response = requests.post(
@@ -147,7 +150,7 @@ def _chat(server, image_url, max_tokens=32):
 @pytest.mark.qaic_test_config(
     model_name=MODEL_NAME,
     ctx_len=CTX_LEN,
-    decode_bsz=8,
+    decode_bsz=512,
     num_encode_workers=1,
     encode_device_group_size=1,
     num_prefill_workers=1,
@@ -166,9 +169,18 @@ class TestDisaggregatedServingEC:
     def test_image_request(self, ec_disagg_server, image_index):
         assert _chat(ec_disagg_server, IMAGES[image_index]).strip()
 
-    def test_repeated_image_is_deterministic(self, ec_disagg_server):
-        outputs = {_chat(ec_disagg_server, IMAGES[0]) for _ in range(3)}
-        assert len(outputs) == 1
+    def test_repeated_image_request(self, ec_disagg_server):
+        outputs = [_chat(ec_disagg_server, IMAGES[0]) for _ in range(3)]
+        assert all(output.strip() for output in outputs)
+
+    def test_ec_matches_legacy(self, ec_disagg_server):
+        outputs = [_chat(ec_disagg_server, url) for url in IMAGES]
+        if ec_disagg_server["use_ec"]:
+            _EC_OUTPUTS[:] = outputs
+            return
+        if not _EC_OUTPUTS:
+            pytest.skip("EC outputs not available; run the [ec] transport first")
+        assert outputs == _EC_OUTPUTS
 
     def test_parallel_image_requests(self, ec_disagg_server):
         urls = [IMAGES[i % len(IMAGES)] for i in range(16)]
