@@ -19,6 +19,7 @@ from transformers import AutoProcessor
 from vllm import SamplingParams
 
 
+@pytest.mark.qaic_aot_mode
 @pytest.mark.qaic_test_config(num_device_groups=2, device_group_size=4)
 @pytest.mark.parametrize(
     "target,draft",
@@ -34,8 +35,7 @@ def test_dflash_vlm_matches_vanilla(vllm_runner, device_groups, target, draft):
     if draft is None:
         draft = os.environ.get("VLLM_QAIC_QWEN3_VL_DRAFT")
         if not draft:
-            pytest.skip("Set VLLM_QAIC_QWEN3_VL_DRAFT to the local Qwen3-VL draft")
-
+            pytest.fail("Set VLLM_QAIC_QWEN3_VL_DRAFT to the local Qwen3-VL draft")
     is_qwen = target.startswith("Qwen/")
     processor = AutoProcessor.from_pretrained(target, trust_remote_code=True)
     processor_kwargs = {"min_pixels": 448**2, "max_pixels": 448**2} if is_qwen else {}
@@ -111,7 +111,6 @@ def test_dflash_vlm_matches_vanilla(vllm_runner, device_groups, target, draft):
         )["image_grid_thw"]
         embeddings = {"image_embeds": embeddings, "image_grid_thw": grid}
     requests[1]["multi_modal_data"] = {"image": embeddings}
-
     results = []
     for speculative in (False, True):
         additional = {

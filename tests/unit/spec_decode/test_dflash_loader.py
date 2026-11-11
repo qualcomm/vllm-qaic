@@ -148,8 +148,11 @@ def test_compile_only_builds_draft_before_exiting(monkeypatch, dflash, draft_err
 )
 @pytest.mark.parametrize("metadata", ["none", "layers_only", "repo_only", "dflash"])
 @pytest.mark.parametrize("continuous_batching", [None, False, True])
-def test_hf_loading_defaults_require_dflash_metadata(
-    monkeypatch, model_type, metadata, continuous_batching
+@pytest.mark.parametrize(
+    "dtype_args", [{}, {"dtype": "float16"}, {"torch_dtype": "float16"}]
+)
+def test_hf_loading_preserves_dtype_and_batching_options(
+    monkeypatch, model_type, metadata, continuous_batching, dtype_args
 ):
     import QEfficient
     from vllm_qaic.model_loader import qaic
@@ -178,19 +181,17 @@ def test_hf_loading_defaults_require_dflash_metadata(
         qaic_config["target_layer_ids"] = [1, 3]
     if metadata in {"repo_only", "dflash"}:
         qaic_config["dflash_dlm_repo"] = "draft"
+    overrides = {"pretrained_extra_args": dtype_args} if dtype_args else {}
+    if continuous_batching is not None:
+        overrides["continuous_batching"] = continuous_batching
     get_hf_model(
         config,
         qaic_config=qaic_config,
         kv_offload=vlm,
-        additional_config={
-            "override_qaic_config": {"continuous_batching": continuous_batching}
-        }
-        if continuous_batching is not None
-        else None,
+        additional_config={"override_qaic_config": overrides} if overrides else None,
     )
     args = load.call_args.kwargs
-    specialized = metadata == "dflash" and vlm
-    assert args.get("dtype") == ("float32" if specialized else None)
+    assert {k: args[k] for k in ("dtype", "torch_dtype") if k in args} == dtype_args
     assert args["continuous_batching"] is (
         True if continuous_batching is None else continuous_batching
     )

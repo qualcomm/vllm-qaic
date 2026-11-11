@@ -139,7 +139,7 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
             self._load_multimodal_dflash_vlm()
 
         if self.dflash_hybrid:
-            self._load_multimodal_dflash_hybrid(self.num_spec_tokens + 1)
+            self._load_multimodal_dflash_hybrid(self.max_decode_tokens)
 
         if self.config.model_type == "whisper":
             self.default_mm_kwargs = {}
@@ -156,7 +156,7 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
         """Validate DFlash VLM QPC shapes and initialize decode token-type masks."""
         # Reject stale QPCs: verification needs B tokens, or 2B for
         # Qwen3.5's accepted-prefix commit plus new verification block.
-        block_size = self.num_spec_tokens + 1
+        block_size = self.max_decode_tokens
         input_shapes = self._get_binding_shapes("input_ids")
         decode_width = block_size * (2 if self.dflash_hybrid else 1)
         # Prefill stays per request; verification uses the full decode batch.
@@ -218,8 +218,10 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
             raise ValueError("Qwen3.5 DFlash target QPC must expose image_idx.")
         if self._prefill_hidden_scratch is None:
             raise ValueError("Qwen3.5 DFlash needs a prefill hidden-state buffer.")
-        # Prefill commits all valid tokens. Concatenated decode commits only
-        # the accepted prefix in its first block, not the verification suffix.
+        # This QPC retains one conv/recurrent state per request and layer, not
+        # upstream's per-token speculative state slots. One decode call replays
+        # the accepted prefix and verifies the new block, retaining the state
+        # after the prefix. Prefill commits all valid tokens.
         self.default_mm_kwargs["cache_commit"] = np.ones((1,), dtype=np.int64)
         for inputs in self.decode_batch_inputs_by_k.values():
             inputs["cache_commit"] = np.zeros((1,), dtype=np.int64)
@@ -251,7 +253,7 @@ class QaicMultiModal(QaicCausalLM, SupportsMultiModal, SupportsMRoPE):
         if len(sampled_token_ids) > len(slots):
             raise ValueError("Accepted prefixes exceed the verification batch size.")
         inputs = self.decode_batch_inputs_by_k[self.active_k]
-        block_size = self.num_spec_tokens + 1
+        block_size = self.max_decode_tokens
         # N sampled outputs commit the previous seed and N-1 accepted drafts.
         # The sampled replacement/bonus token belongs to the next verification.
         for row, slot in enumerate(slots):

@@ -178,6 +178,7 @@ def test_qwen35_long_greedy_matches_vanilla(moe, with_image, generation_len, see
     model = QaicMultiModal.__new__(QaicMultiModal)
     model.dflash_hybrid = True
     model.num_spec_tokens = model.active_k = BLOCK - 1
+    model.max_decode_tokens = BLOCK
     model.decode_bsz = 1
     model.uses_mrope = True
     model.ignore_batch_index = False

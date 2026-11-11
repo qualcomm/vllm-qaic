@@ -374,6 +374,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         unchanged because ``decode_ks`` stays at ``[max_k]``.
         """
         if self.is_dflash_target:
+            # Hybrid targets also include accepted-prefix replay in input_ids;
+            # seq_len - 1 would count replay tokens as new drafts.
             return list(self.decode_ks)
         try:
             input_idx = self.session.binding_index_map["input_ids"]
@@ -973,43 +975,33 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         dflash_decode_hidden_buf: np.ndarray | None = None,
     ) -> None:
         hybrid = getattr(self, "dflash_hybrid", False)
-        if hybrid:
-            # Qwen3.5 commits the accepted prefix and verifies the new block
-            # in one TLM execution. Padded prefix positions remain -1.
-            block_size = self.num_spec_tokens + 1
-            rows = input_ids.size // block_size
-            batch_indices = np.asarray(batch_indices[:rows], dtype=np.int64)
-            self._dflash_decode_slots = batch_indices.copy()
-            input_ids = np.concatenate(
-                [
-                    self._dflash_prefix_ids[batch_indices],
-                    input_ids.reshape(rows, block_size),
-                ],
-                axis=-1,
-            ).reshape(-1)
-            positions = np.concatenate(
-                [
-                    self._dflash_prefix_positions[:, batch_indices],
-                    positions.reshape(4, rows, block_size),
-                ],
-                axis=-1,
-            ).reshape(4, -1)
-
-        # Use the per-step K set by QaicModelRunner.  Falls back to max K so
+        # Use the per-step K set by QaicModelRunner. Falls back to max K so
         # the method is callable without a runner (e.g., unit tests).
         current_k = self.active_k
-        mdt = (current_k + 1) * (2 if hybrid else 1)
-        num_tokens = input_ids.shape[0]
-        num_decodes = num_tokens // mdt  # number of decode requests
+        mdt = current_k + 1
+        num_decodes = input_ids.shape[0] // mdt
         batch_inputs = self.decode_batch_inputs_by_k[current_k]
-        batch_inputs["input_ids"][:num_decodes] = input_ids.reshape(num_decodes, mdt)
+        decode_ids = batch_inputs["input_ids"]
+        decode_positions = batch_inputs["position_ids"]
+        prefix_len = mdt if hybrid else 0
+        if hybrid:
+            # Fill the preallocated replay half; verification goes in the suffix.
+            # Prefix positions already mask unaccepted tokens with -1.
+            batch_indices = np.asarray(batch_indices[:num_decodes], dtype=np.int64)
+            self._dflash_decode_slots = batch_indices.copy()
+            for row, slot in enumerate(batch_indices):
+                decode_ids[row, :prefix_len] = self._dflash_prefix_ids[slot]
+                decode_positions[:, row, :prefix_len] = self._dflash_prefix_positions[
+                    :, slot
+                ]
+        decode_ids[:num_decodes, prefix_len:] = input_ids.reshape(num_decodes, mdt)
         if self.uses_mrope:
             # positions shape: (4, num_decodes * mdt) -> (4, num_decodes, mdt)
-            batch_inputs["position_ids"][:, :num_decodes] = positions.reshape(
+            decode_positions[:, :num_decodes, prefix_len:] = positions.reshape(
                 4, num_decodes, mdt
             )
         else:
-            batch_inputs["position_ids"][:num_decodes] = positions.reshape(
+            decode_positions[:num_decodes, prefix_len:] = positions.reshape(
                 num_decodes, mdt
             )
         batch_inputs["logits"] = logits
@@ -1039,7 +1031,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
 
         if self.comp_ctx_lengths_decode is not None:
             assert self.list_of_comp_ctx_lengths is not None
-            max_position_id = positions.max().item()
+            max_position_id = decode_positions[..., :num_decodes, :].max().item()
             batch_inputs["comp_ctx_lengths"] = self.list_of_comp_ctx_lengths[
                 max(self.list_of_comp_ctx_lengths.keys())
             ]
@@ -1060,17 +1052,15 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             self.session.complete_inf(exec_obj_idx, is_prefill=False)
         if hybrid:
             # QEfficient right-aligns logits for a partial verification suffix.
-            valid_counts = (
-                positions[0].reshape(rows, 2 * block_size)[:, block_size:] >= 0
-            ).sum(axis=1)
+            valid_counts = (decode_positions[0, :num_decodes, prefix_len:] >= 0).sum(
+                axis=1
+            )
             for row, count in enumerate(valid_counts):
-                if 0 < count < block_size:
+                if 0 < count < mdt:
                     logits[row, :count] = logits[row, -count:].copy()
             if dflash_decode_hidden_buf is not None:
                 # The drafter needs only the new block, not the commit prefix.
-                dflash_decode_hidden_buf[:] = self._dflash_decode_hidden[
-                    :, -block_size:
-                ]
+                dflash_decode_hidden_buf[:] = self._dflash_decode_hidden[:, prefix_len:]
         return
 
     def _run_encode(self, prefill_cum_sum, input_ids, positions):
@@ -1929,13 +1919,6 @@ def get_hf_model(
         # If tie_word_embeddings is not set correctly,
         # single QPC's output would be wrong
         hf_config.tie_word_embeddings = pretrained_hf_config.tie_word_embeddings
-    # Layer IDs request hidden-state extraction; the draft checkpoint selects
-    # DFlash's projection. Do not apply its loading policy to other SpD methods.
-    is_dflash_target = bool(
-        qaic_config
-        and qaic_config.get("target_layer_ids")
-        and qaic_config.get("dflash_dlm_repo")
-    )
     # For Gptoss models, vllm sets the quantization to gpt_oss_mxfp4 while qeff
     # needs mxfp4 quantization. Because of this mismatch, qeff do not adds MoE
     # weights to the graph and model generates garbage output
@@ -1980,9 +1963,6 @@ def get_hf_model(
         elif model_config.hf_config.model_type != "internvl_chat":
             # InternVL uses QEFFAutoModelForCausalLM (the default class)
             model_type = "imagetext"
-        if is_dflash_target and hf_config.model_type in DFLASH_VLM_MODEL_TYPES:
-            # Keep DFlash's projection/norm loading in FP32.
-            args["dtype"] = "float32"
         # On-device sampling is supported with multimodality
         # Continuous batching is supported for dual QPC VLMs
         # Continuous batching is not supported for audio models

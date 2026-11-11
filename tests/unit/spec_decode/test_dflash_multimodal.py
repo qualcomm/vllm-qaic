@@ -6,7 +6,7 @@
 import runpy
 from pathlib import Path
 from types import MethodType, SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
@@ -130,6 +130,7 @@ def _vlm_model(model_type="qwen3_vl", missing_phase=None, batch_size=1):
         ctx_len=4096,
         prefill_seq_len=128,
         num_spec_tokens=15,
+        max_decode_tokens=16,
         tlm_hidden_size=8,
         _prefill_hidden_scratch=np.zeros((1, 128, 8), dtype=np.float32),
     )
@@ -141,6 +142,16 @@ def _vlm_model(model_type="qwen3_vl", missing_phase=None, batch_size=1):
         QaicMultiModal._load_multimodal_dflash_hybrid, model
     )
     return model
+
+
+@pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe", "qwen3_vl", "gemma4"])
+@pytest.mark.parametrize("batch_size", [1, 2, 4, 8])
+def test_dflash_decode_k_excludes_hybrid_replay(model_type, batch_size):
+    model = _vlm_model(model_type, batch_size=batch_size)
+    model.is_dflash_target = True
+    model.decode_ks = [model.num_spec_tokens]
+
+    assert QaicCausalLM._decode_ks_from_session(model) == [15]
 
 
 @pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe", "qwen3_vl", "gemma4"])
@@ -210,13 +221,23 @@ def test_batched_hybrid_decode_keeps_request_slots_and_masks_idle_rows(model_typ
     previous = model._dflash_prefix_positions.copy()
     ids = np.arange(100, 132).reshape(2, 16)
     positions = np.tile(np.stack([np.arange(20, 36), np.arange(60, 76)]), (4, 1, 1))
-    QaicCausalLM._run_decode(
-        model,
-        ids.reshape(-1),
-        positions.reshape(4, -1),
-        np.array([2, 0]),
-        np.zeros((4, 16, 32), dtype=np.float32),
-    )
+    buffers = {name: feeds[name] for name in ("input_ids", "position_ids")}
+
+    def run_decode(ids, positions, slots):
+        with patch(
+            "numpy.concatenate", side_effect=AssertionError("Use decode buffers")
+        ):
+            QaicCausalLM._run_decode(
+                model,
+                ids.reshape(-1),
+                positions.reshape(4, -1),
+                np.array(slots),
+                np.zeros((4, 16, 32), dtype=np.float32),
+            )
+        for name, buffer in buffers.items():
+            assert feeds[name] is buffer
+
+    run_decode(ids, positions, [2, 0])
     model.session.np_run.assert_called_once()
     np.testing.assert_array_equal(
         feeds["batch_index"].ravel(), [2, 0, UINT16_MAX, UINT16_MAX]
@@ -236,6 +257,19 @@ def test_batched_hybrid_decode_keeps_request_slots_and_masks_idle_rows(model_typ
         assert np.all(model._dflash_prefix_positions[:, slot, count:] == -1)
     np.testing.assert_array_equal(
         model._dflash_prefix_positions[:, [1, 3]], previous[:, [1, 3]]
+    )
+    # Reuse the buffers with fewer rows and a different first cache slot.
+    run_decode(ids[:1], positions[:, :1], [0])
+    np.testing.assert_array_equal(feeds["input_ids"][0, :16], ids[1])
+    np.testing.assert_array_equal(feeds["input_ids"][0, 16:], ids[0])
+    np.testing.assert_array_equal(
+        feeds["position_ids"][:, 0, :16], model._dflash_prefix_positions[:, 0]
+    )
+    np.testing.assert_array_equal(feeds["position_ids"][:, 0, 16:], positions[:, 0])
+    assert np.all(feeds["input_ids"][1:] == -1)
+    assert np.all(feeds["position_ids"][:, 1:] == -1)
+    np.testing.assert_array_equal(
+        feeds["batch_index"].ravel(), [0, UINT16_MAX, UINT16_MAX, UINT16_MAX]
     )
 
 
@@ -323,7 +357,7 @@ def test_vlm_rejects_multiple_prefill_lengths(length):
 
 
 @pytest.mark.parametrize("accepted", [0, 1, 7, 16])
-@pytest.mark.parametrize("valid_tokens", [1, 9, 16])
+@pytest.mark.parametrize("valid_tokens", [0, 1, 9, 16])
 @pytest.mark.parametrize("slot", [0, 2])
 @pytest.mark.parametrize("capture_hidden", [False, True])
 @pytest.mark.parametrize("has_num_logits_input", [False, True])
@@ -333,12 +367,14 @@ def test_concatenated_decode_commits_prefix_and_returns_suffix(
     model = QaicMultiModal.__new__(QaicMultiModal)
     model.dflash_hybrid = True
     model.num_spec_tokens = 15
+    model.max_decode_tokens = 16
     model.active_k = 15
     model.decode_bsz = 1
     model.uses_mrope = True
     model.ignore_batch_index = False
     model.is_spec_decode_target_model = True
-    model.comp_ctx_lengths_decode = None
+    model.comp_ctx_lengths_decode = [8, 32]
+    model.list_of_comp_ctx_lengths = {n: np.empty(n) for n in (8, 32)}
     model.use_async_scheduling = False
     model.tlm_hidden_states_name = "tlm_hidden_states"
     model.decode_batch_inputs_by_k = {
@@ -399,6 +435,8 @@ def test_concatenated_decode_commits_prefix_and_returns_suffix(
     np.testing.assert_array_equal(inputs["position_ids"][:, 0, 16:], positions)
     assert inputs["batch_index"].item() == slot
     assert inputs["cache_commit"].item() == 0
+    max_position = accepted + valid_tokens - 1
+    assert inputs["comp_ctx_lengths"].size == (8 if max_position < 8 else 32)
     assert ("num_logits_to_keep" in inputs) == has_num_logits_input
     if has_num_logits_input:
         assert inputs["num_logits_to_keep"].shape == (16, 1)
