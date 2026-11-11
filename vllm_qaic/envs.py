@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     # Per-operator opt-in flags: dispatch the CustomOp forward_oot to the
     # corresponding vLLM Triton kernel
     VLLM_QAIC_TRITON_RMS_NORM: bool = False
+    VLLM_QAIC_TRITON_RMS_NORM_GATED: bool = False
     VLLM_QAIC_TRITON_MM_ENCODER_ATTENTION: bool = False
     VLLM_QAIC_TRITON_MROTARY_EMBEDDING: bool = False
     # Repurpose vLLM's SWIGLUSTEP Triton kernel (swiglustep_and_mul_triton) as
@@ -79,6 +80,10 @@ qaic_environment_variables.update(
     {
         "VLLM_QAIC_TRITON_RMS_NORM": lambda: os.getenv(
             "VLLM_QAIC_TRITON_RMS_NORM", "1" if _triton_all_ops_en else "0"
+        )
+        == "1",
+        "VLLM_QAIC_TRITON_RMS_NORM_GATED": lambda: os.getenv(
+            "VLLM_QAIC_TRITON_RMS_NORM_GATED", "1" if _triton_all_ops_en else "0"
         )
         == "1",
         "VLLM_QAIC_TRITON_MM_ENCODER_ATTENTION": lambda: os.getenv(

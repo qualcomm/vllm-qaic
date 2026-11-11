@@ -42,10 +42,11 @@ class QAicMRotaryEmbedding(MRotaryEmbedding):
         # ------------------------------------------------------------------
         # Triton fast path (opt-in): all 2D T/H/W positions dispatch to vLLM's
         # triton_mrope kernel, matching MRotaryEmbedding.forward_cuda.
-        # triton_mrope receives self.mrope_interleaved and branches on it
-        # in-kernel (is_interleaved: tl.constexpr), so this covers both
+        # triton_mrope receives both layout controls and branches on them
+        # in-kernel (is_interleaved/is_neox_style: tl.constexpr), so this covers
         # interleaved (e.g. Qwen3-VL, mrope_section=[24,20,20]) and
-        # non-interleaved section layouts. Flag off -> the NSP branches below.
+        # non-interleaved section layouts in either rotary-pair convention.
+        # Flag off -> the NSP branches below.
         # 1D text-only positions use the PyTorch path below
         # (triton_mrope requires 2D positions).
         # ------------------------------------------------------------------
@@ -66,6 +67,7 @@ class QAicMRotaryEmbedding(MRotaryEmbedding):
                 self.head_size,
                 self.rotary_dim,
                 self.mrope_interleaved,
+                self.is_neox_style,
             )
             return q.reshape(query_shape), k.reshape(key_shape)
 
