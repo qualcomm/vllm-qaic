@@ -29,7 +29,7 @@ from PIL import Image
 from transformers import AutoTokenizer
 
 from vllm import LLM, EngineArgs, SamplingParams
-from vllm.config import KVTransferConfig
+from vllm.config import ECTransferConfig, KVTransferConfig
 from vllm.multimodal.image import convert_image_mode
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
@@ -42,6 +42,10 @@ class ModelRequestData(NamedTuple):
     image_grid_thw: torch.Tensor | None = None
     use_disagg_lang: bool = False
 
+
+EC_CONNECTOR_MODULE_PATH = (
+    "vllm_qaic.distributed.ec_transfer.ec_connector.qaic_connector"
+)
 
 seq_len = 128
 ctx_len = 4096
@@ -513,16 +517,19 @@ def parse_args():
     parser.add_argument(
         "--device-group-prefill",
         type=lambda device_ids: [int(x) for x in device_ids.split(",")],
-        default=[1],
-        help="QAIC device IDs for the disaggregated prefill LLM (MoE 3-QPC "
-        "mode only). Example: --device-group-prefill 1,2,3,4 (default: 1)",
+        default=None,
+        help="QAIC device IDs for the disaggregated prefill LLM. When given, "
+        "selects the 3-QPC E-P-D topology (separate prefill + decode with KV "
+        "hand-off); when omitted, the 2-QPC E-PD topology (combined "
+        "prefill/decode) is used. MoE models always use 3-QPC. Defaults to "
+        "[1] when 3-QPC. Example: --device-group-prefill 1,2,3,4",
     )
     parser.add_argument(
         "--device-group-decode",
         type=lambda device_ids: [int(x) for x in device_ids.split(",")],
-        default=[2],
-        help="QAIC device IDs for the disaggregated decode LLM (MoE 3-QPC "
-        "mode only). Example: --device-group-decode 5,6,7,8 (default: 2)",
+        default=None,
+        help="QAIC device IDs for the disaggregated decode LLM (3-QPC "
+        "paths). Defaults to [2]. Example: --device-group-decode 5,6,7,8",
     )
     parser.add_argument(
         "--kv-port",
@@ -531,7 +538,36 @@ def parse_args():
         help="Port for the QaicConnector KV handoff server (MoE 3-QPC mode "
         "only). Default: 14579",
     )
+    parser.add_argument(
+        "--use-ec",
+        action="store_true",
+        help="Route encoder embeddings through the shared-memory Encoder Cache "
+        "(EC) connector instead of inlining them into the language request. "
+        "Starts an ec_handoff server; encode runs as EC producer and the "
+        "prefill/PD instance as EC consumer.",
+    )
+    parser.add_argument(
+        "--ec-port",
+        type=int,
+        default=5858,
+        help="Port for the ec_handoff server (must differ from --kv-port).",
+    )
+    parser.add_argument(
+        "--ec-ttl",
+        type=float,
+        default=3600.0,
+        help="Per-entry TTL (sec) for the ECStore.",
+    )
     return parser.parse_args()
+
+
+def _start_handoff_server(module, port, extra=None):
+    """Launch a KV or EC hand-off server as a subprocess and give it time to bind."""
+    proc = subprocess.Popen(
+        [sys.executable, "-m", module, "--port", str(port)] + (extra or [])
+    )
+    time.sleep(10)
+    return proc
 
 
 def _run_disagg_vision_language(
@@ -543,62 +579,117 @@ def _run_disagg_vision_language(
     request_prompts: list[str],
     sampling_params: SamplingParams,
 ) -> list:
-    """Three-stage offline inference for MoE models requiring separate QPCs.
+    """Disaggregated offline inference for VLMs (2-QPC E-PD or 3-QPC E-P-D).
 
     Stage 1 - Vision encoder (main process, runner=pooling): encodes raw
-              images into vision embeddings.
+              images into vision embeddings. With --use-ec the encoder runs as
+              an EC producer and writes the embeddings to the shared ECStore
+              (fetched by the consumer by multimodal hash); otherwise the
+              embeddings are inlined into the language request.
     Stage 2 - Prefill LLM (subprocess, kv_producer): processes the full
               prompt + embeddings and writes KV cache to the handoff server.
     Stage 3 - Decode LLM  (subprocess, kv_consumer): loads KV cache from
               the handoff server and auto-regressively generates tokens.
+
+    In 2-QPC (E-PD) mode Stages 2 and 3 collapse into a single combined
+    prefill/decode instance and no KV hand-off is used. See --use-ec and
+    --device-group-prefill for selecting transport and topology.
     """
-    # ---- Stage 1: vision encoding (runs in the main process) ----
-    llm_vision = LLM(**engine_args_vision)
-    vision_outputs = llm_vision.encode(vision_inputs, pooling_task="embed")
+    three_qpc = args.device_group_prefill is not None or req_data.use_disagg_lang
+    device_group_prefill = args.device_group_prefill or [1]
+    device_group_decode = args.device_group_decode or [2]
 
-    # Build language-model inputs by replacing raw images with embeddings.
-    # Each output already contains the concatenated embeddings for all
-    # images in that request; no manual stacking is needed.
-    lang_inputs = []
-    for i, output in enumerate(vision_outputs):
-        embed = output.outputs.data
-        print(f"Embedding shape: {embed.shape}")
+    procs = []
 
-        if req_data.image_grid_thw is None:
-            mm_data = embed
-        else:
-            mm_data = {
-                "image_embeds": embed,
-                "image_grid_thw": req_data.image_grid_thw,
-            }
-        lang_inputs.append(
-            {
-                "prompt": request_prompts[i],
-                "multi_modal_data": {"image": mm_data},
-            }
+    # ---- Transport: build the language-side inputs ----
+    if args.use_ec:
+        # EC producer: start the ECStore hand-off and run the encoder so the
+        # embeddings are written to shared memory keyed by multimodal hash.
+        procs.append(
+            _start_handoff_server(
+                "qaic_disagg.ec_handoff.server",
+                args.ec_port,
+                ["--ttl", str(args.ec_ttl)],
+            )
         )
+        engine_args_vision["ec_transfer_config"] = ECTransferConfig(
+            ec_connector="QaicECConnector",
+            ec_connector_module_path=EC_CONNECTOR_MODULE_PATH,
+            ec_role="ec_producer",
+            ec_rank=0,
+            ec_port=args.ec_port,
+        )
+        llm_vision = LLM(**engine_args_vision)
+        llm_vision.encode(vision_inputs, pooling_task="embed")
 
-    # ---- Start the KV handoff server ----
-    server_proc = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "qaic_disagg.kv_handoff.server",
-            "--port",
-            str(args.kv_port),
-            "--size",
-            "64",
-        ]
+        # EC consumer only needs raw images + dummy grid rows; embeddings are
+        # fetched from the ECStore on the worker.
+        lang_inputs = []
+        for i, prompt in enumerate(request_prompts):
+            image_data = vision_inputs[i]["multi_modal_data"]["image"]
+            if req_data.image_grid_thw is None:
+                mm_data = image_data
+            else:
+                mm_data = {
+                    "image": image_data,
+                    "image_grid_thw": req_data.image_grid_thw,
+                }
+            lang_inputs.append(
+                {"prompt": prompt, "multi_modal_data": {"image": mm_data}}
+            )
+    else:
+        # Legacy transport: encode in this process and inline the embeddings.
+        llm_vision = LLM(**engine_args_vision)
+        vision_outputs = llm_vision.encode(vision_inputs, pooling_task="embed")
+        lang_inputs = []
+        for i, output in enumerate(vision_outputs):
+            embed = output.outputs.data
+            print(f"Embedding shape: {embed.shape}")
+            if req_data.image_grid_thw is None:
+                mm_data = embed
+            else:
+                mm_data = {
+                    "image_embeds": embed,
+                    "image_grid_thw": req_data.image_grid_thw,
+                }
+            lang_inputs.append(
+                {"prompt": request_prompts[i], "multi_modal_data": {"image": mm_data}}
+            )
+
+    # ---- 2-QPC (E-PD): single combined prefill/decode instance ----
+    if not three_qpc:
+        engine_args_pd = copy.deepcopy(engine_args_lang)
+        engine_args_pd["additional_config"]["device_group"] = device_group_decode
+        if args.use_ec:
+            engine_args_pd["ec_transfer_config"] = ECTransferConfig(
+                ec_connector="QaicECConnector",
+                ec_connector_module_path=EC_CONNECTOR_MODULE_PATH,
+                ec_role="ec_consumer",
+                ec_rank=1,
+                ec_port=args.ec_port,
+            )
+        try:
+            llm_lang = LLM(**engine_args_pd)
+            return llm_lang.generate(lang_inputs, sampling_params=sampling_params)
+        finally:
+            for proc in procs:
+                proc.terminate()
+                while proc.poll() is None:
+                    time.sleep(1)
+
+    # ---- 3-QPC (E-P-D): separate prefill (KV producer) + decode (KV consumer) ----
+    procs.append(
+        _start_handoff_server(
+            "qaic_disagg.kv_handoff.server", args.kv_port, ["--size", "64"]
+        )
     )
-    time.sleep(10)
 
-    # ---- Stage 2: Prefill LLM config (kv_producer) ----
     engine_args_prefill = copy.deepcopy(engine_args_lang)
-    engine_args_prefill["additional_config"]["device_group"] = args.device_group_prefill
+    engine_args_prefill["additional_config"]["device_group"] = device_group_prefill
     engine_args_prefill["additional_config"]["override_qaic_config"].update(
         {
             "prefill_only": True,
-            "stages": len(args.device_group_prefill),
+            "stages": len(device_group_prefill),
             "allow-mxint8-mdp-io": True,
             "kv_offload": True,
             "use_onnx_subfunctions": True,
@@ -607,9 +698,8 @@ def _run_disagg_vision_language(
     )
     engine_args_prefill["max_num_seqs"] = prefill_bsz
 
-    # ---- Stage 3: Decode LLM config (kv_consumer) ----
     engine_args_decode = copy.deepcopy(engine_args_lang)
-    engine_args_decode["additional_config"]["device_group"] = args.device_group_decode
+    engine_args_decode["additional_config"]["device_group"] = device_group_decode
     engine_args_decode["additional_config"]["override_qaic_config"].update(
         {
             "prefill_only": False,
@@ -635,6 +725,15 @@ def _run_disagg_vision_language(
                 kv_rank=0,
                 kv_port=args.kv_port,
             )
+            # Prefill is the EC consumer in the 3-QPC EC path.
+            if args.use_ec:
+                ea["ec_transfer_config"] = ECTransferConfig(
+                    ec_connector="QaicECConnector",
+                    ec_connector_module_path=EC_CONNECTOR_MODULE_PATH,
+                    ec_role="ec_consumer",
+                    ec_rank=1,
+                    ec_port=args.ec_port,
+                )
             llm = LLM(**ea)
         except Exception as exc:
             print(exc)
@@ -658,8 +757,7 @@ def _run_disagg_vision_language(
             ready.wait()
             llm = LLM(**ea)
             done.wait()
-            outputs = llm.generate(li, sampling_params=sp)
-            queue.put(outputs)
+            queue.put(llm.generate(li, sampling_params=sp))
         except Exception as exc:
             queue.put(exc)
 
@@ -687,17 +785,16 @@ def _run_disagg_vision_language(
 
     p_prefill.start()
     p_decode.start()
-
     p_prefill.join()
     p_decode.join()
-    server_proc.terminate()
-    while server_proc.poll() is None:
-        time.sleep(1)
+    for proc in procs:
+        proc.terminate()
+        while proc.poll() is None:
+            time.sleep(1)
 
     result = result_queue.get()
     if isinstance(result, Exception):
         raise result
-
     return result
 
 
@@ -749,8 +846,14 @@ def main(args):
     engine_args["kv_cache_dtype"] = "mxint8"
     engine_args["max_num_seqs"] = decode_bsz
 
-    llm_lang = LLM(**engine_args) if not req_data.use_disagg_lang else None
-    llm_vision = LLM(**engine_args_vision) if not req_data.use_disagg_lang else None
+    # A disaggregated run is needed for MoE models, when EC is requested, or
+    # when a separate prefill device group is given. Otherwise run the
+    # encoder and language model in this process.
+    use_disagg = (
+        req_data.use_disagg_lang or args.use_ec or args.device_group_prefill is not None
+    )
+    llm_lang = None if use_disagg else LLM(**engine_args)
+    llm_vision = None if use_disagg else LLM(**engine_args_vision)
 
     # Cycle through the formatted prompts from req_data across requests.
     request_prompts = [
@@ -786,8 +889,8 @@ def main(args):
         else req_data.sampling_params
     )
 
-    # --- Disaggregated path (3-QPC, for MoE models like Qwen3-VL-MoE) ---
-    if req_data.use_disagg_lang:
+    # --- Disaggregated path: 2-QPC or 3-QPC, with or without EC ---
+    if use_disagg:
         with time_counter(args.time_generate):
             outputs = _run_disagg_vision_language(
                 args,
