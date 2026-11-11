@@ -139,12 +139,17 @@ def _ec_disagg_command(test_config, use_ec):
 @pytest.fixture(scope="class", params=[True, False], ids=["ec", "legacy"])
 def ec_disagg_server(request, _ec_disagg_test_config):
     """Starts one E-P-D disaggregated server per transport (EC, then legacy)
-    shared by every test in the class."""
+    shared by every test in the class. Server logs are written under
+    ``test_logs/`` in the repo."""
     test_config = dict(_ec_disagg_test_config)
     use_ec = request.param
     port = test_config["disaggregated_server_port"]
     commands = _ec_disagg_command(test_config, use_ec)
-    log_dir = Path.cwd() / f"ec_disagg_{'ec' if use_ec else 'legacy'}_{port}"
+    log_dir = (
+        Path(request.config.rootpath)
+        / "test_logs"
+        / f"ec_disagg_{'ec' if use_ec else 'legacy'}_{port}"
+    )
     log_dir.mkdir(parents=True, exist_ok=True)
 
     logging.info("Starting EC disaggregated server: %s", " ".join(commands))
@@ -178,3 +183,5 @@ def ec_disagg_server(request, _ec_disagg_test_config):
     except subprocess.TimeoutExpired:
         process.kill()
     time.sleep(5)
+
+    logging.info("EC disaggregated server logs: %s", log_dir)
