@@ -18,6 +18,7 @@ from vllm_qaic._custom_ops import rms_norm_hexagon as _call_hexagon_rms_norm
 from vllm_qaic.ops._triton_flags import triton_op_enabled
 
 triton_en = triton_op_enabled("RMS_NORM")
+triton_gated_en = triton_op_enabled("RMS_NORM_GATED")
 
 
 class QAicRMSNorm(RMSNorm):
@@ -68,7 +69,7 @@ class QAicGemmaRMSNorm(GemmaRMSNorm):
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if triton_op_enabled("RMS_NORM"):
+        if triton_en:
             from vllm.models.minimax_m3.amd.ops.gemma_rmsnorm import (
                 gemma_fused_add_rmsnorm,
                 gemma_rmsnorm,
@@ -110,7 +111,7 @@ class QAicRMSNormGated(RMSNormGated):
         if self.group_size is not None:
             return super().forward_native(x, z)
 
-        if triton_op_enabled("RMS_NORM_GATED"):
+        if triton_gated_en:
             from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
                 rmsnorm_fn,
             )
