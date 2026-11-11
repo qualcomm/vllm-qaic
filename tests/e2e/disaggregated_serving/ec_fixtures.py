@@ -24,12 +24,11 @@ _REQUIRED_KEYS = (
     "ctx_len",
     "num_encode_workers",
     "encode_device_group_size",
-    "num_prefill_workers",
-    "prefill_device_group_size",
     "num_decode_workers",
     "decode_device_group_size",
     "decode_bsz",
 )
+_ROLES = ("encode", "prefill", "decode")
 
 
 def _group_devices(ids, num_workers, group_size):
@@ -54,8 +53,11 @@ def _ec_disagg_test_config(request, pytestconfig, host, port, device_pool_ids):
         raise KeyError(f"qaic_test_config is missing: {', '.join(missing)}")
 
     counts = {
-        role: (kwargs[f"num_{role}_workers"], kwargs[f"{role}_device_group_size"])
-        for role in ("encode", "prefill", "decode")
+        role: (
+            kwargs.get(f"num_{role}_workers", 0),
+            kwargs.get(f"{role}_device_group_size", 1),
+        )
+        for role in _ROLES
     }
     total = sum(n * size for n, size in counts.values())
     ids = _device_pool.acquire(device_pool_ids, total)
@@ -101,28 +103,34 @@ def _ec_disagg_command(test_config, use_ec):
         "-vvv",
         f"--model={kwargs['model_name']}",
         f"--port={test_config['disaggregated_server_port']}",
-        f"--encode-port={ports['encode']}",
-        "--encode-device-group",
-        *devices["encode"],
-        f"--prefill-port={ports['prefill']}",
-        "--prefill-device-group",
-        *devices["prefill"],
-        f"--decode-port={ports['decode']}",
-        "--decode-device-group",
-        *devices["decode"],
+    ]
+    for role in _ROLES:
+        if not devices[role]:
+            continue
+        commands += [
+            f"--{role}-port={ports[role]}",
+            f"--{role}-device-group",
+            *devices[role],
+        ]
+    commands += [
         f"--max-model-len={kwargs['ctx_len']}",
         "--encode-max-num-seqs=1",
-        "--prefill-max-num-seqs=1",
         f"--decode-max-num-seqs={kwargs['decode_bsz']}",
         "--generation-config=vllm",
         "--quantization=mxfp6",
         "--kv-cache-dtype=mxint8",
         "--no-async-scheduling",
         f"--limit-mm-per-prompt={json.dumps({'image': 1})}",
-        f"--kv-handOff-port={test_config['kv_handoff_port']}",
         *kwargs.get("extra_args", []),
     ]
-    for role in ("encode", "prefill", "decode"):
+    if devices["prefill"]:
+        commands += [
+            "--prefill-max-num-seqs=1",
+            f"--kv-handOff-port={test_config['kv_handoff_port']}",
+        ]
+    for role in _ROLES:
+        if not devices[role]:
+            continue
         override = kwargs.get(f"{role}_override_qaic_config")
         if override is not None:
             commands += [f"--{role}-override-qaic-config", json.dumps(override)]
@@ -136,13 +144,19 @@ def _ec_disagg_command(test_config, use_ec):
     return commands
 
 
-@pytest.fixture(scope="class", params=[True, False], ids=["ec", "legacy"])
+_TRANSPORTS = {"ec": True, "legacy": False}
+
+
+@pytest.fixture(scope="class", params=list(_TRANSPORTS), ids=list(_TRANSPORTS))
 def ec_disagg_server(request, _ec_disagg_test_config):
-    """Starts one E-P-D disaggregated server per transport (EC, then legacy)
-    shared by every test in the class. Server logs are written under
-    ``test_logs/`` in the repo."""
+    """Starts one disaggregated multimodal server per transport, shared by
+    every test in the class. pytest runs the class once per transport, serially
+    and in ``_TRANSPORTS`` order (EC, then legacy); tests may rely on that
+    order, so do not reorder or parallelize it. E-PD (2-QPC) is used when the
+    marker has no prefill workers, otherwise E-P-D (3-QPC). Server logs are
+    written under ``test_logs/`` in the repo."""
     test_config = dict(_ec_disagg_test_config)
-    use_ec = request.param
+    use_ec = _TRANSPORTS[request.param]
     port = test_config["disaggregated_server_port"]
     commands = _ec_disagg_command(test_config, use_ec)
     log_dir = (
