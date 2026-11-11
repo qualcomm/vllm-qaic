@@ -366,24 +366,21 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
 
         Reads the ``input_ids`` binding shapes and collects every distinct
         ``seq_len`` value that does NOT match ``prefill_seq_len``.  Each such
-        value ``s`` corresponds to a decode specialization for ``K = s - 1``.
+        value ``s`` corresponds to ``K = s - 1``, or ``K = s // 2 - 1``
+        for DFlash hybrid QPCs with equal replay and verification blocks.
 
         Falls back to ``self.decode_ks`` (set at init time from the method name)
         if allowed_shapes is unavailable or empty.  This makes the feature
         transparent: old QPCs compiled without a K=0 spec continue to work
         unchanged because ``decode_ks`` stays at ``[max_k]``.
         """
-        if self.is_dflash_target:
-            # Hybrid targets also include accepted-prefix replay in input_ids;
-            # seq_len - 1 would count replay tokens as new drafts.
-            return list(self.decode_ks)
         try:
             input_idx = self.session.binding_index_map["input_ids"]
             ks: list[int] = []
             for i in range(len(self.session.allowed_shapes)):
                 s = self.session.allowed_shapes[i][input_idx][1][1]
                 if s != self.prefill_seq_len:
-                    k = s - 1
+                    k = (s // 2 if getattr(self, "dflash_hybrid", False) else s) - 1
                     if k not in ks:
                         ks.append(k)
             if ks:

@@ -144,12 +144,29 @@ def _vlm_model(model_type="qwen3_vl", missing_phase=None, batch_size=1):
     return model
 
 
-@pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe", "qwen3_vl", "gemma4"])
+@pytest.mark.parametrize(
+    "model_type", ["qwen3_5", "qwen3_5_moe", "qwen3_vl", "gemma4", "qwen3", "llama"]
+)
 @pytest.mark.parametrize("batch_size", [1, 2, 4, 8])
-def test_dflash_decode_k_excludes_hybrid_replay(model_type, batch_size):
+@pytest.mark.parametrize("qpc_k", [7, 9, 15])
+def test_dflash_decode_k_excludes_hybrid_replay(model_type, batch_size, qpc_k):
     model = _vlm_model(model_type, batch_size=batch_size)
     model.is_dflash_target = True
     model.decode_ks = [model.num_spec_tokens]
+    # Infer K from the QPC, even when it differs from the configured K=15.
+    width = (qpc_k + 1) * (2 if model.dflash_hybrid else 1)
+    model.session.allowed_shapes[-1][0] = (None, [batch_size, width])
+
+    assert QaicCausalLM._decode_ks_from_session(model) == [qpc_k]
+
+
+@pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe", "qwen3_vl", "gemma4"])
+@pytest.mark.parametrize("shapes", [None, [], [[(None, [1, 128])]]])
+def test_dflash_decode_k_falls_back_without_decode_shapes(model_type, shapes):
+    model = _vlm_model(model_type)
+    model.is_dflash_target = True
+    model.decode_ks = [model.num_spec_tokens]
+    model.session.allowed_shapes = shapes
 
     assert QaicCausalLM._decode_ks_from_session(model) == [15]
 
