@@ -82,6 +82,10 @@ qaic_environment_variables.update(
             "VLLM_QAIC_TRITON_RMS_NORM", "1" if _triton_all_ops_en else "0"
         )
         == "1",
+        "VLLM_QAIC_TRITON_RMS_NORM_GATED": lambda: os.getenv(
+            "VLLM_QAIC_TRITON_RMS_NORM_GATED", "1" if _triton_all_ops_en else "0"
+        )
+        == "1",
         "VLLM_QAIC_TRITON_MM_ENCODER_ATTENTION": lambda: os.getenv(
             "VLLM_QAIC_TRITON_MM_ENCODER_ATTENTION",
             "1" if _triton_all_ops_en else "0",
