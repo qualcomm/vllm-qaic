@@ -2,7 +2,7 @@
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 # ------------------------------------------------------------------
-"""Shared disaggregated-serving fixtures for all E2E test areas."""
+"""Shared disaggregated-serving test fixtures."""
 
 import json
 import logging
@@ -18,11 +18,6 @@ import regex as re
 
 from ..conftest import _closest_marker_for_node, _device_pool, _free_port
 from .utils import check_port_status
-
-
-def pytest_addoption(parser):
-    parser.addoption("--client-request-timeout", type=int, default=60)
-    parser.addoption("--disaggregated-startup-timeout", type=int, default=1200)
 
 
 @pytest.fixture(scope="session")
