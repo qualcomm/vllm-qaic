@@ -36,6 +36,7 @@ def test_audio(
     ctx_len,
     decode_bsz,
     dtype,
+    model_dtype,
     kv_dtype,
     device_group,
 ):
@@ -54,6 +55,7 @@ def test_audio(
             dtype,
             kv_dtype,
             additional_config,
+            model_dtype=model_dtype,
             max_num_batched_tokens=1500,
             trust_remote_code=True,
         ),
