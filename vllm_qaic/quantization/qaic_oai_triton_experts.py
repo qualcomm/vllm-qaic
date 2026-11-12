@@ -11,14 +11,16 @@ import triton
 from vllm.model_executor.layers.fused_moe.experts.gpt_oss_triton_kernels_moe import (
     OAITritonExperts,
     pack_bitmatrix,
+    use_legacy_triton_kernels,
 )
 from triton_kernels.matmul_ogs import GatherIndx, RoutingData, ScatterIndx
-from triton_kernels.tensor import (
-    SparseMatrix,
-    make_ragged_tensor_metadata,
-    wrap_torch_tensor,
-)
-from triton_kernels.tensor_details.dtype import BIT
+from triton_kernels.tensor import BIT, Bitmatrix, wrap_torch_tensor
+
+# vLLM's pinned v3.5.1 package predates SparseMatrix and ragged metadata.
+# Follow its API selection so the deferred QAIC expert import works with
+# both the bundled kernels and newer compatible installations.
+if not use_legacy_triton_kernels:
+    from triton_kernels.tensor import SparseMatrix, make_ragged_tensor_metadata
 
 
 def make_routing_data_qaic(
@@ -62,15 +64,31 @@ def make_routing_data_qaic(
 
     bitmatrix_shape = [n_rows, bm_cols * 32]
     bitmatrix_shape_max = [n_rows, None]
+
+    # matmul_ogs expects invalid routing weights to contain -1.
+    topk_weights = torch.where(topk_ids == -1, -1.0, topk_weights)
+
+    if use_legacy_triton_kernels:
+        from triton_kernels.routing import routing_from_bitmatrix
+
+        # The legacy wrapper takes logical shape information in its
+        # constructor; wrap_torch_tensor does not accept shape kwargs here.
+        bitmatrix = Bitmatrix(
+            bitmatrix,
+            shape=bitmatrix_shape,
+            shape_max=bitmatrix_shape_max,
+            scratchpad=None,
+        )
+        return routing_from_bitmatrix(
+            bitmatrix, topk_weights, topk_ids, num_local_experts, num_topk
+        )
+
     bitmatrix = wrap_torch_tensor(
         bitmatrix,
         dtype=BIT,
         shape=bitmatrix_shape,
         shape_max=bitmatrix_shape_max,
     )
-
-    # matmul_ogs expects invalid routing weights to contain -1.
-    topk_weights = torch.where(topk_ids == -1, -1.0, topk_weights)
 
     sparse_logits = SparseMatrix(
         indx=topk_ids,
