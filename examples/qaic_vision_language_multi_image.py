@@ -622,21 +622,17 @@ def _run_disagg_vision_language(
         llm_vision = LLM(**engine_args_vision)
         llm_vision.encode(vision_inputs, pooling_task="embed")
 
-        # EC consumer only needs raw images + dummy grid rows; embeddings are
-        # fetched from the ECStore on the worker.
-        lang_inputs = []
-        for i, prompt in enumerate(request_prompts):
-            image_data = vision_inputs[i]["multi_modal_data"]["image"]
-            if req_data.image_grid_thw is None:
-                mm_data = image_data
-            else:
-                mm_data = {
-                    "image": image_data,
-                    "image_grid_thw": req_data.image_grid_thw,
-                }
-            lang_inputs.append(
-                {"prompt": prompt, "multi_modal_data": {"image": mm_data}}
-            )
+        # EC consumers receive the raw images; the embeddings are fetched from
+        # the ECStore on the worker by multimodal hash.
+        lang_inputs = [
+            {
+                "prompt": prompt,
+                "multi_modal_data": {
+                    "image": vision_inputs[i]["multi_modal_data"]["image"]
+                },
+            }
+            for i, prompt in enumerate(request_prompts)
+        ]
     else:
         # Legacy transport: encode in this process and inline the embeddings.
         llm_vision = LLM(**engine_args_vision)
@@ -754,6 +750,14 @@ def _run_disagg_vision_language(
                 kv_rank=1,
                 kv_port=args.kv_port,
             )
+            if args.use_ec:
+                ea["ec_transfer_config"] = ECTransferConfig(
+                    ec_connector="QaicECConnector",
+                    ec_connector_module_path=EC_CONNECTOR_MODULE_PATH,
+                    ec_role="ec_consumer",
+                    ec_rank=1,
+                    ec_port=args.ec_port,
+                )
             ready.wait()
             llm = LLM(**ea)
             done.wait()
@@ -845,6 +849,7 @@ def main(args):
     engine_args["quantization"] = "mxfp6"
     engine_args["kv_cache_dtype"] = "mxint8"
     engine_args["max_num_seqs"] = decode_bsz
+    engine_args["max_num_batched_tokens"] = seq_len
 
     # A disaggregated run is needed for MoE models, when EC is requested, or
     # when a separate prefill device group is given. Otherwise run the
