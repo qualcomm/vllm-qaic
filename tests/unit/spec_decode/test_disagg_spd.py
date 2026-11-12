@@ -125,12 +125,26 @@ def test_constructor_rejects_unsupported_speculative_method(runner_config):
         QaicModelRunnerAoT(config, torch.device("cpu"))
 
 
-def test_dflash_draft_config_does_not_inherit_target_handoff(runner_config):
-    config = runner_config("dflash", "kv_consumer")
+@pytest.mark.parametrize("method", ["dflash", "draft_model"])
+@pytest.mark.parametrize("target_compile_only", [False, True])
+@pytest.mark.parametrize("draft_compile_only", [None, False, True])
+def test_draft_config_preserves_compile_only(
+    runner_config, method, target_compile_only, draft_compile_only
+):
+    config = runner_config(method, "kv_consumer")
+    draft_override = {"device_group": [8, 9, 10, 11]}
+    if draft_compile_only is not None:
+        draft_override["compile_only"] = draft_compile_only
     config.additional_config = {
-        "override_qaic_config": {"compile_only": True},
-        "draft_override_qaic_config": {"device_group": [8, 9, 10, 11]},
+        "override_qaic_config": {"compile_only": target_compile_only},
+        "draft_override_qaic_config": draft_override,
     }
+    original_override = draft_override.copy()
+    proposer_class = (
+        "dflash_draft_model.QaicDFlashProposer"
+        if method == "dflash"
+        else "qaic_draft_model.QaicDraftModelProposer"
+    )
     init_patch, postprocess_patch = _patch_runner_init()
     with (
         init_patch,
@@ -139,18 +153,20 @@ def test_dflash_draft_config_does_not_inherit_target_handoff(runner_config):
             "vllm.config.utils.replace",
             side_effect=lambda value, **kw: SimpleNamespace(**{**vars(value), **kw}),
         ) as replace,
-        patch(
-            "vllm_qaic.spec_decode.dflash_draft_model.QaicDFlashProposer"
-        ) as proposer,
+        patch(f"vllm_qaic.spec_decode.{proposer_class}") as proposer,
     ):
         QaicModelRunnerAoT(config, torch.device("cpu"))
-    assert replace.call_args_list[0].kwargs["kv_transfer_config"] is None
     draft_config = proposer.call_args.args[0]
-    assert draft_config.kv_transfer_config is None
+    if method == "dflash":
+        assert replace.call_args_list[0].kwargs["kv_transfer_config"] is None
+        assert draft_config.kv_transfer_config is None
+        assert draft_config.scheduler_config is not config.scheduler_config
     assert config.kv_transfer_config.kv_role == "kv_consumer"
-    assert draft_config.scheduler_config is not config.scheduler_config
-    assert draft_config.additional_config["override_qaic_config"]["compile_only"]
-    assert "compile_only" not in config.additional_config["draft_override_qaic_config"]
+    effective = draft_config.additional_config["override_qaic_config"]
+    assert effective.get("compile_only", False) == bool(
+        target_compile_only or draft_compile_only
+    )
+    assert config.additional_config["draft_override_qaic_config"] == original_override
 
 
 @pytest.mark.parametrize(
@@ -256,6 +272,7 @@ def test_decode_k_mismatch_warnings(configured, available, messages, caplog):
 def test_compile_completion_is_deferred_when_draft_model_exists():
     spec_config = MagicMock()
     spec_config.uses_draft_model.return_value = True
+    spec_config.use_dflash.return_value = False
     model = SimpleNamespace(
         decode_ks=[0, 3],
         disagg_serving_en=False,

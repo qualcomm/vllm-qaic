@@ -500,9 +500,10 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 "draft_override_qaic_config"
             )
             if _draft_override is not None:
-                # Copy so draft-only options do not modify the parent config.
+                # Draft overrides replace target options; preserve compile-only mode
+                # without modifying the caller's draft config.
                 _draft_override = _draft_override.copy()
-                if spec_cfg.use_dflash() and (
+                if (
                     self.vllm_config.additional_config.get("override_qaic_config") or {}
                 ).get("compile_only"):
                     _draft_override["compile_only"] = True
@@ -1325,6 +1326,8 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 decode_lora_ids = req_lora_mapping[: self.num_decodes].astype(np.int64)
                 prefill_lora_ids = req_lora_mapping[self.num_decodes :].astype(np.int64)
 
+            # Capture local TLM prefill only for standalone DFlash.
+            # Consumers queue DLM prefill from transferred hidden states below.
             is_disagg = self.is_kv_producer or self.is_kv_consumer
             _dflash_prefill = is_dflash and not is_disagg
 
@@ -1402,8 +1405,20 @@ class QaicModelRunnerAoT(GPUModelRunner):
                     lora_ids=decode_lora_ids,
                     dflash_decode_hidden_buf=getattr(self, "_tlm_hidden_buf", None),
                 )
-                if self.is_kv_consumer and is_dflash and self.num_decodes < num_reqs:
-                    self._prepare_dflash_disagg_prefill(hidden_states_decode)
+                if self.is_kv_consumer and is_dflash:
+                    for row in range(self.num_decodes, num_reqs):
+                        slot = int(self.batch_indices[row])
+                        buffers = self.kv_caches[slot]
+                        if len(buffers) != len(self.model.kv_cache_info) + 1:
+                            raise ValueError("DFlash handoff lacks prompt features.")
+                        length = int(self.input_batch.num_prompt_tokens[row])
+                        self.drafter.queue_prefill(
+                            self.input_batch.req_ids[row],
+                            slot,
+                            buffers[-1][0, 0, :length],
+                            length,
+                            hidden_states_decode[row : row + 1, :1],
+                        )
 
         hidden_states, logits = None, None
         num_decodes_executed = (
@@ -1598,24 +1613,21 @@ class QaicModelRunnerAoT(GPUModelRunner):
             scheduler_output.total_num_scheduled_tokens,
         )
 
-        # DFlash: advance DLM KV cache for prefilled requests every step, even when
-        # decode drafting is skipped (e.g. sequence too long for the drafter).
+        # DFlash must process pending prefill and advance KV even on a closed gate.
         if (
             self.speculative_config is not None
             and self.speculative_config.use_dflash()
             and not self.is_kv_producer
             and self.drafter is not None
+            and not propose_drafts_after_bookkeeping
         ):
-            self.drafter.update_prefill_kv()
-            if not propose_drafts_after_bookkeeping:
-                # Gate is batch-wide: advance others' DLM KV via a discarded forward.
-                self.drafter.propose(
-                    self.input_batch,
-                    valid_sampled_token_ids,
-                    self.batch_indices,
-                    self._tlm_hidden_buf,
-                    commit=False,
-                )
+            self.drafter.propose(
+                self.input_batch,
+                valid_sampled_token_ids,
+                self.batch_indices,
+                self._tlm_hidden_buf,
+                commit=False,
+            )
 
         if propose_drafts_after_bookkeeping:
             # ngram and other speculative decoding methods use the sampled
@@ -1680,8 +1692,6 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 self.batch_indices,
             )
         elif spec_config.use_dflash():
-            # DLM prefill KV was already advanced this step by update_prefill_kv();
-            # propose encapsulates the DFlash decode-drafting logic.
             draft_token_ids = self.drafter.propose(
                 self.input_batch,
                 sampled_token_ids,
@@ -1693,42 +1703,6 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 f"Unknown speculative decoding method: {spec_config.method}"
             )
         return draft_token_ids
-
-    def _prepare_dflash_disagg_prefill(self, logits: np.ndarray) -> None:
-        """Initialize DLM from the completed prompt and the target's bonus token."""
-        first = self.num_decodes
-        num_reqs = self.input_batch.num_reqs
-        slots = self.batch_indices[first:num_reqs]
-        width = self.model.prefill_seq_len
-        hidden_size = self.model.config.get_text_config().hidden_size
-        chunks, positions, lengths = [], [], []
-        for length, slot in zip(
-            self.input_batch.num_prompt_tokens[first:num_reqs], slots, strict=True
-        ):
-            length = int(length)
-            buffers = self.kv_caches[slot]
-            if len(buffers) != len(self.model.kv_cache_info) + 1:
-                raise ValueError("DFlash handoff is missing prompt features.")
-            received = buffers[-1][0, 0, :length]
-            if received.shape != (length, hidden_size):
-                raise ValueError("Transferred DFlash features do not match the prompt.")
-            # Own the prompt before SHM cleanup; reuse the normal DLM prefill path.
-            shape = (-(-length // width), 1, width, hidden_size)
-            hidden = np.zeros(shape, dtype=received.dtype)
-            hidden.reshape(-1, hidden_size)[:length] = received
-            chunks.extend(hidden)
-            positions.append(np.arange(length, dtype=np.int64))
-            lengths.append(length)
-        assert self.drafter is not None
-        self.drafter.build_prefill_pending(
-            np.cumsum(lengths, dtype=np.int64),
-            np.concatenate(positions),
-            slots,
-            np.zeros(len(slots), dtype=bool),
-            logits[first:num_reqs, :1],
-            chunks,
-            self.input_batch.req_ids[first:num_reqs],
-        )
 
     def _setup_dflash_hidden_capture(self) -> None:
         """Allocate + bind the TLM decode hidden-state buffer for DFlash. The DLM
@@ -1750,32 +1724,24 @@ class QaicModelRunnerAoT(GPUModelRunner):
     def load_model(self, *args, **kwargs) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
         time_before_load = time.perf_counter()
-        from vllm_qaic.model_loader.qaic import QaicCompilationComplete, load_qaic_model
+        from vllm_qaic.model_loader.qaic import load_qaic_model
 
         spec = self.speculative_config
         is_dflash = spec is not None and spec.use_dflash()
         _has_draft_model = (
-            self.speculative_config is not None
-            and self.speculative_config.uses_draft_model()
+            spec is not None
+            and (spec.uses_draft_model() or is_dflash)
             and self.drafter is not None
         )
         with set_current_vllm_config(self.vllm_config):
             speculative_model_type = "default"
             if self.num_spec_tokens:
                 speculative_model_type = "target"
-            try:
-                self.model: nn.Module = load_qaic_model(
-                    self.vllm_config,
-                    speculative_model_type,
-                    raise_on_compile_complete=not _has_draft_model,
-                )
-            except QaicCompilationComplete:
-                # Finish the draft before propagating the target's compile-only exit.
-                if is_dflash and self.drafter is not None:
-                    cfg = self.vllm_config.additional_config["override_qaic_config"]
-                    self.drafter.tlm_prefill_seq_len = int(cfg["prefill_seq_len"])
-                    self.drafter.load_model()
-                raise
+            self.model: nn.Module = load_qaic_model(
+                self.vllm_config,
+                speculative_model_type,
+                raise_on_compile_complete=not _has_draft_model,
+            )
             # Sync decode_ks from the loaded model: _decode_ks_from_session()
             # corrects it to the QPC's actual specializations (e.g. [0] for a
             # seq_len=1-only QPC, or [0, K] for a multi-spec QPC).  Without this
@@ -1814,12 +1780,12 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 " models with hybrid KV cache"
             )
         if _has_draft_model and self.drafter is not None:
+            if is_dflash:
+                # Size the DLM's context chunks from the target prefill width.
+                self.drafter.tlm_prefill_seq_len = self.model.prefill_seq_len
             self.drafter.load_model()
-        elif is_dflash and self.drafter is not None:
-            # DFlash: the DLM's sub-block fan-out is sized by the TLM prefill_seq_len.
-            self.drafter.tlm_prefill_seq_len = self.model.prefill_seq_len
-            self.drafter.load_model()
-            self._setup_dflash_hidden_capture()
+            if is_dflash:
+                self._setup_dflash_hidden_capture()
 
         time_after_load = time.perf_counter()
         logger.info(

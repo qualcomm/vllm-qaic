@@ -5,6 +5,7 @@
 
 from contextlib import nullcontext
 from types import MethodType, SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -15,18 +16,25 @@ from vllm_qaic.worker.model_runner import QaicModelRunnerAoT
 
 
 @pytest.mark.parametrize(
-    "uses_mrope,with_prefill,consumer",
+    "uses_mrope,with_prefill,consumer,existing_consumer_decodes",
     [
-        (False, False, False),
-        (False, True, False),
-        (True, False, False),
-        (False, False, True),
+        (False, False, False, 0),
+        (False, True, False, 0),
+        (True, False, False, 0),
+        (False, False, True, 0),
+        (False, False, True, 1),
     ],
 )
 @pytest.mark.parametrize("signal_count", [1, 7, 16])
 @pytest.mark.parametrize("method", ["dflash", "draft_model", "ngram"])
 def test_decode_padding_ignores_stale_positive_token_ids(
-    monkeypatch, uses_mrope, with_prefill, consumer, signal_count, method
+    monkeypatch,
+    uses_mrope,
+    with_prefill,
+    consumer,
+    existing_consumer_decodes,
+    signal_count,
+    method,
 ):
     block_size, ctx_len = 16, 4096
     num_decodes = 1 if uses_mrope else 2
@@ -77,7 +85,7 @@ def test_decode_padding_ignores_stale_positive_token_ids(
     spec = SimpleNamespace(method=method, use_dflash=lambda: method == "dflash")
     runner = SimpleNamespace(
         input_batch=batch,
-        num_decodes=0 if consumer else num_decodes,
+        num_decodes=existing_consumer_decodes if consumer else num_decodes,
         max_decode_tokens=block_size,
         active_k=15,
         decode_ks=[15],
@@ -117,16 +125,20 @@ def test_decode_padding_ignores_stale_positive_token_ids(
         lora_config=None,
         vllm_config=None,
         kv_cache_info=None,
-        kv_caches=None,
+        kv_caches=[
+            [None, np.zeros((1, 1, 10, 8), dtype=np.float32)]
+            for _ in range(num_reqs + 1)
+        ],
         maybe_get_kv_connector_output=lambda *args, **kwargs: nullcontext(None),
         create_logits_np=lambda n, vocab, width=1: np.zeros(
             (n, width, vocab), dtype=np.float32
         ),
         _compute_hidden_states_and_logits=lambda *args, **kwargs: (None, None),
         _tlm_prefill_hidden_chunks=[],
-        _prepare_dflash_disagg_prefill=lambda logits: None,
         _dflash_hidden_dtype=np.float32,
-        drafter=SimpleNamespace(build_prefill_pending=lambda *args: None),
+        drafter=SimpleNamespace(
+            build_prefill_pending=lambda *args: None, queue_prefill=Mock()
+        ),
         model=RecordingModel(
             is_vision_encoder=False,
             vocab_size=32,
@@ -135,6 +147,7 @@ def test_decode_padding_ignores_stale_positive_token_ids(
             num_prefill_chunks=lambda cum: len(cum),
             tlm_hidden_size=8,
             prefill_seq_len=128,
+            kv_cache_info=[None],
         ),
     )
     for name in (
@@ -158,6 +171,16 @@ def test_decode_padding_ignores_stale_positive_token_ids(
         scheduled_spec_decode_tokens={},
     )
     QaicModelRunnerAoT.execute_model(runner, scheduler)
+    if consumer and method == "dflash":
+        queued = runner.drafter.queue_prefill.call_args_list
+        assert len(queued) == num_reqs - runner.num_decodes
+        for call, row in zip(queued, range(runner.num_decodes, num_reqs), strict=True):
+            req_id, slot, hidden, length, logits = call.args
+            assert (req_id, slot, length) == (req_ids[row], row, 10)
+            assert np.shares_memory(hidden, runner.kv_caches[slot][-1])
+            assert logits.shape == (1, 1, 32)
+    else:
+        runner.drafter.queue_prefill.assert_not_called()
 
     decode = next(call for call in calls if not call["is_prompt"])
     positions = decode["positions"].reshape((-1, num_decodes, block_size))

@@ -254,6 +254,34 @@ class QaicDFlashProposer:
 
         self._prefill_pending = pending
 
+    def queue_prefill(
+        self,
+        req_id: str,
+        slot: int,
+        target_hidden: np.ndarray,
+        length: int,
+        logits: np.ndarray,
+    ) -> None:
+        """Own a completed prompt's features before its handoff buffer is released."""
+        if target_hidden.shape != (length, self.hidden_size):
+            raise ValueError("DFlash features do not match the prompt.")
+        width = self.tlm_prefill_seq_len
+        hidden = np.zeros(
+            (-(-length // width), 1, width, self.hidden_size), dtype=target_hidden.dtype
+        )
+        hidden.reshape(-1, self.hidden_size)[:length] = target_hidden
+        self._prefill_pending.append(
+            {
+                "target_hidden": list(hidden),
+                "prefill_positions": np.arange(length, dtype=np.int64),
+                "prefill_cum_sum": np.array([length], dtype=np.int64),
+                "batch_indices": np.array([slot], dtype=np.int64),
+                "prefill_is_partial": np.array([False]),
+                "last_chunk_logits": logits,
+                "req_id": req_id,
+            }
+        )
+
     def update_prefill_kv(self) -> None:
         """Drain pending DLM prefill work items; no-op when nothing pending."""
         for ctx in self._prefill_pending:
@@ -414,6 +442,8 @@ class QaicDFlashProposer:
         commit: bool = True,
     ) -> list[list[int]]:
         """Batched DLM forward; commit=False still advances KV but discards drafts."""
+        # Like the ordinary draft proposer, initialize prompts before decode.
+        self.update_prefill_kv()
         num_reqs = input_batch.num_reqs
         req_ids = input_batch.req_ids[:num_reqs]
         in_decode_phase = (

@@ -434,8 +434,6 @@ class QaicPlatform(Platform):
                     raise ValueError("DFlash disaggregation requires dense attention.")
                 if sched.async_scheduling or kv.kv_connector != "QaicConnector":
                     raise ValueError("DFlash needs synchronous QaicConnector.")
-                if kv.kv_role not in {"kv_producer", "kv_consumer"}:
-                    raise ValueError("DFlash requires a KV producer or consumer.")
                 ccl_keys = (
                     "ccl_enabled",
                     "comp_ctx_lengths_prefill",
@@ -443,18 +441,14 @@ class QaicPlatform(Platform):
                 )
                 if any(cfg.get(key) for key in ccl_keys):
                     raise ValueError("DFlash disaggregation does not support CCL.")
-                stages = int(cfg.setdefault("stages", 1))
-                if stages < 1:
-                    raise ValueError("Pipeline stages must be positive.")
+                stages = int(cfg.get("stages", 1))
                 if kv.kv_role == "kv_producer" and stages > 1:
-                    # Schedule enough chunks to keep the prefill pipeline occupied.
-                    window = min(
-                        model.max_model_len, cfg["prefill_seq_len"] * (stages + 1)
-                    )
-                    sched.long_prefill_token_threshold = window
-                    draft_slots = spec_config.max_num_new_slots_for_drafting
+                    # Budget multiple fixed-size chunks per synchronous PP call.
+                    # Add back vLLM's draft-slot reservation; the producer never drafts.
                     sched.max_num_batched_tokens = (
-                        window + draft_slots * sched.max_num_seqs
+                        min(model.max_model_len, cfg["prefill_seq_len"] * (stages + 1))
+                        + spec_config.max_num_new_slots_for_drafting
+                        * sched.max_num_seqs
                     )
             assert not (
                 vllm_config.kv_transfer_config.kv_role != "kv_producer"

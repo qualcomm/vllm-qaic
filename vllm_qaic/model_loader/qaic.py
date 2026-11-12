@@ -183,6 +183,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             vllm_config.kv_transfer_config
         )
         self._dflash_pipeline_buffers: list[dict[str, np.ndarray]] = []
+        self._dflash_pipeline_pending: dict[int, tuple] = {}
         self._dflash_prefill_hidden: dict[int, np.ndarray] = {}
         self.is_kv_consumer: bool = bool(
             vllm_config.kv_transfer_config
@@ -627,8 +628,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         if self.last_decode:
             self.last_decode = False
 
-        pending_hidden: dict[int, tuple[dict, int, int]] = {}
-        free_hidden = []
         if self.dflash_disagg:
             assert logits is not None
             scratch = self._dflash_prefill_hidden_scratch
@@ -640,24 +639,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     }
                     for _ in range(self.session.prefill_num_execObj)
                 ]
-            free_hidden = list(range(len(self._dflash_pipeline_buffers)))
-
-        def complete_chunk(exec_obj_idx):
-            self.complete_inf(exec_obj_idx, True)
-            if self.dflash_disagg:
-                assert logits is not None
-                inputs, row, buffer_index = pending_hidden.pop(exec_obj_idx)
-                logits[row : row + 1] = inputs["logits"]
-                slot = int(inputs["batch_index"].item())
-                positions = inputs["position_ids"][0].reshape(-1)
-                valid = positions >= 0
-                hidden = self._dflash_prefill_hidden[slot]
-                hidden[positions[valid]] = inputs["hidden_states"][0, valid]
-                if positions[valid][-1] + 1 == hidden.shape[0]:
-                    # Only the completed prompt enters the ordinary KV handoff.
-                    kv_caches[slot][-1][0, 0, : hidden.shape[0]] = hidden
-                    del self._dflash_prefill_hidden[slot]
-                free_hidden.append(buffer_index)
 
         # One CCL bucket for the batch, keyed off each request's TOTAL prompt
         # length (final position) so every chunk of a request keeps one bucket
@@ -773,12 +754,12 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                         "completion."
                     )
                     eid = pending_exec_queue.get(timeout=120)
-                    complete_chunk(eid)
+                    self.complete_inf(eid, True)
                 if self.dflash_disagg:
-                    buffer_index = free_hidden.pop()
+                    buffers = self._dflash_pipeline_buffers.pop()
                     if "num_logits_to_keep" in self.session.input_names:
                         chunk_inputs.update(self.prefill_num_logits_buffer or {})
-                    chunk_inputs.update(self._dflash_pipeline_buffers[buffer_index])
+                    chunk_inputs.update(buffers)
                 # Submit Chunk to LRT Queue
                 handoff = kv_caches[batch_index] if last_chunk else None
                 if self.dflash_disagg and handoff is not None:
@@ -789,13 +770,17 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     kv_cache_buffers=handoff,
                 )
                 if self.dflash_disagg:
-                    pending_hidden[exec_obj_idx] = (chunk_inputs, index, buffer_index)
+                    self._dflash_pipeline_pending[exec_obj_idx] = (
+                        chunk_inputs,
+                        logits[index : index + 1],
+                        kv_caches[batch_index][-1] if last_chunk else None,
+                        buffers,
+                    )
                 if self.comp_ctx_lengths_prefill is not None:
                     # Record the bucket this slot is now running so future
                     # batches can fold it into max(active_ccl.values()).
                     self.active_ccl[exec_obj_idx] = chosen_ccl
-                if not self.dflash_disagg:
-                    time.sleep(0.01)
+                time.sleep(0.01)
                 pending_exec_queue.put(exec_obj_idx)
         # wait for all chunks to finish
         if not self.use_async_scheduling:
@@ -803,7 +788,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 exec_obj_idx = pending_exec_queue.get(timeout=120)
                 if callback:
                     callback()
-                complete_chunk(exec_obj_idx)
+                self.complete_inf(exec_obj_idx, True)
         elif callback:
             # async path: free shm buffers, overlapping cleanup with device execution
             callback(self.stages)
@@ -1144,6 +1129,22 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             # Slot is no longer in flight; drop its CCL so max(active_ccl)
             # reflects only what's still running.
             self.active_ccl[index] = 0
+
+        if is_prefill and self.dflash_disagg:
+            pending = self._dflash_pipeline_pending.pop(index, None)
+            if pending is not None:
+                # Collect features only after completion, before reusing outputs.
+                inputs, logits, handoff, buffers = pending
+                logits[:] = inputs["logits"]
+                slot = int(inputs["batch_index"].item())
+                positions = inputs["position_ids"][0].reshape(-1)
+                valid = positions >= 0
+                hidden = self._dflash_prefill_hidden[slot]
+                hidden[positions[valid]] = inputs["hidden_states"][0, valid]
+                if handoff is not None:
+                    handoff[0, 0, : hidden.shape[0]] = hidden
+                    del self._dflash_prefill_hidden[slot]
+                self._dflash_pipeline_buffers.append(buffers)
 
     @property
     def decode_execObj_idx(self) -> int | None:
@@ -2290,16 +2291,8 @@ def _get_qaic_compile_config(
                 qaic_config = {}
             qaic_config["target_layer_ids"] = dflash_cfg["target_layer_ids"]
             qaic_config["dflash_dlm_repo"] = dflash_cfg["dlm_repo"]
-            if vllm_config.kv_transfer_config:
-                # PP splits model IO; other roles only expose retained KV for handoff.
-                if not is_kv_consumer and int(cfg.get("stages", 1)) > 1:
-                    cfg["split_model_io"] = True
-                    cfg.pop("split_retained_state_io", None)
-                else:
-                    cfg["split_retained_state_io"] = True
-                    cfg.pop("split_model_io", None)
-                if not is_kv_consumer:
-                    num_logits_to_keep = 1
+            if vllm_config.kv_transfer_config and not is_kv_consumer:
+                num_logits_to_keep = 1
     # On Device Sampling
     if cfg.get("aic_include_sampler") is not None:
         if qaic_config is None:

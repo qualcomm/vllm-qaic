@@ -10,7 +10,7 @@ from pathlib import Path
 from queue import Queue
 import runpy
 import sys
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import Mock
 
 import numpy as np
@@ -55,7 +55,9 @@ def pipeline():
     model = SimpleNamespace(
         last_decode=False,
         dflash_disagg=True,
+        disagg_producer_en=True,
         _dflash_pipeline_buffers=[],
+        _dflash_pipeline_pending={},
         _dflash_prefill_hidden={},
         _dflash_prefill_hidden_scratch=np.zeros((1, 4, 3), dtype=np.float32),
         config=SimpleNamespace(get_text_config=lambda: SimpleNamespace(hidden_size=3)),
@@ -70,9 +72,10 @@ def pipeline():
             input_names=[],
             prefill_available_exec_objs=available,
             np_run_pipeline=submit,
+            complete_inf=complete,
         ),
-        complete_inf=complete,
     )
+    model.complete_inf = MethodType(QaicCausalLM.complete_inf, model)
     return model, handoffs, pending, available
 
 
@@ -104,6 +107,56 @@ def test_pipeline_handoff_contains_whole_prompt_and_excludes_padding(pipeline, l
     assert np.all(logits == length - 1)
     assert available.qsize() == 2 and not pending
     assert not model._dflash_prefill_hidden
+    assert not model._dflash_pipeline_pending
+    assert len(model._dflash_pipeline_buffers) == 2
+
+
+def test_failed_completion_preserves_pending_features_and_buffers(
+    pipeline, monkeypatch
+):
+    model, _, pending, available = pipeline
+    hidden = np.full((1, 1, 3, 3), -999, dtype=np.float32)
+    complete = model.session.complete_inf
+    monkeypatch.setattr(
+        model.session,
+        "complete_inf",
+        Mock(side_effect=RuntimeError("inference failed")),
+    )
+    with pytest.raises(RuntimeError, match="inference failed"):
+        run_prefill(model, 0, 0, 3, 3, [[np.zeros((1, 1, 3, 2)), hidden]])
+    assert len(model._dflash_pipeline_pending) == len(pending) == 1
+    assert len(model._dflash_pipeline_buffers) == available.qsize() == 1
+    assert np.all(hidden == -999)
+    monkeypatch.setattr(model.session, "complete_inf", complete)
+    model.complete_inf(next(iter(pending)), True)
+    np.testing.assert_array_equal(hidden[0, 0, :, 0], np.arange(3))
+    assert not model._dflash_pipeline_pending and not pending
+    assert len(model._dflash_pipeline_buffers) == available.qsize() == 2
+
+
+@pytest.mark.parametrize("dflash,is_prefill", [(False, True), (True, False)])
+def test_other_completions_do_not_consume_pipeline_features(
+    pipeline, monkeypatch, dflash, is_prefill
+):
+    model, _, _, _ = pipeline
+    model.dflash_disagg = dflash
+    marker = object()
+    model._dflash_pipeline_pending[0] = marker
+    complete = Mock()
+    monkeypatch.setattr(model.session, "complete_inf", complete)
+    model.complete_inf(0, is_prefill)
+    complete.assert_called_once_with(0, is_prefill)
+    assert model._dflash_pipeline_pending[0] is marker
+
+
+def test_prefill_completion_without_pipeline_features(pipeline, monkeypatch):
+    model, _, _, _ = pipeline
+    complete = Mock()
+    monkeypatch.setattr(model.session, "complete_inf", complete)
+    model.complete_inf(0, True)
+    complete.assert_called_once_with(0, True)
+    assert not model._dflash_pipeline_pending
+    assert not model._dflash_pipeline_buffers
 
 
 def test_partial_scheduler_steps_do_not_publish_or_lose_features(pipeline):
@@ -140,95 +193,69 @@ def test_interleaved_request_slots_keep_independent_prompt_features(pipeline):
     np.testing.assert_array_equal(hidden_b[0, 0, :, 0], np.arange(9))
 
 
+@pytest.fixture
+def prompt_proposer():
+    proposer = QaicDFlashProposer.__new__(QaicDFlashProposer)
+    proposer.hidden_size = 3
+    proposer.tlm_prefill_seq_len = 8
+    proposer._prefill_pending = []
+    return proposer
+
+
 @pytest.mark.parametrize("length", [1, 4, 5, 13, 33, 129])
-def test_received_prompt_is_owned_before_shared_memory_release(length):
-    features = np.arange(length * 3, dtype=np.float32).reshape(1, 1, length, 3)
-    build = Mock()
-    runner = SimpleNamespace(
-        num_decodes=0,
-        batch_indices=np.array([0]),
-        input_batch=SimpleNamespace(
-            num_reqs=1, num_prompt_tokens=[length], req_ids=["r"]
-        ),
-        drafter=SimpleNamespace(build_prefill_pending=build),
-        model=SimpleNamespace(
-            kv_cache_info=[None],
-            prefill_seq_len=8,
-            config=SimpleNamespace(
-                get_text_config=lambda: SimpleNamespace(hidden_size=3)
-            ),
-        ),
-        kv_caches=[[None, features]],
-    )
+@pytest.mark.parametrize("dtype", [np.float16, np.float32])
+def test_received_prompt_is_owned_before_shared_memory_release(
+    prompt_proposer, length, dtype
+):
+    features = np.arange(length * 3, dtype=dtype).reshape(1, 1, length, 3)
     logits = np.arange(32).reshape(1, 4, 8)
-    QaicModelRunnerAoT._prepare_dflash_disagg_prefill(runner, logits)
-    owned = build.call_args.args[5]
+    prompt_proposer.queue_prefill("r", 0, features[0, 0], length, logits[:, :1])
+    pending = prompt_proposer._prefill_pending[0]
+    owned = pending["target_hidden"]
     assert len(owned) == -(-length // 8)
     for chunk in owned:
         assert chunk.shape == (1, 8, 3)
+        assert chunk.dtype == dtype
         assert not np.shares_memory(chunk, features)
     joined = np.concatenate(owned, axis=1)[0]
     np.testing.assert_array_equal(joined[:length], features[0, 0])
     assert np.all(joined[length:] == 0)
     features[:] = -999
     assert np.all(joined >= 0)
-    np.testing.assert_array_equal(build.call_args.args[0], [length])
-    np.testing.assert_array_equal(build.call_args.args[1], np.arange(length))
-    np.testing.assert_array_equal(build.call_args.args[4], logits[:, :1])
+    np.testing.assert_array_equal(pending["prefill_cum_sum"], [length])
+    np.testing.assert_array_equal(pending["prefill_positions"], np.arange(length))
+    np.testing.assert_array_equal(pending["last_chunk_logits"], logits[:, :1])
 
 
-def test_batched_handoff_skips_existing_decodes_and_preserves_cache_slot_order():
+def test_prefill_queue_preserves_request_and_cache_slot_order(prompt_proposer):
     lengths = [9, 5]
     features = [
         np.full((1, 1, n, 3), value, dtype=np.float32)
         for n, value in zip(lengths, [7, 11], strict=True)
     ]
-    build = Mock()
-    runner = SimpleNamespace(
-        num_decodes=1,
-        batch_indices=np.array([1, 2, 0]),
-        input_batch=SimpleNamespace(
-            num_reqs=3, num_prompt_tokens=[100, *lengths], req_ids=["decode", "a", "b"]
-        ),
-        drafter=SimpleNamespace(build_prefill_pending=build),
-        model=SimpleNamespace(
-            kv_cache_info=[None],
-            prefill_seq_len=8,
-            config=SimpleNamespace(
-                get_text_config=lambda: SimpleNamespace(hidden_size=3)
-            ),
-        ),
-        kv_caches=[[None, features[1]], [], [None, features[0]]],
-    )
     logits = np.arange(96).reshape(3, 4, 8)
-    QaicModelRunnerAoT._prepare_dflash_disagg_prefill(runner, logits)
-    args = build.call_args.args
-    np.testing.assert_array_equal(args[0], [9, 14])
-    np.testing.assert_array_equal(args[1], [*range(9), *range(5)])
-    np.testing.assert_array_equal(args[2], [2, 0])
-    np.testing.assert_array_equal(args[4], logits[1:, :1])
-    assert args[6] == ["a", "b"]
-    assert len(args[5]) == 3
-    assert np.all(args[5][0] == 7) and np.all(args[5][2][0, :5] == 11)
+    for i, (req_id, slot, length) in enumerate(
+        zip(["a", "b"], [2, 0], lengths, strict=True)
+    ):
+        prompt_proposer.queue_prefill(
+            req_id, slot, features[i][0, 0], length, logits[i + 1 : i + 2, :1]
+        )
+    pending = prompt_proposer._prefill_pending
+    assert [p["req_id"] for p in pending] == ["a", "b"]
+    assert [p["batch_indices"].item() for p in pending] == [2, 0]
+    assert [len(p["target_hidden"]) for p in pending] == [2, 1]
+    for i, p in enumerate(pending):
+        np.testing.assert_array_equal(p["prefill_positions"], np.arange(lengths[i]))
+        np.testing.assert_array_equal(p["last_chunk_logits"], logits[i + 1 : i + 2, :1])
+    assert np.all(pending[0]["target_hidden"][0] == 7)
+    assert np.all(pending[1]["target_hidden"][0][0, :5] == 11)
 
 
-@pytest.mark.parametrize("buffers", [[], [None], [None, np.zeros((1, 1, 3, 3))]])
-def test_handoff_rejects_missing_or_truncated_prompt_features(buffers):
-    runner = SimpleNamespace(
-        num_decodes=0,
-        batch_indices=np.array([0]),
-        input_batch=SimpleNamespace(num_reqs=1, num_prompt_tokens=[5], req_ids=["r"]),
-        model=SimpleNamespace(
-            kv_cache_info=[None],
-            prefill_seq_len=8,
-            config=SimpleNamespace(
-                get_text_config=lambda: SimpleNamespace(hidden_size=3)
-            ),
-        ),
-        kv_caches=[buffers],
-    )
+@pytest.mark.parametrize("shape", [(0, 3), (3, 3), (5, 2)])
+def test_prefill_queue_rejects_invalid_prompt_features(prompt_proposer, shape):
     with pytest.raises(ValueError, match="DFlash"):
-        QaicModelRunnerAoT._prepare_dflash_disagg_prefill(runner, np.zeros((1, 4, 8)))
+        prompt_proposer.queue_prefill("r", 0, np.zeros(shape), 5, np.zeros((1, 1, 8)))
+    assert not prompt_proposer._prefill_pending
 
 
 def test_finished_draft_requests_use_normal_batch_gc():
@@ -309,7 +336,6 @@ def platform_config(monkeypatch):
             "QaicLMCacheConnectorV1",
             "QaicConnector",
         ),
-        ("kv_transfer_config", "kv_role", "kv_both", "producer or consumer"),
     ],
 )
 def test_disaggregation_rejects_unsupported_configuration(
@@ -326,8 +352,6 @@ def test_disaggregation_rejects_unsupported_configuration(
         ("ccl_enabled", True, "CCL"),
         ("comp_ctx_lengths_prefill", [128], "CCL"),
         ("comp_ctx_lengths_decode", [128], "CCL"),
-        ("stages", 0, "positive"),
-        ("stages", -1, "positive"),
     ],
 )
 def test_disaggregation_rejects_invalid_compile_options(
@@ -339,10 +363,12 @@ def test_disaggregation_rejects_invalid_compile_options(
 
 
 @pytest.mark.parametrize("model_type", ["qwen3", "llama", "future_dense"])
+@pytest.mark.parametrize("threshold", [0, 128])
 @pytest.mark.parametrize(
     "role,pp,bs,ctx",
     [
         ("kv_producer", 1, 1, 4096),
+        ("kv_producer", 2, 1, 4096),
         ("kv_producer", 2, 2, 4096),
         ("kv_producer", 4, 4, 256),
         ("kv_consumer", 1, 4, 4096),
@@ -350,23 +376,32 @@ def test_disaggregation_rejects_invalid_compile_options(
     ],
 )
 def test_dense_model_names_do_not_limit_pipeline_or_batching(
-    platform_config, model_type, role, pp, bs, ctx
+    platform_config, model_type, threshold, role, pp, bs, ctx
 ):
     cfg = platform_config
     cfg.model_config.hf_config.model_type = model_type
     cfg.model_config.max_model_len = ctx
     cfg.kv_transfer_config.kv_role = role
     cfg.scheduler_config.max_num_seqs = bs
+    cfg.scheduler_config.long_prefill_token_threshold = threshold
     cfg.additional_config["override_qaic_config"]["stages"] = pp
     QaicPlatform.check_and_update_config(cfg)
-    window = min(ctx, 128 * (pp + 1))
     budget = (
-        window + 16 * bs if role == "kv_producer" and pp > 1 else min(bs * 128, 512)
+        min(ctx, 128 * (pp + 1)) + 16 * bs
+        if role == "kv_producer" and pp > 1
+        else min(bs * 128, 512)
     )
     assert cfg.scheduler_config.max_num_batched_tokens == budget
     assert cfg.scheduler_config.max_num_scheduled_tokens is None
-    if role == "kv_producer" and pp > 1:
-        assert cfg.scheduler_config.long_prefill_token_threshold == window
+    assert cfg.scheduler_config.long_prefill_token_threshold == threshold
+
+
+def test_dflash_consumer_does_not_add_pipeline_stages(platform_config):
+    platform_config.kv_transfer_config.kv_role = "kv_consumer"
+    cfg = platform_config.additional_config["override_qaic_config"]
+    del cfg["stages"]
+    QaicPlatform.check_and_update_config(platform_config)
+    assert "stages" not in cfg
 
 
 def test_dflash_uses_common_prefix_cache_and_multimodal_checks(platform_config):
@@ -425,11 +460,15 @@ def test_completed_prompt_buffer_registered_only_for_dflash(
         lora_config=None,
         _setup_dflash_hidden_capture=Mock(),
     )
-    monkeypatch.setattr(qaic, "load_qaic_model", lambda *a, **kw: model)
+    load_model = Mock(return_value=model)
+    monkeypatch.setattr(qaic, "load_qaic_model", load_model)
     monkeypatch.setattr(
         model_runner, "set_current_vllm_config", lambda _: nullcontext()
     )
     QaicModelRunnerAoT.load_model(runner)
+    load_model.assert_called_once_with(
+        runner.vllm_config, "target", raise_on_compile_complete=role == "kv_producer"
+    )
     assert len(kv_info) == 1 and len(runner.kv_cache_info) == 2
     assert runner.kv_cache_info[-1] == (
         (1, 1, 128, 8),
@@ -440,16 +479,20 @@ def test_completed_prompt_buffer_registered_only_for_dflash(
     assert runner._setup_dflash_hidden_capture.call_count == (role == "kv_consumer")
     if draft:
         draft.load_model.assert_called_once()
+        assert draft.tlm_prefill_seq_len == model.prefill_seq_len
 
 
-@pytest.mark.parametrize("draft_error", [None, QaicCompilationComplete, ValueError])
-def test_compile_only_finishes_dlm_before_exit(monkeypatch, draft_error):
+@pytest.mark.parametrize("method", ["dflash", "draft_model"])
+@pytest.mark.parametrize("draft_error", [QaicCompilationComplete, ValueError])
+def test_compile_only_finishes_dlm_before_exit(monkeypatch, method, draft_error):
     from vllm_qaic.model_loader import qaic
     from vllm_qaic.worker import model_runner
 
-    monkeypatch.setattr(
-        qaic, "load_qaic_model", Mock(side_effect=QaicCompilationComplete())
+    target = SimpleNamespace(
+        disagg_serving_en=False, decode_ks=[15], prefill_seq_len=128
     )
+    load_model = Mock(return_value=target)
+    monkeypatch.setattr(qaic, "load_qaic_model", load_model)
     monkeypatch.setattr(
         model_runner, "set_current_vllm_config", lambda _: nullcontext()
     )
@@ -458,19 +501,23 @@ def test_compile_only_finishes_dlm_before_exit(monkeypatch, draft_error):
         model_config=SimpleNamespace(model="target"),
         num_spec_tokens=15,
         speculative_config=SimpleNamespace(
-            use_dflash=lambda: True, uses_draft_model=lambda: False
+            use_dflash=lambda: method == "dflash",
+            uses_draft_model=lambda: method == "draft_model",
         ),
-        vllm_config=SimpleNamespace(
-            additional_config={"override_qaic_config": {"prefill_seq_len": 128}}
-        ),
+        vllm_config=SimpleNamespace(kv_transfer_config=None),
         drafter=draft,
+        lora_config=None,
+        _setup_dflash_hidden_capture=Mock(),
     )
-    with pytest.raises(
-        ValueError if draft_error is ValueError else QaicCompilationComplete
-    ):
+    with pytest.raises(draft_error):
         QaicModelRunnerAoT.load_model(runner)
+    load_model.assert_called_once_with(
+        runner.vllm_config, "target", raise_on_compile_complete=False
+    )
     draft.load_model.assert_called_once()
-    assert draft.tlm_prefill_seq_len == 128
+    if method == "dflash":
+        assert draft.tlm_prefill_seq_len == target.prefill_seq_len
+    runner._setup_dflash_hidden_capture.assert_not_called()
 
 
 @pytest.mark.parametrize("reuse", [False, True])
@@ -530,6 +577,8 @@ def test_example_uses_unchanged_launcher(monkeypatch, reuse, pp, bs):
             "num_speculative_tokens": 15,
         }
         assert extra["override_qaic_config"]["prefill_only"] == (role == "prefill")
+        assert extra["override_qaic_config"]["split_model_io"] is True
+        assert "split_retained_state_io" not in extra["override_qaic_config"]
         assert worker_args.max_num_seqs == (1 if role == "prefill" else bs)
         if role == "decode":
             draft = extra["draft_override_qaic_config"]
@@ -545,8 +594,17 @@ def test_example_uses_unchanged_launcher(monkeypatch, reuse, pp, bs):
 @pytest.mark.parametrize(
     "role,stages", [("kv_producer", 1), ("kv_producer", 2), ("kv_consumer", 1)]
 )
-def test_compile_preserves_dflash_features_and_handoff_layout(
-    monkeypatch, model_type, role, stages
+@pytest.mark.parametrize(
+    "io_config",
+    [
+        {},
+        {"split_model_io": True},
+        {"split_retained_state_io": True},
+        {"split_model_io": False, "split_retained_state_io": False},
+    ],
+)
+def test_compile_preserves_dflash_features_and_launcher_io(
+    monkeypatch, model_type, role, stages, io_config
 ):
     from vllm_qaic.model_loader import qaic
 
@@ -569,7 +627,7 @@ def test_compile_preserves_dflash_features_and_handoff_layout(
             "override_qaic_config": {
                 "num_cores": 8,
                 "stages": stages,
-                "split_model_io": True,
+                **io_config,
             },
             "dflash_cfg": {
                 "block_size": 16,
@@ -591,9 +649,8 @@ def test_compile_preserves_dflash_features_and_handoff_layout(
     assert compiled.qaic_config["replicate_kv_heads"]
     assert compiled.cfg["prefill_only"] == (role == "kv_producer")
     assert compiled.num_logits_to_keep == (1 if role == "kv_producer" else 16)
-    if stages > 1:
-        assert compiled.cfg["split_model_io"]
-        assert "split_retained_state_io" not in compiled.cfg
-    else:
-        assert compiled.cfg["split_retained_state_io"]
-        assert "split_model_io" not in compiled.cfg
+    assert {
+        key: compiled.cfg[key]
+        for key in ("split_model_io", "split_retained_state_io")
+        if key in compiled.cfg
+    } == io_config

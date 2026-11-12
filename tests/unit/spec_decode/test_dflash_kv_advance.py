@@ -272,6 +272,136 @@ def _prep_prefill_proposer(decode_bsz, block_size, sub_blocks_per_chunk=2):
     return proposer
 
 
+@pytest.mark.parametrize("decode_bsz", [1, 4])
+@pytest.mark.parametrize("target_width", [4, 8])
+@pytest.mark.parametrize("commit", [False, True])
+def test_queued_prompt_matches_existing_prefill_inputs(
+    decode_bsz, target_width, commit
+):
+    lengths = [13] if decode_bsz == 1 else [13, 5]
+    slots = [0] if decode_bsz == 1 else [3, 0]
+    new_ids = [f"new_{i}" for i in range(len(lengths))]
+    existing = [] if decode_bsz == 1 else ["decode"]
+    results = []
+    for queued in (False, True):
+        proposer = _prep_prefill_proposer(decode_bsz, 4)
+        proposer.target_seq_len = target_width
+        proposer.num_sub_blocks = proposer.tlm_prefill_seq_len // target_width
+        proposer._dlm_position_ids_target = np.full(
+            (decode_bsz, target_width), -1, dtype=np.int64
+        )
+        proposer._dlm_target_hidden = np.zeros(
+            (decode_bsz, target_width, proposer.hidden_size), dtype=np.float32
+        )
+        recorder = _RecordingSession(proposer._dlm_logits_buf, proposer.vocab_size)
+        proposer.model.session = recorder
+        if existing:
+            proposer._state_for("decode").position_counter = 20
+        logits = np.zeros((len(lengths), 1, proposer.vocab_size), dtype=np.float32)
+        chunks = []
+        for i, length in enumerate(lengths):
+            features = np.arange(length * proposer.hidden_size, dtype=np.float32)
+            features = features.reshape(length, proposer.hidden_size) + 1000 * i
+            logits[i, 0, 7 + i] = 1
+            if queued:
+                proposer.queue_prefill(
+                    new_ids[i], slots[i], features, length, logits[i : i + 1]
+                )
+                features.fill(-999)
+            else:
+                hidden = np.zeros(
+                    (-(-length // 8), 1, 8, proposer.hidden_size), dtype=np.float32
+                )
+                hidden.reshape(-1, proposer.hidden_size)[:length] = features
+                chunks.extend(hidden)
+        if not queued:
+            proposer.build_prefill_pending(
+                np.cumsum(lengths, dtype=np.int64),
+                np.concatenate([np.arange(n, dtype=np.int64) for n in lengths]),
+                np.array(slots),
+                np.zeros(len(lengths), dtype=bool),
+                logits,
+                chunks,
+                new_ids,
+            )
+            proposer.update_prefill_kv()
+        batch = _FakeInputBatch(
+            existing + new_ids,
+            ([8] if existing else []) + lengths,
+            ([22] if existing else []) + [n + 1 for n in lengths],
+        )
+        batch_indices = np.array(([2] if existing else []) + slots)
+        sampled = ([[3]] if existing else []) + [[7 + i] for i in range(len(lengths))]
+        decode_hidden = np.full(
+            (batch.num_reqs, 4, proposer.hidden_size), 42, np.float32
+        )
+        first = proposer.propose(batch, sampled, batch_indices, decode_hidden, commit)
+        expected = sum(-(-n // target_width) for n in lengths)
+        assert recorder.run_count == expected + int(bool(existing) or not commit)
+        assert not proposer._prefill_pending
+        before = recorder.run_count
+        batch.num_tokens_no_spec += 1
+        second = proposer.propose(batch, sampled, batch_indices, decode_hidden, commit)
+        assert recorder.run_count == before + 1
+        states = {r: s.position_counter for r, s in proposer._req_state.items()}
+        results.append((first, second, states, recorder.input_calls))
+    assert results[0][:3] == results[1][:3]
+    assert len(results[0][3]) == len(results[1][3])
+    for old, new in zip(results[0][3], results[1][3], strict=True):
+        for name in old.keys() - {"logits"}:
+            np.testing.assert_array_equal(old[name], new[name], err_msg=name)
+
+
+@pytest.mark.parametrize("commit", [False, True])
+def test_propose_drains_partial_prefill_without_sampled_tokens(commit):
+    proposer = _prep_prefill_proposer(1, 4)
+    recorder = _RecordingSession(proposer._dlm_logits_buf, proposer.vocab_size)
+    proposer.model.session = recorder
+    proposer.build_prefill_pending(
+        np.array([5]),
+        np.arange(5),
+        np.array([0]),
+        np.array([True]),
+        None,
+        [np.ones((1, 8, proposer.hidden_size), dtype=np.float32)],
+        ["r"],
+    )
+    batch = _FakeInputBatch(["r"], [20], [20])
+    assert proposer.propose(
+        batch, [[]], np.array([0]), np.zeros((1, 4, proposer.hidden_size)), commit
+    ) == [[]]
+    assert recorder.run_count == 2
+    assert not proposer._prefill_pending
+    assert proposer._req_state["r"].position_counter == 4
+
+
+def test_queued_prefill_reinitializes_reused_request_and_cache_slot():
+    proposer = _prep_prefill_proposer(1, 4)
+    recorder = _RecordingSession(proposer._dlm_logits_buf, proposer.vocab_size)
+    proposer.model.session = recorder
+    for req_id, length, value in [("old", 13, 11), ("new", 5, 22), ("new", 9, 33)]:
+        logits = np.zeros((1, 1, proposer.vocab_size), dtype=np.float32)
+        proposer.queue_prefill(
+            req_id,
+            0,
+            np.full((length, proposer.hidden_size), value, np.float32),
+            length,
+            logits,
+        )
+        start = len(recorder.input_calls)
+        batch = _FakeInputBatch([req_id], [length], [length + 1])
+        proposer.propose(batch, [[0]], np.array([0]), np.zeros((1, 4, 8)))
+        assert set(proposer._req_state) == {req_id}
+        assert proposer._req_state[req_id].position_counter == length - 1
+        assert not proposer._prefill_pending
+        calls = recorder.input_calls[start:]
+        assert len(calls) == -(-length // 4)
+        for inputs in calls:
+            valid = inputs["position_ids_target"][0] >= 0
+            assert np.all(inputs["target_hidden"][0, valid] == value)
+            assert inputs["batch_index"][0, 0] == 0
+
+
 def test_build_prefill_pending_maps_each_request_to_its_own_chunks(
     block_size, decode_bsz
 ):
@@ -672,7 +802,6 @@ def test_runner_context_gate_reserves_dflash_bonus_slot(method, seq_len):
         batch_indices=np.array([0]),
         _tlm_hidden_buf=None,
         drafter=SimpleNamespace(
-            update_prefill_kv=lambda: None,
             propose=lambda *args, commit=True: calls.append(commit),
         ),
         propose_draft_token_ids=lambda *args: calls.append(True) or [[]],
