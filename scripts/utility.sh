@@ -28,7 +28,15 @@ TORCH_QAIC_VERSION="${TORCH_QAIC_VERSION:-0.1.0}"
 VLLM_TARGET_DEVICE_PYT="${VLLM_TARGET_DEVICE_PYT:-empty}"
 TORCHVISION_VERSION_PYT="${TORCHVISION_VERSION_PYT:-0.28.0+cpu}"
 TORCHAUDIO_VERSION_PYT="${TORCHAUDIO_VERSION_PYT:-2.11.0+cpu}"
+TRITON_QAIC="${TRITON_QAIC:-0}"                        # set to 1: Triton-QAIC wheel (SDK) + triton_kernels
+# triton_kernels is not on PyPI; installed from triton-lang/triton python/triton_kernels.
+# Pinned to the tag vllm itself pins (cmake/external_projects/triton_kernels.cmake):
+#   vllm 0.30.0 -> triton_kernels v3.5.1
+# v3.6+ removed matmul_ogs/routing, which vllm 0.30's GPT-OSS MoE path imports.
+# Update together with VLLM_VERSION.
+TRITON_KERNELS_REF="${TRITON_KERNELS_REF:-v3.5.1}"
 
 # === Paths ===
 TORCH_QAIC_BASE_PATH="${TORCH_QAIC_BASE_PATH:-/opt/qti-aic/integrations/torch_qaic}"
 VLLM_QAIC_SDK_PATH="${VLLM_QAIC_SDK_PATH:-/opt/qti-aic/integrations/vllm_qaic}"
+TRITON_QAIC_BASE_PATH="${TRITON_QAIC_BASE_PATH:-/opt/qti-aic/integrations/triton_qaic}"

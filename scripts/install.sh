@@ -24,6 +24,9 @@
 # Environment overrides:
 #   TRANSFORMERS_VERSION_AOT   If set, pins transformers version after qefficient install
 #   TRANSFORMERS_VERSION_PYT   If set, pins transformers version after torch_qaic install
+#   TRITON_QAIC                PYT only. If "1", installs the SDK Triton-QAIC wheel from
+#                              ${TRITON_QAIC_BASE_PATH}/pyXXX and triton_kernels (needed by
+#                              the GPT-OSS MoE path) from triton-lang/triton @ TRITON_KERNELS_REF.
 #   VLLM_BUILD_RUST            If "1", builds vllm's experimental Rust
 #                              OpenAI-compatible frontend from source instead
 #                              of installing from the git+URL. Requires a
@@ -122,6 +125,13 @@ else
     echo "  torchaudio     : ${TORCHAUDIO_VERSION_PYT}"
     echo "  torch-qaic     : ${TORCH_QAIC_VERSION}"
     echo "  target device  : ${VLLM_TARGET_DEVICE_PYT}"
+    if [ "${TRITON_QAIC}" = "1" ]; then
+        echo "  triton-qaic    : enabled"
+        echo "    wheel dir    : ${TRITON_QAIC_BASE_PATH}/${PYVER}"
+        echo "    triton_kernels ref : ${TRITON_KERNELS_REF}"
+    else
+        echo "  triton-qaic    : disabled  (set TRITON_QAIC=1 to enable)"
+    fi
 fi
 echo "  --------------------------------------------------------"
 if [ "${VLLM_BUILD_RUST:-0}" = "1" ]; then
@@ -244,6 +254,32 @@ elif [ "${MODE}" = "pyt" ]; then
         ${PIP} install --no-build-isolation "${REPO_ROOT}"
     else
         ${PIP} install --no-deps "${SDK_WHEEL_DIR}"/vllm_qaic-*pyt*.whl
+    fi
+
+    # Step 4 (optional): Triton-QAIC + triton_kernels. Runs last so the Hexagon
+    # triton build is never overwritten by a PyPI triton from an earlier step.
+    if [ "${TRITON_QAIC}" = "1" ]; then
+        echo "=== Step 4: Triton-QAIC wheel + triton_kernels ==="
+        TRITON_QAIC_WHEEL_DIR="${TRITON_QAIC_BASE_PATH}/${PYVER}"
+        if ! ls "${TRITON_QAIC_WHEEL_DIR}"/triton-*.whl >/dev/null 2>&1; then
+            echo "ERROR: no triton wheel in ${TRITON_QAIC_WHEEL_DIR} (set TRITON_QAIC_BASE_PATH)." >&2
+            exit 1
+        fi
+        # A PyPI triton has no Hexagon backend; remove it before installing the SDK build.
+        if ${PYTHON} -c "import importlib.metadata; importlib.metadata.version('triton')" 2>/dev/null; then
+            echo "INFO: uninstalling existing triton package..."
+            if [ "${USE_UV}" = "1" ]; then
+                ${PIP} uninstall triton
+            else
+                ${PIP} uninstall -y triton
+            fi
+        fi
+        ${PIP} install --no-deps "${TRITON_QAIC_WHEEL_DIR}"/triton-*.whl
+        # --no-deps: keep pip from pulling PyPI triton back in.
+        # --force-reinstall: triton_kernels reports version 1.0.0 at every tag, so pip
+        # would otherwise keep an existing copy from a different TRITON_KERNELS_REF.
+        ${PIP} install --no-deps --force-reinstall \
+            "triton_kernels @ git+https://github.com/triton-lang/triton.git@${TRITON_KERNELS_REF}#subdirectory=python/triton_kernels"
     fi
 fi
 

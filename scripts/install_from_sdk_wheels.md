@@ -9,6 +9,7 @@
 - [PYT mode install](#pyt-mode-install)
 - [AOT mode install](#aot-mode-install)
 - [AOT with triton-cpu (Speculative Decoding)](#aot-with-triton-cpu-speculative-decoding)
+- [PYT with triton-qaic](#pyt-with-triton-qaic)
 - [Verifying the install](#verifying-the-install)
 - [Environment variable reference](#environment-variable-reference)
 - [Troubleshooting](#troubleshooting)
@@ -114,6 +115,20 @@ When running SpD tests afterwards, set `TRITON_CPU_BACKEND=1`.
 
 ---
 
+## PYT with triton-qaic
+
+Running Triton kernels on QAIC needs the SDK Triton-QAIC wheel (`triton` 3.7.0, Hexagon
+backend). GPT-OSS additionally needs the `triton_kernels` package (v3.5.1, from
+`triton-lang/triton`) for its MoE path. Both are **opt-in** via `TRITON_QAIC=1`.
+
+```bash
+conda activate vllm-qaic-pyt   # Python 3.11, 3.12 or 3.13
+
+TRITON_QAIC=1 /opt/qti-aic/integrations/vllm_qaic/scripts/install.sh pyt
+```
+
+---
+
 ## Verifying the install
 
 Run these from a **neutral directory** such as `/tmp`:
@@ -178,6 +193,9 @@ All of these are read by `install.sh` / `utility.sh`; set them before invoking t
 | `VLLM_QAIC_SDK_PATH` | `/opt/qti-aic/integrations/vllm_qaic` | Where to find the wheels. Override to install from a staged or custom SDK copy. |
 | `VLLM_QAIC_INSTALL_SOURCE` | *(auto)* | Set to `wheel` to force wheel mode. Normally auto-detected from the absence of `setup.py`. |
 | `TORCH_QAIC_BASE_PATH` | `/opt/qti-aic/integrations/torch_qaic` | PYT only — where the `torch_qaic` wheels live. |
+| `TRITON_QAIC` | `0` | PYT only — set to `1` to install the SDK Triton-QAIC wheel (`triton`, needed to run Triton kernels on QAIC) and the `triton_kernels` package (needed by GPT-OSS). |
+| `TRITON_QAIC_BASE_PATH` | `/opt/qti-aic/integrations/triton_qaic` | PYT only — where the Triton-QAIC wheels live (`pyXXX/triton-*.whl`). |
+| `TRITON_KERNELS_REF` | `v3.5.1` | Git tag/commit of triton-lang/triton to install `python/triton_kernels` from. Follows the vllm version, not the triton wheel: vllm 0.30.0 pins v3.5.1 |
 | `TRITON_CPU` | `0` | AOT only — set to `1` to build and install the triton-cpu backend. |
 | `TRITON_CPU_SRC` | `${SCRIPT_DIR}/../.build/triton-cpu` | **Set this explicitly.** Clone + build location; needs >= 10 GB. The default lands under `/opt` when run from the SDK. |
 | `TRITON_CPU_COMPILE_MAX_JOBS` | `4` | Parallel build jobs for the triton-cpu C++ build. |
