@@ -328,6 +328,13 @@ class QaicKVCacheBank:
 
 
 class QaicConnector(KVConnectorBase_V1):
+    # Hybrid KV-cache models (e.g. MiniMax M3, which pairs its CP-sharded
+    # past_key/past_value buffers with a differently-shaped index_key
+    # buffer for the lightning indexer) must use this connector.
+    # QaicLMCacheConnectorV1 asserts len(set(kv_cache_info)) == 1 and
+    # rejects any hybrid KV cache outright. M3 serving also requires
+    # VLLM_QAIC_USE_LEGACY_SLICING_SPEC=1 (raw past_key.N/past_value.N/
+    # index_key.N binding names, no vllmKvCache.* prefix).
     def __init__(
         self,
         vllm_config: "VllmConfig",
