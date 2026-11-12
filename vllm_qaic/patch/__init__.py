@@ -72,6 +72,30 @@
 #       main process before fork) is sufficient.
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #
+# ** 6. File: patch_qaic_triton_import.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. vllm.triton_utils.HAS_TRITON / triton / tl / tldevice
+#    Why:
+#       Triton is required to run kernels on the QAIC Triton Backend, but
+#       upstream's HAS_TRITON check can end up False even when a usable
+#       Triton install is present (e.g. its Triton-CPU-backend check reads
+#       `importlib.metadata.version("vllm")`, which raises when vllm is
+#       installed under a different distribution name).
+#    How:
+#       Re-import triton and check for QAIC Triton Backend in
+#       triton.backends.backends; if found, re-enable HAS_TRITON and rebind
+#       triton/tl/tldevice on vllm.triton_utils to the real modules. Keep
+#       triton_kernels disabled here; the GPT-OSS quantization path enables
+#       and imports it lazily when that model is selected.
+#    Note:
+#       Must run before any vllm module does
+#       `from vllm.triton_utils import ...`, since that binds triton/tl/
+#       HAS_TRITON into the importing module's own namespace at that
+#       moment. Applied here (during pre_register_and_update) is early
+#       enough, since all such imports live under model_executor/layers/
+#       and v1/worker/, which only load during model/worker construction.
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#
 # ** 7. File: patch_mooncake_connector.py **
 #   1. vllm.distributed.kv_transfer.kv_connector.v1.mooncake.
 #      mooncake_connector.MooncakeConnectorWorker.__init__
@@ -160,6 +184,11 @@ import vllm_qaic.patch.patch_mem_utils  # noqa
 import vllm_qaic.patch.patch_mooncake_connector  # noqa
 
 import vllm_qaic.envs as qaic_envs
+
+if qaic_envs.VLLM_QAIC_ENABLE_TRITON_ATTN:
+    import vllm_qaic.patch.patch_qaic_triton_import  # noqa
+    import vllm_qaic.patch.patch_reshape_and_cache  # noqa
+
 
 # The numpy slot-mapping patch bypasses vLLM's Triton slot-mapping kernel. When
 # the in-tree Triton attention backend is enabled (VLLM_QAIC_ENABLE_TRITON_ATTN),

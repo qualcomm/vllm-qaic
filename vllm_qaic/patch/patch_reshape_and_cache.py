@@ -43,9 +43,12 @@ from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     reshape_and_cache_kernel_flash,
 )
 
+from vllm_qaic.logger import init_logger
+
 # QAIC launch config for reshape_and_cache_kernel_flash: 16 warps x 4 stages.
 QAIC_NUM_WARPS = 16
 QAIC_NUM_STAGES = 4
+logger = init_logger(__name__)
 
 
 def _qaic_triton_reshape_and_cache_flash(
@@ -125,6 +128,14 @@ def _qaic_triton_reshape_and_cache_flash(
         triton.cdiv(n, meta["TILE_SIZE"]),
     )
 
+    logger.info_once(
+        "QAIC Triton forward: KV-cache update -> reshape_and_cache_kernel_flash "
+        "(kv_heads=%d, head_size=%d, block_size=%d, dtype=%s)",
+        num_heads,
+        head_size,
+        block_size,
+        key_cache.dtype,
+    )
     reshape_and_cache_kernel_flash[grid](
         key_ptr=key,
         value_ptr=value,

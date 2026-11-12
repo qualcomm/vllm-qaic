@@ -44,18 +44,20 @@ from vllm.model_executor.layers.fused_moe import (
     RoutedExperts,
 )
 from vllm.model_executor.layers.fused_moe.config import biased_moe_quant_config
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
-from vllm.model_executor.layers.quantization import register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from vllm.model_executor.layers.quantization.mxfp4 import GptOssMxfp4MoEMethod
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 
+from vllm_qaic.logger import init_logger
+from vllm_qaic.ops._triton_flags import triton_op_enabled
 from vllm_qaic.ops.unquantized_fused_moe_method import QAicUnquantizedFusedMoEMethod
-from vllm_qaic.utils import QAIC_GPT_OSS_MXFP4_METHOD
 
 _MXFP4_BLOCK_SIZE = 32
 # GPT-OSS's clamped SwiGLU constants (vllm's swigluoai activation).
@@ -87,7 +89,155 @@ def check_qaic_mxfp4_ops_available() -> None:
         )
 
 
-@register_quantization_config(QAIC_GPT_OSS_MXFP4_METHOD)
+logger = init_logger(__name__)
+
+
+class QaicTritonGptOssMxfp4MoEMethod(GptOssMxfp4MoEMethod):
+    """QAIC adapter for the upstream modular Triton MXFP4 MoE path."""
+
+    def __init__(self, moe: FusedMoEConfig):
+        # Keep triton_kernels optional until a GPT-OSS routed-expert layer
+        # actually selects the Triton backend. Importing this module during
+        # platform pre-registration affects every model and can fail when the
+        # installed triton_kernels revision does not match vLLM's revision.
+        from vllm_qaic.patch.patch_qaic_triton_import import (
+            enable_qaic_triton_kernels,
+        )
+
+        enable_qaic_triton_kernels()
+        from vllm_qaic.quantization.qaic_oai_triton_experts import (
+            QaicOAITritonExperts,
+        )
+
+        # GptOssMxfp4MoEMethod.__init__ invokes the upstream backend oracle
+        # before a subclass can replace its result. The oracle rejects OOT
+        # platforms, so scope the QAIC-approved selection to this constructor
+        # call and immediately restore the global selector afterwards.
+        import vllm.model_executor.layers.quantization.mxfp4 as upstream_mxfp4
+
+        original_selector = upstream_mxfp4.select_mxfp4_moe_backend
+        upstream_mxfp4.select_mxfp4_moe_backend = lambda _moe: (
+            Mxfp4MoeBackend.TRITON,
+            QaicOAITritonExperts,
+        )
+        try:
+            super().__init__(moe)
+        finally:
+            upstream_mxfp4.select_mxfp4_moe_backend = original_selector
+
+        logger.info_once(
+            "QAIC GPT-OSS MXFP4: forcing backend=%s, experts=%s",
+            self.mxfp4_backend.value,
+            self.experts_cls.__name__,
+        )
+
+    @property
+    def is_monolithic(self) -> bool:
+        # QAIC uses OAITritonExperts, which is a modular experts
+        # implementation. During FusedMoE construction the backend oracle can
+        # leave experts_cls unset until weights are processed, so the base
+        # property cannot safely dereference it here.
+        return False
+
+    def create_weights(
+        self,
+        layer: RoutedExperts,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        """Create packed MXFP4 weights without allocating BF16 tensors.
+
+        Upstream hardcodes the GPT-OSS expert biases to BF16. QAIC does not
+        support BF16 tensors, so allocate them in the model's resolved dtype
+        (FP16 or FP32) instead. Keep the rest of the upstream layout and scale
+        metadata unchanged because ``OAITritonExperts`` relies on them.
+        """
+        self.num_experts = num_experts
+        weight_dtype = torch.uint8
+        scale_dtype = torch.uint8
+
+        layer.params_dtype = params_dtype
+        layer.num_experts = num_experts
+        self.intermediate_size = intermediate_size_per_partition
+        self.hidden_size = hidden_size
+
+        w13_weight = torch.nn.Parameter(
+            torch.zeros(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                hidden_size // 2,
+                dtype=weight_dtype,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_weight", w13_weight)
+        set_weight_attrs(w13_weight, extra_weight_attrs)
+
+        w13_weight_scale = torch.nn.Parameter(
+            torch.zeros(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                hidden_size // _MXFP4_BLOCK_SIZE,
+                dtype=scale_dtype,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_weight_scale", w13_weight_scale)
+        set_weight_attrs(w13_weight_scale, extra_weight_attrs)
+        w13_weight_scale.quant_method = "block"
+
+        w2_weight = torch.nn.Parameter(
+            torch.zeros(
+                num_experts,
+                hidden_size,
+                intermediate_size_per_partition // 2,
+                dtype=weight_dtype,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_weight", w2_weight)
+        set_weight_attrs(w2_weight, extra_weight_attrs)
+
+        w2_weight_scale = torch.nn.Parameter(
+            torch.zeros(
+                num_experts,
+                hidden_size,
+                intermediate_size_per_partition // _MXFP4_BLOCK_SIZE,
+                dtype=scale_dtype,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_weight_scale", w2_weight_scale)
+        set_weight_attrs(w2_weight_scale, extra_weight_attrs)
+        w2_weight_scale.quant_method = "block"
+
+        if self.moe.has_bias:
+            w13_bias = torch.nn.Parameter(
+                torch.zeros(
+                    num_experts,
+                    2 * intermediate_size_per_partition,
+                    dtype=params_dtype,
+                ),
+                requires_grad=False,
+            )
+            layer.register_parameter("w13_bias", w13_bias)
+            set_weight_attrs(w13_bias, extra_weight_attrs)
+
+            w2_bias = torch.nn.Parameter(
+                torch.zeros(
+                    num_experts,
+                    hidden_size,
+                    dtype=params_dtype,
+                ),
+                requires_grad=False,
+            )
+            layer.register_parameter("w2_bias", w2_bias)
+            set_weight_attrs(w2_bias, extra_weight_attrs)
+
+
 class QaicGptOssMxfp4Config(QuantizationConfig):
     """QAIC eager-mode MXFP4 config for GPT-OSS checkpoints."""
 
@@ -141,6 +291,11 @@ class QaicGptOssMxfp4Config(QuantizationConfig):
         if isinstance(layer, LinearBase):
             return UnquantizedLinearMethod()
         if isinstance(layer, RoutedExperts):
+            if triton_op_enabled("GPT_OSS_MOE"):
+                logger.info_once(
+                    "QAIC GPT-OSS MXFP4: selecting modular upstream Triton MoE method"
+                )
+                return QaicTritonGptOssMxfp4MoEMethod(layer.moe_config)
             return QaicGptOssMxfp4MoEMethod(layer.moe_config)
         if isinstance(layer, Attention):
             return None

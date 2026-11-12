@@ -32,22 +32,32 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod,
 )
 
+from vllm_qaic.logger import init_logger
 from vllm_qaic.ops._triton_flags import triton_op_enabled
 
 triton_en = triton_op_enabled("LINEAR")
 
 _orig_linear_apply = UnquantizedLinearMethod.apply
 _orig_embedding_apply = UnquantizedEmbeddingMethod.apply
+logger = init_logger(__name__)
 
 
 def _qaic_linear_apply(self, layer, x, bias=None):
     if triton_en:
+        logger.info_once(
+            "QAIC Triton forward: %s -> matmul_kernel_persistent",
+            type(layer).__name__,
+        )
         return linear_batch_invariant(x, layer.weight, bias)
     return _orig_linear_apply(self, layer, x, bias)
 
 
 def _qaic_embedding_apply(self, layer, x, bias=None):
     if triton_en:
+        logger.info_once(
+            "QAIC Triton forward: %s -> matmul_kernel_persistent",
+            type(layer).__name__,
+        )
         return linear_batch_invariant(x, layer.weight, bias)
     return _orig_embedding_apply(self, layer, x, bias)
 
