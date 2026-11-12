@@ -148,6 +148,11 @@ def _parse_device_id_pool(value: str) -> list[int]:
 
 
 def pytest_addoption(parser):
+    # These options are consumed by the disaggregated-serving fixtures. Keep
+    # them on this initial E2E conftest so collection via tests/e2e registers
+    # them before pytest parses command-line arguments.
+    parser.addoption("--client-request-timeout", type=int, default=60)
+    parser.addoption("--disaggregated-startup-timeout", type=int, default=1200)
     parser.addoption("--seq-len", type=int, default=None)
     parser.addoption("--ctx-len", type=int, default=None)
     parser.addoption("--decode-bsz", type=int, default=4)

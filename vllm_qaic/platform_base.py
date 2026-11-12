@@ -465,12 +465,6 @@ class QaicPlatform(Platform):
                 )
 
             if vllm_config.kv_transfer_config.kv_role == "kv_producer":
-                # Monkey patch uniproc_executor to QaicUniProcExecutor
-                import vllm.v1.executor.uniproc_executor as uniproc_executor
-
-                from vllm_qaic.executor.qaic_uniproc_executor import QaicUniProcExecutor
-
-                uniproc_executor.UniProcExecutor = QaicUniProcExecutor
                 stages = int(override_qaic_config.get("stages"))
                 assert not scheduler_config.async_scheduling or (
                     stages is None

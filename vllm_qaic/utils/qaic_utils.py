@@ -5,6 +5,7 @@
 
 """Shared QAIC utilities used across vLLM"""
 
+from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 import regex as re
@@ -21,6 +22,14 @@ logger = init_logger(__name__)
 # Gemma4 dense/MoE share "gemma4"; Qwen3.6 MoE uses "qwen3_5_moe".
 DFLASH_VLM_MODEL_TYPES = frozenset({"gemma4", "qwen3_vl", "qwen3_5", "qwen3_5_moe"})
 DFLASH_MODEL_TYPES = DFLASH_VLM_MODEL_TYPES | frozenset({"qwen3", "llama", "gpt_oss"})
+
+
+class KVCacheKind(Enum):
+    """Simple enum class to store different type of kv$ supported on qaic"""
+
+    FA = "FA"
+    LA_CONV = "LA_CONV"
+    LA_RECURRENT = "LA_RECURRENT"
 
 
 def compute_max_decode_tokens(

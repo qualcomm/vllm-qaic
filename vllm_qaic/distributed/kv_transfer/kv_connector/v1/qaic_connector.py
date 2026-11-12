@@ -49,7 +49,7 @@ from qaic_disagg.kv_handoff.protocol import (
     QaicKvHandOffPutReq,
     QaicKvHandOffReqType,
 )
-
+from vllm_qaic.utils.qaic_utils import KVCacheKind
 from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -166,9 +166,16 @@ class ShmBuffer:
             raise ValueError("shape must be a list")
 
         self.buff_sizes = []
-        for kv_shape, kv_type, _ in kv_cache_info:
+        # kv_cache_info contains (kv_shape, kv_type, kv_size, kv_kind).
+        for info in kv_cache_info:
+            kv_shape, kv_type, _ = info[:3]
+            kv_kind = info[3] if len(info) > 3 else KVCacheKind.FA
             _kv_shape = self._get_kv_shape(
-                use_full_kv_transfer, kv_shape, num_tokens, self.preserve_shape
+                use_full_kv_transfer,
+                kv_shape,
+                num_tokens,
+                kv_kind,
+                self.preserve_shape,
             )
             _bytes_of_buffer = 1
             for dim in _kv_shape:
@@ -221,10 +228,17 @@ class ShmBuffer:
                 raise ValueError("Shared memory buffer not found") from e
 
         # create list of numpy arrays
-        for i, (kv_shape, kv_type, _) in enumerate(self.kv_cache_info):
+        for i, info in enumerate(self.kv_cache_info):
+            kv_shape, kv_type, _ = info[:3]
+            kv_kind = info[3] if len(info) > 3 else KVCacheKind.FA
+
             with self.get_data(i) as buff:
                 _kv_shape = self._get_kv_shape(
-                    use_full_kv_transfer, kv_shape, num_tokens, self.preserve_shape
+                    use_full_kv_transfer,
+                    kv_shape,
+                    num_tokens,
+                    kv_kind,
+                    self.preserve_shape,
                 )
                 self.list_of_np_buff.append(
                     np.ndarray(_kv_shape, dtype=kv_type, buffer=buff)
@@ -235,16 +249,19 @@ class ShmBuffer:
         use_full_kv_transfer: bool,
         kv_shape: tuple,
         num_tokens: int,
+        kv_kind: KVCacheKind,
         preserve_shape: bool = False,
     ) -> tuple:
         if preserve_shape:
             # EC embeddings are fixed-size per image; dim0 is NOT a batch dim
             # (e.g. (num_vision_tokens, hidden)). Preserve the shape verbatim.
             return tuple(kv_shape)
-        if not use_full_kv_transfer and len(kv_shape) > 3:
+        # Recurrent and convolutional state tensors have rank 4, but their
+        # third dimension is not a context dimension. Slice only FA caches.
+        if not use_full_kv_transfer and kv_kind == KVCacheKind.FA and len(kv_shape) > 3:
             seq_len = min(num_tokens, kv_shape[2])
             return (1, kv_shape[1], seq_len) + kv_shape[3:]
-        # Use batch size 1 and keep other dims intact
+        # Use batch size 1 and keep other dims intact.
         return (1,) + kv_shape[1:]
 
     def cleanup(self, unlink: bool = True):
@@ -263,6 +280,7 @@ class ShmBuffer:
     def get_data(self, current_idx: int = 0):
         start = self.buff_sizes_cum_sum[current_idx - 1] if current_idx > 0 else 0
         end = self.buff_sizes_cum_sum[current_idx]
+        assert self.shared_memory is not None
         assert self.shared_memory.buf is not None
         with memoryview(self.shared_memory.buf[start:end]) as buf:
             yield buf
@@ -651,7 +669,7 @@ class QaicConnector(KVConnectorBase_V1):
         from save_kv_layer is complete before finishing the forward.
 
         This prevents overwrites of paged KV buffer before saving done.
-        NOTE: Currently aysc KV cache transfer is not supported.
+        NOTE: Currently async KV cache transfer is not supported.
         """
         return
 
