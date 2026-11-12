@@ -9,7 +9,7 @@
 - [PYT mode install](#pyt-mode-install)
 - [AOT mode install](#aot-mode-install)
 - [AOT with triton-cpu (Speculative Decoding)](#aot-with-triton-cpu-speculative-decoding)
-- [PYT with Triton-QAIC](#pyt-with-triton-qaic)
+- [PYT with triton-qaic](#pyt-with-triton-qaic)
 - [Verifying the install](#verifying-the-install)
 - [Environment variable reference](#environment-variable-reference)
 - [Troubleshooting](#troubleshooting)
@@ -115,7 +115,7 @@ When running SpD tests afterwards, set `TRITON_CPU_BACKEND=1`.
 
 ---
 
-## PYT with Triton-QAIC
+## PYT with triton-qaic
 
 Running Triton kernels on QAIC needs the SDK Triton-QAIC wheel (`triton` 3.7.0, Hexagon
 backend). GPT-OSS additionally needs the `triton_kernels` package (v3.5.1, from
