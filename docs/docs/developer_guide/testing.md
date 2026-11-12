@@ -21,7 +21,8 @@ tests/test_qaic/
 ├── kv_transfer/                # KV transfer tests
 ├── gptoss/                     # Reasoning backend tests
 └── kernels/                    # Kernel unit tests
-```text
+```
+
 ## CI Scripts
 
 21 CI scripts in `ci_scripts/` automate test execution:
@@ -48,12 +49,14 @@ tests/test_qaic/
 
 ```bash
 export QAIC_VISIBLE_DEVICES=0  # or appropriate QIDs
-```text
+```
+
 ### Single Test
 
 ```bash
 python -m pytest tests/test_qaic/test_accuracy.py -v
-```text
+```
+
 ### Full CI Suite
 
 ```bash
@@ -62,14 +65,16 @@ bash ci_scripts/ci_fasttest_qaic.sh
 
 # Accuracy test
 bash ci_scripts/run_accuracy_test_qaic.sh
-```text
+```
+
 ### With Custom Device Group
 
 Most CI scripts accept device parameters:
 
 ```bash
 QAIC_VISIBLE_DEVICES=4,5,6,7 bash ci_scripts/run_spd_test_qaic.sh
-```text
+```
+
 ## Test Categories
 
 ### Accuracy Tests

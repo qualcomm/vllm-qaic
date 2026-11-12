@@ -60,7 +60,8 @@ Separating prefill and decode onto different nodes allows independent optimizati
 
 ```text
 Request → Prefill Node (TTFT-optimized) → KV transfer → Decode Node (TPOT-optimized) → Response
-```text
+```
+
 | Topology | Use Case |
 |----------|----------|
 | 1P1D | Balanced latency and throughput |
