@@ -290,7 +290,7 @@ def test_register_connector_is_aot_only():
         KVConnectorFactory._registry.update(saved)
 
 
-def test_disagg_compile_enables_symmetric_kv_head_replication():
+def test_disagg_compile_does_not_default_kv_head_replication():
     config = SimpleNamespace(
         model_config=SimpleNamespace(
             quantization=None,
@@ -336,7 +336,10 @@ def test_disagg_compile_enables_symmetric_kv_head_replication():
     ):
         compiled = qaic_model_loader._get_qaic_compile_config(config, "default")
 
-    assert compiled.qaic_config == {"replicate_kv_heads": True}
+    # Replication is opt-in: it is applied per role at compile time and would
+    # inflate decode KV memory.
+    assert compiled.qaic_config is None
+    assert "qaic_config" not in compiled.cfg
 
 
 @pytest.mark.parametrize(
@@ -494,9 +497,9 @@ def test_disagg_compile_forwards_nested_qaic_config_to_qeff(
     ):
         compiled = qaic_model_loader._get_qaic_compile_config(config, "default")
 
-    expected_qaic_config = {**user_qaic_config, "replicate_kv_heads": True}
-    assert compiled.qaic_config == expected_qaic_config
-    assert compiled.cfg["qaic_config"] == expected_qaic_config
+    assert compiled.qaic_config == user_qaic_config
+    assert compiled.cfg["qaic_config"] == user_qaic_config
+    assert "replicate_kv_heads" not in compiled.cfg["qaic_config"]
     assert config.additional_config["override_qaic_config"] == override
 
 
