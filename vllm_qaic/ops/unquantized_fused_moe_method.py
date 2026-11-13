@@ -26,18 +26,6 @@ from vllm_qaic.ops._triton_flags import triton_op_enabled
 triton_en = triton_op_enabled("FUSED_MOE")
 
 
-def _supports_triton_fused_moe_without_alignment(
-    layer,
-    x: torch.Tensor,
-    topk_ids: torch.Tensor,
-) -> bool:
-    """Whether upstream will use its alignment-free Triton assignment path."""
-    return (
-        layer.expert_map is None
-        and x.shape[0] * topk_ids.shape[1] * 4 <= layer.global_num_experts
-    )
-
-
 class QAicUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     """QAIC OOT implementation for unquantized fused MoE."""
 
@@ -68,14 +56,15 @@ class QAicUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # kernel. fused_experts takes the full stacked expert
         # weights (layer.w13_weight / layer.w2_weight), the router topk tensors,
         # and applies the gated activation internally (apply_moe_activation), so
-        # the routing/activation branching below is handled entirely in-kernel.
+        # the routing/activation branching below is handled by fused_experts.
         # Biases (has_bias) are threaded through via biased_moe_quant_config; the
         # activation is passed as a MoEActivation enum (layer.activation may
         # already be one; from_str rejects enums, so only strings are parsed).
         # Flag off -> the QAIC NSP path below, bit-for-bit.
-        if triton_en and _supports_triton_fused_moe_without_alignment(
-            layer, x, topk_ids
-        ):
+        # Upstream chooses alignment-free assignment for sparse small batches
+        # and grouped assignment for larger batches. QAIC's MoE patch supplies
+        # PyTorch alignment when the CUDA helper would be called.
+        if triton_en:
             from vllm.model_executor.layers.fused_moe.activation import (
                 MoEActivation,
             )
