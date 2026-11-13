@@ -215,6 +215,7 @@ class QaicPlatform(Platform):
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
         """Enable hybrid caches for the upstream eager model runner."""
+        # TODO: Return True unconditionally once AOT supports hybrid KV cache.
         return not cls.is_aot_inference()
 
     @classmethod
