@@ -299,7 +299,7 @@ class QAICInferenceSession:
 
     def _is_kv_cache_name(self, name: str) -> bool:
         if self.use_legacy_slicing_spec:
-            return name.startswith("past_key") or name.startswith("past_value")
+            return name.startswith(("past_key", "past_value", "index_key"))
         return VLLM_KV_CACHE_PREFIX in name
 
     def get_json_for_full_kv_cache_slicing(self):

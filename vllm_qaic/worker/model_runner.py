@@ -32,7 +32,12 @@ from vllm.lora.request import LoRARequest
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, SupportedTask
 from vllm.utils.import_utils import PlaceholderModule
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheSpec
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheSpec,
+    MLAAttentionSpec,
+)
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
     AsyncModelRunnerOutput,
@@ -1958,13 +1963,42 @@ class QaicModelRunnerAoT(GPUModelRunner):
         """
         block_size = self.cache_config.block_size
         kv_cache_spec: dict[str, KVCacheSpec] = {}
-        n_layers = self.model_config.get_num_layers(self.parallel_config)
-        for i in range(n_layers):
+
+        # self.kv_cache_info is only populated for disaggregated-serving
+        # models (see load_model()) -- for every other model, fall back to
+        # the uniform per-layer spec this always used to emit.
+        if not getattr(self, "kv_cache_info", None):
+            n_layers = self.model_config.get_num_layers(self.parallel_config)
+            for i in range(n_layers):
+                layer_name = f"layer_{i}"
+                kv_cache_spec[layer_name] = FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=self.num_kv_heads,
+                    head_size=self.head_size,
+                    dtype=self.kv_cache_dtype,
+                )
+            return kv_cache_spec
+
+        # Hybrid-buffer-aware path: derive one spec per logical layer-buffer
+        # family directly from the loaded QPC's own bindings
+        # (decode_buff_map/kv_cache_info stay index-aligned, see
+        # qaic_session_np.py). past_key.N/past_value.N share one
+        # FullAttentionSpec (as before); index_key.N (MiniMax M3's lightning
+        # indexer, no paired index_value.N) gets its own MLAAttentionSpec
+        # using that buffer's own shape instead of the model's generic
+        # num_kv_heads/head_size.
+        buff_map = self.model.session.decode_buff_map
+        for i, ((name, _), (kv_shape, _kv_type, _kv_size)) in enumerate(
+            zip(buff_map, self.kv_cache_info)
+        ):
+            if name.startswith("past_value"):
+                continue  # covered by the paired past_key.N entry below
             layer_name = f"layer_{i}"
-            kv_cache_spec[layer_name] = FullAttentionSpec(
+            spec_cls = MLAAttentionSpec if name.startswith("index_key") else FullAttentionSpec
+            kv_cache_spec[layer_name] = spec_cls(
                 block_size=block_size,
-                num_kv_heads=self.num_kv_heads,
-                head_size=self.head_size,
+                num_kv_heads=kv_shape[1],
+                head_size=kv_shape[-1],
                 dtype=self.kv_cache_dtype,
             )
         return kv_cache_spec
