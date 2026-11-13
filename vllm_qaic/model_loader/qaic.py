@@ -11,6 +11,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass
 from queue import Queue
 from typing import Any, cast
@@ -2206,10 +2207,14 @@ def _get_qaic_compile_config(
                 "Please set `max_num_seqs` (decode batch size) to 1."
             )
             del cfg["full_batch_size"]
-    qaic_config: dict[str, Any] | None = (override_qaic_config or {}).pop(
-        "qaic_config", None
+    # QEfficient consumes qaic_config at both model construction and compile
+    # time. Keep a private copy so adding QAIC defaults below does not mutate
+    # the caller's override, then restore the finalized value to cfg before
+    # qeff_model.compile(**cfg).
+    configured_qaic_config = (override_qaic_config or {}).get("qaic_config")
+    qaic_config: dict[str, Any] | None = (
+        deepcopy(configured_qaic_config) if configured_qaic_config is not None else None
     )
-    cfg.pop("qaic_config", None)
     for key in ("replicate_kv_heads", "num_replicate_kv_heads"):
         if override_qaic_config and key in override_qaic_config:
             if qaic_config is None:
@@ -2325,6 +2330,10 @@ def _get_qaic_compile_config(
         if qaic_config is None:
             qaic_config = {}
         qaic_config.setdefault("replicate_kv_heads", True)
+    if qaic_config is not None:
+        # qeff_model.compile(**cfg) is the production boundary that applies
+        # blocking and MoE transforms. Do not drop this nested configuration.
+        cfg["qaic_config"] = qaic_config
     print(cfg)
     device_group = cfg.pop("device_group")
     if "io_encrypt" in cfg:
