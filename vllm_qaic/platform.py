@@ -117,6 +117,7 @@ class QaicPlatform(Platform):
         # Rebind vllm.triton_utils before general patches import upstream
         # modules that may copy its Triton symbols into their own namespace.
         if not cls.is_aot:
+            import vllm_qaic.patch.patch_empty_cache  # noqa
             import vllm_qaic.patch.patch_qaic_triton_import  # noqa
 
         # gpt_oss_mxfp4 is only supported in eager mode: AOT compilation has
