@@ -13,7 +13,6 @@ torch.accelerator calls must be bypassed.
 MemorySnapshot.measure() and memory_profiling() are patched back to the
 v15 current_platform-based implementation so QAIC avoids torch.accelerator
 allocator calls while still reporting device memory for KV cache sizing.
-
 """
 
 import gc
