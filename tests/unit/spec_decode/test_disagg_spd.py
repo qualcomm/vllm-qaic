@@ -186,6 +186,7 @@ def test_decode_batch_input_helper_builds_static_shapes(lora_mode):
 
 def test_decode_ks_from_session_uses_decode_shapes():
     runner = SimpleNamespace(
+        is_dflash_target=False,
         session=SimpleNamespace(
             binding_index_map={"input_ids": 0},
             allowed_shapes=[[(0, (1, 1))], [(0, (1, 4))], [(0, (1, 128))]],
@@ -199,6 +200,7 @@ def test_decode_ks_from_session_uses_decode_shapes():
 
 def test_decode_ks_from_session_falls_back_when_shapes_are_unavailable():
     runner = SimpleNamespace(
+        is_dflash_target=False,
         session=SimpleNamespace(binding_index_map={}, allowed_shapes=[]),
         prefill_seq_len=128,
         decode_ks=[3],
