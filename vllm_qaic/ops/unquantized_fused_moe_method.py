@@ -64,6 +64,7 @@ class QAicUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # and grouped assignment for larger batches. QAIC's custom-op bridge
         # supplies PyTorch alignment when the CUDA helper would be called.
         if triton_en:
+            from vllm.model_executor.layers.fused_moe.activation import MoEActivation
             from vllm.model_executor.layers.fused_moe.config import (
                 biased_moe_quant_config,
             )
@@ -82,7 +83,11 @@ class QAicUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 w2=layer.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                activation=layer.activation,
+                activation=(
+                    layer.activation
+                    if isinstance(layer.activation, MoEActivation)
+                    else MoEActivation.from_str(layer.activation)
+                ),
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 global_num_experts=layer.global_num_experts,
                 expert_map=layer.expert_map,
