@@ -5,6 +5,7 @@
 """Device-independent behavior tests for disaggregated speculative decoding."""
 
 from contextlib import nullcontext
+from copy import deepcopy
 import json
 import types
 from types import SimpleNamespace
@@ -405,6 +406,98 @@ def test_disagg_compile_preserves_explicit_qaic_replication_config(
         "replicate_kv_heads": False,
         "num_replicate_kv_heads": 2,
     }
+
+
+@pytest.mark.parametrize(
+    ("max_model_len", "user_qaic_config"),
+    [
+        (
+            14336,
+            {
+                "blocking_mode": "kv_batch_fold",
+                "num_kv_blocks": 64,
+                "gdn_num_head_blocks": 8,
+                "skip_kv": True,
+                "ctx_len": 14336,
+                "moe_config": {
+                    "flavour": "expert_parallel",
+                    "cores_per_expert": 1,
+                    "tree_reduce": False,
+                    "expert_parallel_chunk_size": 256,
+                },
+            },
+        ),
+        (
+            10240,
+            {
+                "blocking_mode": "kv_batch_fold",
+                "num_kv_blocks": 4,
+                "ctx_len": 10240,
+                "skip_kv": True,
+                "moe_config": {
+                    "flavour": "expert_parallel",
+                    "cores_per_expert": 2,
+                    "tree_reduce": False,
+                    "expert_parallel_chunk_size": 256,
+                },
+            },
+        ),
+    ],
+)
+def test_disagg_compile_forwards_nested_qaic_config_to_qeff(
+    max_model_len, user_qaic_config
+):
+    """Keep blocking/MoE options in the kwargs sent to QEfficient.compile()."""
+    override = {"qaic_config": deepcopy(user_qaic_config)}
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            quantization=None,
+            max_model_len=max_model_len,
+            runner_type="generate",
+            is_multimodal_model=False,
+            hf_config=SimpleNamespace(
+                num_attention_heads=32,
+                num_key_value_heads=8,
+            ),
+        ),
+        cache_config=SimpleNamespace(
+            cache_dtype="auto",
+            num_cpu_blocks=1,
+            enable_prefix_caching=False,
+        ),
+        scheduler_config=SimpleNamespace(max_num_seqs=2),
+        additional_config={
+            "device_group": [9],
+            "override_qaic_config": override,
+        },
+        speculative_config=None,
+        kv_transfer_config=SimpleNamespace(kv_role="kv_consumer"),
+        lora_config=None,
+    )
+
+    qaicrt = types.ModuleType("qaicrt")
+    qaicrt.QStatus = SimpleNamespace(QS_SUCCESS=0)
+
+    class FakeUtil:
+        def getResourceInfo(self, _qid):
+            return qaicrt.QStatus.QS_SUCCESS, SimpleNamespace(nspTotal=16)
+
+    qaicrt.Util = FakeUtil
+
+    with (
+        patch.dict("sys.modules", {"qaicrt": qaicrt}),
+        patch.object(
+            qaic_model_loader,
+            "QAIC_DEVICE_CONFIG",
+            {"default": {}, "target": {}, "draft": {}},
+        ),
+    ):
+        compiled = qaic_model_loader._get_qaic_compile_config(config, "default")
+
+    expected_qaic_config = {**user_qaic_config, "replicate_kv_heads": True}
+    assert compiled.qaic_config == expected_qaic_config
+    assert compiled.cfg["qaic_config"] == expected_qaic_config
+    assert config.additional_config["override_qaic_config"] == override
 
 
 def test_disagg_launcher_forwards_nested_qaic_config():
