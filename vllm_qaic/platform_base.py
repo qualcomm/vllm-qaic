@@ -171,6 +171,7 @@ class QaicPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        spec_config = vllm_config.speculative_config
         additional_config = vllm_config.additional_config
         device_config = vllm_config.device_config
         if additional_config:
@@ -415,18 +416,40 @@ class QaicPlatform(Platform):
         )
 
         # Disaggregated prefill/decode is supported standalone for now
-        if vllm_config.kv_transfer_config:
+        if kv := vllm_config.kv_transfer_config:
             assert not vllm_config.lora_config, (
                 "LORA with Disaggregated serving not yet supported for QAIC backend"
             )
             assert (
                 not vllm_config.speculative_config
                 or vllm_config.speculative_config.method
-                in ["ngram", "draft_model", "suffix"]
+                in ["ngram", "draft_model", "suffix", "dflash"]
             ), (
-                "Only ngram, suffix, and draft_model based SPD types are "
+                "Only ngram, suffix, draft_model, and DFlash SPD types are "
                 "supported with Disaggregated serving for QAIC backend"
             )
+            if spec_config and spec_config.method == "dflash":
+                model, sched, cfg = model_config, scheduler_config, override_qaic_config
+                if model.is_moe or model.is_hybrid or model.is_attention_free:
+                    raise ValueError("DFlash disaggregation requires dense attention.")
+                if sched.async_scheduling or kv.kv_connector != "QaicConnector":
+                    raise ValueError("DFlash needs synchronous QaicConnector.")
+                ccl_keys = (
+                    "ccl_enabled",
+                    "comp_ctx_lengths_prefill",
+                    "comp_ctx_lengths_decode",
+                )
+                if any(cfg.get(key) for key in ccl_keys):
+                    raise ValueError("DFlash disaggregation does not support CCL.")
+                stages = int(cfg.get("stages", 1))
+                if kv.kv_role == "kv_producer" and stages > 1:
+                    # Budget multiple fixed-size chunks per synchronous PP call.
+                    # Add back vLLM's draft-slot reservation; the producer never drafts.
+                    sched.max_num_batched_tokens = (
+                        min(model.max_model_len, cfg["prefill_seq_len"] * (stages + 1))
+                        + spec_config.max_num_new_slots_for_drafting
+                        * sched.max_num_seqs
+                    )
             assert not (
                 vllm_config.kv_transfer_config.kv_role != "kv_producer"
                 and vllm_config.cache_config.enable_prefix_caching

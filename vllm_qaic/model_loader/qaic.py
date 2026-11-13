@@ -180,6 +180,12 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             if vllm_config.speculative_config
             else None
         )
+        self.dflash_disagg = _method == "dflash" and bool(
+            vllm_config.kv_transfer_config
+        )
+        self._dflash_pipeline_buffers: list[dict[str, np.ndarray]] = []
+        self._dflash_pipeline_pending: dict[int, tuple] = {}
+        self._dflash_prefill_hidden: dict[int, np.ndarray] = {}
         self.is_kv_consumer: bool = bool(
             vllm_config.kv_transfer_config
             and vllm_config.kv_transfer_config.kv_role == "kv_consumer"
@@ -575,13 +581,15 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
     ):
         for _, bidx in enumerate(batch_indices):
             if kv_caches[bidx] is not None and len(kv_caches[bidx]) > 0:
-                assert len(self.kv_cache_info) == len(kv_caches[bidx]), (
-                    f"KV buffer count mismatch: "
-                    f"expected {len(self.kv_cache_info)} buffers, "
-                    f"got {len(kv_caches[bidx])}"
+                # Prompt features travel with KV but are not target-device KV bindings.
+                target_kv = (
+                    kv_caches[bidx][:-1] if self.dflash_disagg else kv_caches[bidx]
                 )
-                for buff_idx in range(len(kv_caches[bidx])):
-                    buf = kv_caches[bidx][buff_idx]
+                assert len(self.kv_cache_info) == len(target_kv), (
+                    "KV buffer count mismatch"
+                )
+                for buff_idx in range(len(target_kv)):
+                    buf = target_kv[buff_idx]
                     target_heads = self.kv_cache_info[buff_idx][0][1]
                     # broadcast MLA buffers across num heads (zero-copy)
                     if buf.size > 0 and target_heads != buf.shape[1]:
@@ -589,13 +597,13 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                             f"MLA KV head expansion expects num_heads=1 in received "
                             f"buffer, got {buf.shape[1]} (shape={buf.shape})"
                         )
-                        kv_caches[bidx][buff_idx] = np.broadcast_to(
+                        target_kv[buff_idx] = np.broadcast_to(
                             buf, (buf.shape[0], target_heads) + buf.shape[2:]
                         )
 
                 # Update kv cache setDataWith
                 _ = self.session.set_data_for_kv_handoff(
-                    kv_caches[bidx],
+                    target_kv,
                     [("batch_index", bidx), ("ctx_start", 0)],
                     self.session.decode_buff_map,
                     self.decode_execObj_idx or 0,
@@ -620,6 +628,18 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         # set qpc prefill state
         if self.last_decode:
             self.last_decode = False
+
+        if self.dflash_disagg:
+            assert logits is not None
+            scratch = self._dflash_prefill_hidden_scratch
+            if not self._dflash_pipeline_buffers:
+                self._dflash_pipeline_buffers = [
+                    {
+                        "hidden_states": np.empty_like(scratch),
+                        "logits": np.empty_like(logits[:1]),
+                    }
+                    for _ in range(self.session.prefill_num_execObj)
+                ]
 
         # One CCL bucket for the batch, keyed off each request's TOTAL prompt
         # length (final position) so every chunk of a request keeps one bucket
@@ -664,6 +684,17 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             chunk_inputs = dict()
             batch_index = batch_indices[index]
             chunk_inputs["batch_index"] = batch_indices[index : index + 1].reshape(1, 1)
+            if self.dflash_disagg and pids.reshape(-1)[0] == 0:
+                assert num_prompt_tokens_prefill is not None
+                assert self._dflash_prefill_hidden_scratch is not None
+                # Partial scheduler steps keep their features until the final chunk.
+                shape = (
+                    int(num_prompt_tokens_prefill[index]),
+                    self.config.get_text_config().hidden_size,
+                )
+                self._dflash_prefill_hidden[batch_index] = np.empty(
+                    shape, dtype=self._dflash_prefill_hidden_scratch.dtype
+                )
             if lora_ids is not None:
                 chunk_inputs["lora_ids"] = lora_ids
             if mm_kwargs_list and (mm_kwargs := mm_kwargs_list[index]):
@@ -673,6 +704,9 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             n_chunks: int = iids.shape[-1] // self.prefill_seq_len
             assert n_chunks > 0
             for chunk in range(n_chunks):
+                if self.dflash_disagg:
+                    # Each in-flight chunk owns its bindings until completion.
+                    chunk_inputs = dict(chunk_inputs)
                 last_chunk = False
                 lower_idx = int(chunk * self.prefill_seq_len)
                 upper_idx = int((chunk + 1) * self.prefill_seq_len)
@@ -722,12 +756,27 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     )
                     eid = pending_exec_queue.get(timeout=120)
                     self.complete_inf(eid, True)
+                if self.dflash_disagg:
+                    buffers = self._dflash_pipeline_buffers.pop()
+                    if "num_logits_to_keep" in self.session.input_names:
+                        chunk_inputs.update(self.prefill_num_logits_buffer or {})
+                    chunk_inputs.update(buffers)
                 # Submit Chunk to LRT Queue
+                handoff = kv_caches[batch_index] if last_chunk else None
+                if self.dflash_disagg and handoff is not None:
+                    handoff = handoff[:-1]
                 exec_obj_idx = self.session.np_run_pipeline(
                     inputs=chunk_inputs,
                     last_chunk=last_chunk,
-                    kv_cache_buffers=kv_caches[batch_index] if last_chunk else None,
+                    kv_cache_buffers=handoff,
                 )
+                if self.dflash_disagg:
+                    self._dflash_pipeline_pending[exec_obj_idx] = (
+                        chunk_inputs,
+                        logits[index : index + 1],
+                        kv_caches[batch_index][-1] if last_chunk else None,
+                        buffers,
+                    )
                 if self.comp_ctx_lengths_prefill is not None:
                     # Record the bucket this slot is now running so future
                     # batches can fold it into max(active_ccl.values()).
@@ -1082,6 +1131,22 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             # reflects only what's still running.
             self.active_ccl[index] = 0
 
+        if is_prefill and self.dflash_disagg:
+            pending = self._dflash_pipeline_pending.pop(index, None)
+            if pending is not None:
+                # Collect features only after completion, before reusing outputs.
+                inputs, logits, handoff, buffers = pending
+                logits[:] = inputs["logits"]
+                slot = int(inputs["batch_index"].item())
+                positions = inputs["position_ids"][0].reshape(-1)
+                valid = positions >= 0
+                hidden = self._dflash_prefill_hidden[slot]
+                hidden[positions[valid]] = inputs["hidden_states"][0, valid]
+                if handoff is not None:
+                    handoff[0, 0, : hidden.shape[0]] = hidden
+                    del self._dflash_prefill_hidden[slot]
+                self._dflash_pipeline_buffers.append(buffers)
+
     @property
     def decode_execObj_idx(self) -> int | None:
         return self.session.decode_execObj_idx
@@ -1279,6 +1344,12 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                         prefill_inputs["lora_ids"] = np.arange(
                             self.prefill_bsz
                         ).reshape(-1, 1)
+                    if self.dflash_disagg:
+                        prefill_inputs["hidden_states"] = np.empty_like(
+                            self._dflash_prefill_hidden_scratch
+                        )
+                        if "num_logits_to_keep" in self.session.input_names:
+                            prefill_inputs.update(self.prefill_num_logits_buffer or {})
                     if self.is_multimodal_model and self.default_mm_kwargs:
                         prefill_inputs.update(self.default_mm_kwargs)
                     KvCache_buff = []
@@ -2225,6 +2296,8 @@ def _get_qaic_compile_config(
                 qaic_config = {}
             qaic_config["target_layer_ids"] = dflash_cfg["target_layer_ids"]
             qaic_config["dflash_dlm_repo"] = dflash_cfg["dlm_repo"]
+            if vllm_config.kv_transfer_config and not is_kv_consumer:
+                num_logits_to_keep = 1
     # On Device Sampling
     if cfg.get("aic_include_sampler") is not None:
         if qaic_config is None:

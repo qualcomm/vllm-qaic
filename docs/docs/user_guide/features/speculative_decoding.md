@@ -241,3 +241,44 @@ No additional hardware is required — both models run on the same device.
 ## SpD with Disaggregated Serving
 
 SpD can be combined with disaggregated serving — proposals are generated and verified entirely on the decode node. See [Disaggregated Serving](disaggregated_serving.md#speculative-decoding-with-disaggregated-serving).
+
+### DFlash Text Models
+
+Dense text models with QEfficient DFlash target support and a matching draft model
+can use non-streaming prefill through `qaic_disagg` and `QaicConnector`. Qwen3 and
+Llama are the examples below, not a model-name restriction. No launcher or proxy
+changes are needed:
+
+```text
+Prefill worker: TLM prompt chunks -> completed KV + projected prompt features
+Decode worker:                     receive -> DLM prefill -> draft/verify
+```
+
+DLM prefill follows the complete TLM handoff, so its latency contributes to TTFT.
+Pipeline parallelism applies to TLM prefill; it does not overlap the two models'
+prefill for the same request. Each model uses a separate device group.
+
+From the repository root, with a compatible `qaic_disagg` installation:
+
+```bash
+python examples/qaic_spd_dflash_disagg.py \
+  --model Qwen/Qwen3-8B --draft-model z-lab/Qwen3-8B-DFlash-b16 \
+  --prefill-devices 0,1,2,3 --decode-devices 4,5,6,7 --dlm-devices 8,9,10,11 \
+  --prefill-pipeline-parallel-size 2 \
+  --prefill-max-num-seqs 2 --decode-max-num-seqs 4 \
+  --ctx-len 4096 --prefill-seq-len 128 --cores 8 \
+  --port 9220 --prefill-port 9221 --decode-port 9222 --kv-handOff-port 9224
+```
+
+For Llama, use `--model meta-llama/Llama-3.1-8B-Instruct` and
+`--draft-model z-lab/LLaMA3.1-8B-Instruct-DFlash-UltraChat` together.
+Client requests use the normal OpenAI-compatible completions or chat endpoint.
+
+The example enables MXFP6 matmul and MXINT8 KV, with depth-first scheduling off.
+Use `--no-mxfp6-matmul --no-mxint8-kv-cache` for an unquantized configuration.
+QEfficient reuses matching cached compilations; optional `--prefill-qpc`,
+`--decode-qpc`, and `--dlm-qpc` must match the selected model, batch, context,
+precision, and device topology. Both target QPCs must export DFlash hidden states.
+
+This path requires synchronous scheduling and disabled prefix caching on both
+workers. VLMs, MoE/hybrid targets, other connectors, and CCL are not supported.
