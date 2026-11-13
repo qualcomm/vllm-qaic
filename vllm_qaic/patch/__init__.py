@@ -226,6 +226,19 @@
 #       past the padded total, num_tokens_post_pad set). The wrapper's buffer
 #       allocation and expert_map remapping stay upstream's.
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#
+# ** 15. File: patch_empty_cache.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. torch.accelerator.empty_cache
+#    Why:
+#       Generic cache cleanup assumes PyTorch's CachingDeviceAllocator,
+#       while eager QAIC tensors use qaicrt.
+#    How:
+#       Redirect to torch.qaic.empty_cache when that API is callable and retain
+#       the original function. Apply once; skip when no QAIC allocator exists.
+#    Note:
+#       Imported by QaicPlatform.pre_register_and_update only in PYT mode.
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # =================
 
 # NOTE: patch_topk_topp_sampler must stay first; it rebinds a module-level
