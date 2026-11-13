@@ -665,6 +665,14 @@ def pytest_collection_modifyitems(session, config, items):
                 pytest.mark.skip(reason="qaic_disagg package is not installed")
             )
 
+        if (
+            item.get_closest_marker("arctic_inference_installed") is not None
+            and importlib.util.find_spec("arctic_inference") is None
+        ):
+            item.add_marker(
+                pytest.mark.skip(reason="arctic-inference package is not installed")
+            )
+
 
 class ServerRunner:
     """Launches a vLLM OpenAI-compatible server subprocess (via either the

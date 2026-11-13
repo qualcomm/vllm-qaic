@@ -139,6 +139,7 @@ class TestNgramDisagg:
 
 
 @pytest.mark.qaic_disagg_installed
+@pytest.mark.arctic_inference_installed
 @pytest.mark.qaic_aot_mode
 @pytest.mark.qaic_test_config(speculative_method="suffix", **_FAST_BASE_CONFIG)
 class TestSuffixDisagg:
