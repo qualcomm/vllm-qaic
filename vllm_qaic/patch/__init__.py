@@ -246,7 +246,6 @@ import vllm_qaic.patch.patch_fused_moe_sum  # noqa
 import vllm_qaic.patch.patch_fused_moe_align  # noqa
 
 import vllm_qaic.envs as qaic_envs
-from vllm_qaic.platform import _HAS_TRITON
 
 # The numpy slot-mapping patch bypasses vLLM's Triton slot-mapping kernel. When
 # the in-tree Triton attention backend is selected (the flag is enabled and
@@ -254,7 +253,7 @@ from vllm_qaic.platform import _HAS_TRITON
 # feed slot_mapping into triton_reshape_and_cache_flash, so skip this patch in
 # that mode -- and instead patch that wrapper, whose CUDA compute-capability
 # query raises on QAIC.
-if not (qaic_envs.VLLM_QAIC_ENABLE_TRITON_ATTN and _HAS_TRITON):
+if not qaic_envs.VLLM_QAIC_ENABLE_TRITON_ATTN:
     import vllm_qaic.patch.patch_block_table  # noqa
 else:
     import vllm_qaic.patch.patch_reshape_and_cache  # noqa
