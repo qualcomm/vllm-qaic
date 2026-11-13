@@ -15,7 +15,6 @@ from vllm.model_executor.layers.layernorm import (
 )
 
 from vllm_qaic._custom_ops import rms_norm_hexagon as _call_hexagon_rms_norm
-from vllm_qaic.logger import init_logger
 from vllm_qaic.ops._triton_flags import triton_op_enabled
 from vllm.model_executor.determinism.batch_invariant import (
     rms_norm_batch_invariant,
@@ -31,7 +30,6 @@ from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
 
 triton_en = triton_op_enabled("RMS_NORM")
 triton_gated_en = triton_op_enabled("RMS_NORM_GATED")
-logger = init_logger(__name__)
 
 
 class QAicRMSNorm(RMSNorm):
@@ -63,9 +61,6 @@ class QAicRMSNorm(RMSNorm):
         # with has_weight=False gets weight=None (no per-channel multiply).
         weight = self.weight if self.pass_weight else None
         if triton_en:
-            logger.info_once(
-                "QAIC Triton forward: RMSNorm without residual -> _rms_norm_kernel"
-            )
             return rms_norm_batch_invariant(x, weight, self.variance_epsilon)
 
         return F.rms_norm(x, [self.hidden_size], weight, self.variance_epsilon)
