@@ -4,6 +4,7 @@
 # ------------------------------------------------------------------
 """Host regressions for disaggregated prefill CCL slot ownership."""
 
+from collections import deque
 from queue import Queue
 from types import MethodType, SimpleNamespace
 
@@ -75,6 +76,7 @@ def make_model(monkeypatch):
             uses_mrope=False,
             pad=np.full(256, -1, dtype=np.int64),
             async_scheduling_exec_timeout=1,
+            pending_prefill_batch_queues=deque(),
         )
         QaicCausalLM.load_model(
             model, "unused.qpc", [0], kv_transfer_role=role, stages=2
