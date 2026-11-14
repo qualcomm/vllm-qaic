@@ -3,6 +3,11 @@ name: vllm-qaic-release-notes
 description: Draft release notes for a vllm-qaic release. Use when the user asks to prepare, generate, or update release notes for a vllm-qaic tag or release branch, or to add a section to docs/docs/community/release_notes.md. Collects the commits and version-pin changes between two refs with a script, then drafts a section in the repo's established format with every claim tied to a PR number. Writes only the working tree; never commits, tags, or publishes a GitHub release.
 ---
 
+<!--
+Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+SPDX-License-Identifier: BSD-3-Clause-Clear
+-->
+
 # vLLM-QAIC Release Notes
 
 ## Purpose
@@ -37,7 +42,7 @@ Ask the user for anything not stated. Do not guess.
 1. Make sure both refs exist locally (`git fetch` the remote that holds them if not).
 2. Run the collector and read all of its output:
 
-   ```
+   ```bash
    python3 -I skills_studio/skills/vllm-qaic-release-notes/scripts/release_context.py \
        <repo-path> <previous-ref> <new-ref>
    ```
@@ -64,7 +69,7 @@ Ask the user for anything not stated. Do not guess.
 Follow the existing sections. Use these headings in this order and omit any that are
 empty:
 
-```
+```markdown
 ## <name>
 
 <one-paragraph intro: what kind of release, what it builds on, SDK/QEfficient it targets>

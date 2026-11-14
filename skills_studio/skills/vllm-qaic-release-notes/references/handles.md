@@ -1,3 +1,8 @@
+<!--
+Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+SPDX-License-Identifier: BSD-3-Clause-Clear
+-->
+
 # Contributor map
 
 Maps the git author name on a commit to a GitHub handle and a display name.
