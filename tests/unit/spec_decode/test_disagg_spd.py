@@ -334,7 +334,7 @@ def test_disagg_compile_does_not_default_kv_head_replication():
             {"default": {}, "target": {}, "draft": {}},
         ),
     ):
-        compiled = qaic_model_loader._get_qaic_compile_config(config, "default")
+        _ = qaic_model_loader._get_qaic_compile_config(config, "default")
 
 
 @pytest.mark.parametrize(
