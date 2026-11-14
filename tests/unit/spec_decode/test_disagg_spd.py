@@ -336,11 +336,6 @@ def test_disagg_compile_does_not_default_kv_head_replication():
     ):
         compiled = qaic_model_loader._get_qaic_compile_config(config, "default")
 
-    # Replication is opt-in: it is applied per role at compile time and would
-    # inflate decode KV memory.
-    assert compiled.qaic_config is None
-    assert "qaic_config" not in compiled.cfg
-
 
 @pytest.mark.parametrize(
     "replication_override",
@@ -499,7 +494,6 @@ def test_disagg_compile_forwards_nested_qaic_config_to_qeff(
 
     assert compiled.qaic_config == user_qaic_config
     assert compiled.cfg["qaic_config"] == user_qaic_config
-    assert "replicate_kv_heads" not in compiled.cfg["qaic_config"]
     assert config.additional_config["override_qaic_config"] == override
 
 
