@@ -51,11 +51,12 @@ reason:
 
 - **`qaic_aot_mode`** — skipped unless `current_platform.is_aot_inference()` is true.
 - **`qaic_disagg_installed`** — skipped unless the `qaic_disagg` package is importable.
+- **`arctic_inference_installed`** — skipped unless the `arctic_inference` package is importable.
 - Device-pool sizing (not a marker, same hook) — skipped if `num_device_groups * device_group_size`
   exceeds the run's device pool (`--device-pool-size` or `len(--device-id)`).
 
-Add `qaic_aot_mode`/`qaic_disagg_installed` to any test that only makes sense under that mode/
-package instead of hand-rolling a platform check or `importorskip`.
+Add the appropriate mode/package marker to tests that require it instead of hand-rolling a
+platform check or `importorskip`.
 
 ## CI runner scripts (`ci_scripts/`)
 

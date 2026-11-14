@@ -471,6 +471,28 @@ pip install /path/to/dist/aot/vllm_qaic-*aot*.whl
 pip install --no-deps /path/to/dist/pyt/py312/vllm_qaic-*pyt*.whl
 ```
 
+### Optional speculative-decoding dependencies
+
+The default `vllm-qaic` install does not install speculative-decoding-only
+packages. To opt in to them, install the `spd` extra. It currently includes
+`arctic-inference==0.1.1`, used by suffix speculative decoding; additional SPD
+dependencies can be added to this extra without making them mandatory for all
+users.
+
+For a locally built wheel, use a PEP 508 direct reference so pip selects the
+extra from that wheel's metadata:
+
+```bash
+VLLM_QAIC_WHEEL="$(realpath /path/to/dist/aot/vllm_qaic-*aot*.whl)"
+pip install "vllm_qaic[spd] @ file://${VLLM_QAIC_WHEEL}"
+```
+
+Do not pass `--no-deps` when installing the extra. Arctic Inference is
+currently distributed as a source archive, so pip will attempt to build it
+during installation; that build requires a compatible native build toolchain
+and may fail if one is unavailable. Installing the ordinary wheel without the
+`[spd]` extra remains unchanged.
+
 ---
 
 ## Verification

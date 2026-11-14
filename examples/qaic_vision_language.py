@@ -598,6 +598,7 @@ def main(args):
     engine_args["quantization"] = "mxfp6"
     engine_args["kv_cache_dtype"] = "mxint8"
     engine_args["max_num_seqs"] = decode_bsz
+    engine_args["max_num_batched_tokens"] = seq_len
 
     llm_lang = LLM(**engine_args)
     llm_vision = LLM(**engine_args_vision) if modality == "image" else None
