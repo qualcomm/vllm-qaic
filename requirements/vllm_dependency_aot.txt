@@ -66,4 +66,4 @@ timm==1.0.14
 soundfile==0.13.1
 librosa==0.10.2
 qwen-vl-utils==0.0.8
-# arctic-inference # Required for Speculative decoding usecase.
+# arctic-inference is optional; install it via the vllm-qaic[spd] extra.
