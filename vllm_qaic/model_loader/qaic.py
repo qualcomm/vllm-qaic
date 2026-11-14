@@ -2323,13 +2323,6 @@ def _get_qaic_compile_config(
         from .qaic_session_np import VLLM_KV_CACHE_PREFIX
 
         cfg["kv_cache_prefix"] = VLLM_KV_CACHE_PREFIX
-        # QEfficient computes the replication factor from the model config and
-        # compile topology. Keep the transform enabled on both disaggregated
-        # roles so their KV-cache layouts remain identical. Any explicit
-        # qaic_config values supplied by the user take precedence.
-        if qaic_config is None:
-            qaic_config = {}
-        qaic_config.setdefault("replicate_kv_heads", True)
     if qaic_config is not None:
         # qeff_model.compile(**cfg) is the production boundary that applies
         # blocking and MoE transforms. Do not drop this nested configuration.
