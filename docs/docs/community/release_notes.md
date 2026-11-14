@@ -67,41 +67,41 @@ Changes since v1.23.0:
 
 ### Pull Requests
 
-- Fix CCL prefill multimodal input shapes by @quic-vargupt in https://github.com/qualcomm/vllm-qaic/pull/118
-- [PyT] update torch version to 2.13 by @quic-agokhale in https://github.com/qualcomm/vllm-qaic/pull/132
-- Change SDK version to 1.23 by @quic-sanising in https://github.com/qualcomm/vllm-qaic/pull/135
-- Fix installer/dockerfile default dependency versions by @quic-agokhale in https://github.com/qualcomm/vllm-qaic/pull/142
-- [PyT] hard-code enable_prefix_caching to False by @quic-agokhale in https://github.com/qualcomm/vllm-qaic/pull/131
-- docs: add setup guide for installing vllm-qaic from Apps SDK wheels by @quic-agokhale in https://github.com/qualcomm/vllm-qaic/pull/166
-- [PyT] Fix QAIC_VISIBLE_DEVICES usage in examples and remove no-op code by @quic-agokhale in https://github.com/qualcomm/vllm-qaic/pull/158
-- scripts: install triton-cpu build deps in install_triton_cpu.sh by @eplatero97 in https://github.com/qualcomm/vllm-qaic/pull/172
-- [AOT][Spec Decode] Run the SpD rejection sampler on Numba; triton-cpu becomes optional by @eplatero97 in https://github.com/qualcomm/vllm-qaic/pull/171
-- Key disagg KV hand-off by request id to prevent collisions by @quic-sanising in https://github.com/qualcomm/vllm-qaic/pull/165
-- Use hyphenated vllm-qaic in default SDK path by @quic-agokhale in https://github.com/qualcomm/vllm-qaic/pull/177
-- Pin encoder cache/compute budget to max_num_batched_tokens for vision encoder by @quic-sanising in https://github.com/qualcomm/vllm-qaic/pull/178
-- Drop Python 3.10, add Python 3.13 support by @quic-sanising in https://github.com/qualcomm/vllm-qaic/pull/197
-- Support versioned Hexagon tools SDK layouts by @quic-sanising in https://github.com/qualcomm/vllm-qaic/pull/196
-- Increase dataPathTimeoutMs(branch: main) by @quic-mohmeh in https://github.com/qualcomm/vllm-qaic/pull/200
-- Remove long_prefill_token_threshold by @quic-sanising in https://github.com/qualcomm/vllm-qaic/pull/74
-- Skip chunked-prefill assert for vision encoder by @quic-sanising in https://github.com/qualcomm/vllm-qaic/pull/214
-- Add support for Encoder Cache (EC) by @quic-sanising in https://github.com/qualcomm/vllm-qaic/pull/69
-- Fix for gptoss models generating junk or null output by @quic-vargupt in https://github.com/qualcomm/vllm-qaic/pull/204
-- [Spec Decode] Enable speculative decoding with disaggregated serving by @eplatero97 in https://github.com/qualcomm/vllm-qaic/pull/75
-- Fix async disaggregated prefill CCL slot cleanup by @vjanfaza in https://github.com/qualcomm/vllm-qaic/pull/223
-- fix: prevent padded decode rows from aliasing active batch slots by @bharathmedak in https://github.com/qualcomm/vllm-qaic/pull/206
-- Patch VllmConfig max_concurrent_batches for pipeline prefill by @chaitanyasachdeva in https://github.com/qualcomm/vllm-qaic/pull/218
-- Update efficient-transformers to 1.23.4 by @quic-sanising in https://github.com/qualcomm/vllm-qaic/pull/226
-- Fix mistral_common dependency to v1.11.3 by @quic-sanising in https://github.com/qualcomm/vllm-qaic/pull/228
-- Fix pytest fixture registration for disaggregated tests by @eplatero97 in https://github.com/qualcomm/vllm-qaic/pull/227
-- Adding code changes for handling rank 4 conv & recurrent states for model with GDN during KV$ transfer by @quic-vargupt in https://github.com/qualcomm/vllm-qaic/pull/120
-- Add documentation for Encoder Cache by @quic-sanising in https://github.com/qualcomm/vllm-qaic/pull/229
-- Fix QEfficient compile config forwarding by @eplatero97 in https://github.com/qualcomm/vllm-qaic/pull/233
-- Update examples for Encoder Cache by @quic-sanising in https://github.com/qualcomm/vllm-qaic/pull/236
-- Fix prefill to wait for the oldest exec object when none are free by @chaitanyasachdeva in https://github.com/qualcomm/vllm-qaic/pull/231
-- [bug] Stop defaulting replicate_kv_heads for disaggregated compile by @eplatero97 in https://github.com/qualcomm/vllm-qaic/pull/241
-- [spec decode] Add optional SPD dependency extra by @eplatero97 in https://github.com/qualcomm/vllm-qaic/pull/238
+- Fix CCL prefill multimodal input shapes by @quic-vargupt in <https://github.com/qualcomm/vllm-qaic/pull/118>
+- [PyT] update torch version to 2.13 by @quic-agokhale in <https://github.com/qualcomm/vllm-qaic/pull/132>
+- Change SDK version to 1.23 by @quic-sanising in <https://github.com/qualcomm/vllm-qaic/pull/135>
+- Fix installer/dockerfile default dependency versions by @quic-agokhale in <https://github.com/qualcomm/vllm-qaic/pull/142>
+- [PyT] hard-code enable_prefix_caching to False by @quic-agokhale in <https://github.com/qualcomm/vllm-qaic/pull/131>
+- docs: add setup guide for installing vllm-qaic from Apps SDK wheels by @quic-agokhale in <https://github.com/qualcomm/vllm-qaic/pull/166>
+- [PyT] Fix QAIC_VISIBLE_DEVICES usage in examples and remove no-op code by @quic-agokhale in <https://github.com/qualcomm/vllm-qaic/pull/158>
+- scripts: install triton-cpu build deps in install_triton_cpu.sh by @eplatero97 in <https://github.com/qualcomm/vllm-qaic/pull/172>
+- [AOT][Spec Decode] Run the SpD rejection sampler on Numba; triton-cpu becomes optional by @eplatero97 in <https://github.com/qualcomm/vllm-qaic/pull/171>
+- Key disagg KV hand-off by request id to prevent collisions by @quic-sanising in <https://github.com/qualcomm/vllm-qaic/pull/165>
+- Use hyphenated vllm-qaic in default SDK path by @quic-agokhale in <https://github.com/qualcomm/vllm-qaic/pull/177>
+- Pin encoder cache/compute budget to max_num_batched_tokens for vision encoder by @quic-sanising in <https://github.com/qualcomm/vllm-qaic/pull/178>
+- Drop Python 3.10, add Python 3.13 support by @quic-sanising in <https://github.com/qualcomm/vllm-qaic/pull/197>
+- Support versioned Hexagon tools SDK layouts by @quic-sanising in <https://github.com/qualcomm/vllm-qaic/pull/196>
+- Increase dataPathTimeoutMs(branch: main) by @quic-mohmeh in <https://github.com/qualcomm/vllm-qaic/pull/200>
+- Remove long_prefill_token_threshold by @quic-sanising in <https://github.com/qualcomm/vllm-qaic/pull/74>
+- Skip chunked-prefill assert for vision encoder by @quic-sanising in <https://github.com/qualcomm/vllm-qaic/pull/214>
+- Add support for Encoder Cache (EC) by @quic-sanising in <https://github.com/qualcomm/vllm-qaic/pull/69>
+- Fix for gptoss models generating junk or null output by @quic-vargupt in <https://github.com/qualcomm/vllm-qaic/pull/204>
+- [Spec Decode] Enable speculative decoding with disaggregated serving by @eplatero97 in <https://github.com/qualcomm/vllm-qaic/pull/75>
+- Fix async disaggregated prefill CCL slot cleanup by @vjanfaza in <https://github.com/qualcomm/vllm-qaic/pull/223>
+- fix: prevent padded decode rows from aliasing active batch slots by @bharathmedak in <https://github.com/qualcomm/vllm-qaic/pull/206>
+- Patch VllmConfig max_concurrent_batches for pipeline prefill by @chaitanyasachdeva in <https://github.com/qualcomm/vllm-qaic/pull/218>
+- Update efficient-transformers to 1.23.4 by @quic-sanising in <https://github.com/qualcomm/vllm-qaic/pull/226>
+- Fix mistral_common dependency to v1.11.3 by @quic-sanising in <https://github.com/qualcomm/vllm-qaic/pull/228>
+- Fix pytest fixture registration for disaggregated tests by @eplatero97 in <https://github.com/qualcomm/vllm-qaic/pull/227>
+- Adding code changes for handling rank 4 conv & recurrent states for model with GDN during KV$ transfer by @quic-vargupt in <https://github.com/qualcomm/vllm-qaic/pull/120>
+- Add documentation for Encoder Cache by @quic-sanising in <https://github.com/qualcomm/vllm-qaic/pull/229>
+- Fix QEfficient compile config forwarding by @eplatero97 in <https://github.com/qualcomm/vllm-qaic/pull/233>
+- Update examples for Encoder Cache by @quic-sanising in <https://github.com/qualcomm/vllm-qaic/pull/236>
+- Fix prefill to wait for the oldest exec object when none are free by @chaitanyasachdeva in <https://github.com/qualcomm/vllm-qaic/pull/231>
+- [bug] Stop defaulting replicate_kv_heads for disaggregated compile by @eplatero97 in <https://github.com/qualcomm/vllm-qaic/pull/241>
+- [spec decode] Add optional SPD dependency extra by @eplatero97 in <https://github.com/qualcomm/vllm-qaic/pull/238>
 
-**Full Changelog**: https://github.com/qualcomm/vllm-qaic/compare/v1.23.0...release/r1.23.4
+**Full Changelog**: <https://github.com/qualcomm/vllm-qaic/compare/v1.23.0...release/r1.23.4>
 
 ### Contributors
 
@@ -116,7 +116,7 @@ and simplified packaging for AOT/PyTorch builds.
 
 ### AOT Execution Mode
 
-**Model Support**
+#### Model Support
 
 - Fixed Gemma3 multimodal processing for vLLM 0.23
 - Fixed `max_pixels` resolution handling for Qwen-VL
@@ -124,11 +124,11 @@ and simplified packaging for AOT/PyTorch builds.
 - Simplified the eager/AOT vision-language example to use dict-based
   config instead of engine args
 
-**Speculative Decoding**
+#### Speculative Decoding
 
 - Added DFlash: speculative decoding with a Diffusion LM proposer
 
-**Scheduling & Execution**
+#### Scheduling & Execution
 
 - Fixed pending exec-object tracking for async prefill scheduling
 - Fixed decode cleanup callback
@@ -158,27 +158,27 @@ and simplified packaging for AOT/PyTorch builds.
 
 ### Pull Requests
 
-- [v0.15.0] Update vllm dependency installation by @quic-agokhale in https://github.com/qualcomm/vllm-qaic/pull/49
-- MoE support v0.23.0 by @Shrinivas-kulkarni9 in https://github.com/qualcomm/vllm-qaic/pull/54
-- V0.23.0 by @ankitqti in https://github.com/qualcomm/vllm-qaic/pull/78
-- Fix decode cleanup callback by @chaitanyasachdeva in https://github.com/qualcomm/vllm-qaic/pull/81
-- Add pre-commit validation workflow for PRs by @quic-sanising in https://github.com/qualcomm/vllm-qaic/pull/79
-- fixed build for bf16 kernel for AI200 by @sahil139 in https://github.com/qualcomm/vllm-qaic/pull/87
-- Align QaicWorkerPyt profiler with upstream changes to profiler configuration by @quic-agokhale in https://github.com/qualcomm/vllm-qaic/pull/86
-- Change default triton-cpu installation path to local directory in package folder by @quic-agokhale in https://github.com/qualcomm/vllm-qaic/pull/100
-- Add Rust frontend build support to Docker AOT/PYT images by @ankitqti in https://github.com/qualcomm/vllm-qaic/pull/103
-- Add Rotary Embedding support by @quic-agokhale in https://github.com/qualcomm/vllm-qaic/pull/84
-- build: make RDMA support optional when building UCX by @quic-vargupt in https://github.com/qualcomm/vllm-qaic/pull/107
-- Fix whlbuild triton-cpu default behavior by @quic-agokhale in https://github.com/qualcomm/vllm-qaic/pull/119
-- Run pre-commit on all files by @quic-sanising in https://github.com/qualcomm/vllm-qaic/pull/93
-- [v0.23.0] Fix pending exec-object tracking for async prefill scheduling by @animku in https://github.com/qualcomm/vllm-qaic/pull/114
-- vllm-qaic: fix batch_size for Qwen3-235B by @chaitanyasachdeva in https://github.com/qualcomm/vllm-qaic/pull/117
-- [DFlash] Add speculative decoding with Diffusion LM proposer by @vjanfaza in https://github.com/qualcomm/vllm-qaic/pull/71
-- Fix Gemma3 multimodal processing for vLLM 0.23 by @quic-vargupt in https://github.com/qualcomm/vllm-qaic/pull/97
-- Remove engine args to enable dict-based support for eager/aot mode vision language example by @Neeharika-Gupta in https://github.com/qualcomm/vllm-qaic/pull/111
-- Fix max_pixels resolution handling for Qwen-VL by @chaitanyasachdeva in https://github.com/qualcomm/vllm-qaic/pull/125
+- [v0.15.0] Update vllm dependency installation by @quic-agokhale in <https://github.com/qualcomm/vllm-qaic/pull/49>
+- MoE support v0.23.0 by @Shrinivas-kulkarni9 in <https://github.com/qualcomm/vllm-qaic/pull/54>
+- V0.23.0 by @ankitqti in <https://github.com/qualcomm/vllm-qaic/pull/78>
+- Fix decode cleanup callback by @chaitanyasachdeva in <https://github.com/qualcomm/vllm-qaic/pull/81>
+- Add pre-commit validation workflow for PRs by @quic-sanising in <https://github.com/qualcomm/vllm-qaic/pull/79>
+- fixed build for bf16 kernel for AI200 by @sahil139 in <https://github.com/qualcomm/vllm-qaic/pull/87>
+- Align QaicWorkerPyt profiler with upstream changes to profiler configuration by @quic-agokhale in <https://github.com/qualcomm/vllm-qaic/pull/86>
+- Change default triton-cpu installation path to local directory in package folder by @quic-agokhale in <https://github.com/qualcomm/vllm-qaic/pull/100>
+- Add Rust frontend build support to Docker AOT/PYT images by @ankitqti in <https://github.com/qualcomm/vllm-qaic/pull/103>
+- Add Rotary Embedding support by @quic-agokhale in <https://github.com/qualcomm/vllm-qaic/pull/84>
+- build: make RDMA support optional when building UCX by @quic-vargupt in <https://github.com/qualcomm/vllm-qaic/pull/107>
+- Fix whlbuild triton-cpu default behavior by @quic-agokhale in <https://github.com/qualcomm/vllm-qaic/pull/119>
+- Run pre-commit on all files by @quic-sanising in <https://github.com/qualcomm/vllm-qaic/pull/93>
+- [v0.23.0] Fix pending exec-object tracking for async prefill scheduling by @animku in <https://github.com/qualcomm/vllm-qaic/pull/114>
+- vllm-qaic: fix batch_size for Qwen3-235B by @chaitanyasachdeva in <https://github.com/qualcomm/vllm-qaic/pull/117>
+- [DFlash] Add speculative decoding with Diffusion LM proposer by @vjanfaza in <https://github.com/qualcomm/vllm-qaic/pull/71>
+- Fix Gemma3 multimodal processing for vLLM 0.23 by @quic-vargupt in <https://github.com/qualcomm/vllm-qaic/pull/97>
+- Remove engine args to enable dict-based support for eager/aot mode vision language example by @Neeharika-Gupta in <https://github.com/qualcomm/vllm-qaic/pull/111>
+- Fix max_pixels resolution handling for Qwen-VL by @chaitanyasachdeva in <https://github.com/qualcomm/vllm-qaic/pull/125>
 
-**Full Changelog**: https://github.com/qualcomm/vllm-qaic/compare/release/v0.15.0...release/v0.23.0
+**Full Changelog**: <https://github.com/qualcomm/vllm-qaic/compare/release/v0.15.0...release/v0.23.0>
 
 ## v0.15.0.dev3 (Initial Public Release)
 
