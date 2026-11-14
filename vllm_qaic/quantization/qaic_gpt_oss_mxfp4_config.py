@@ -55,7 +55,6 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 
-from vllm_qaic.logger import init_logger
 from vllm_qaic.ops._triton_flags import triton_op_enabled
 from vllm_qaic.ops.unquantized_fused_moe_method import QAicUnquantizedFusedMoEMethod
 
@@ -87,9 +86,6 @@ def check_qaic_mxfp4_ops_available() -> None:
             "torch_qaic does not provide. Install a torch_qaic build that "
             "includes qaic::mxfp4_mm and qaic::swigluoai."
         )
-
-
-logger = init_logger(__name__)
 
 
 class QaicTritonGptOssMxfp4MoEMethod(GptOssMxfp4MoEMethod):
@@ -124,12 +120,6 @@ class QaicTritonGptOssMxfp4MoEMethod(GptOssMxfp4MoEMethod):
             super().__init__(moe)
         finally:
             upstream_mxfp4.select_mxfp4_moe_backend = original_selector
-
-        logger.info_once(
-            "QAIC GPT-OSS MXFP4: forcing backend=%s, experts=%s",
-            self.mxfp4_backend.value,
-            self.experts_cls.__name__,
-        )
 
     @property
     def is_monolithic(self) -> bool:
@@ -292,9 +282,6 @@ class QaicGptOssMxfp4Config(QuantizationConfig):
             return UnquantizedLinearMethod()
         if isinstance(layer, RoutedExperts):
             if triton_op_enabled("GPT_OSS_MOE"):
-                logger.info_once(
-                    "QAIC GPT-OSS MXFP4: selecting modular upstream Triton MoE method"
-                )
                 return QaicTritonGptOssMxfp4MoEMethod(layer.moe_config)
             return QaicGptOssMxfp4MoEMethod(layer.moe_config)
         if isinstance(layer, Attention):
