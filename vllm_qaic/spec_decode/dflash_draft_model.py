@@ -9,6 +9,7 @@
 from typing import TYPE_CHECKING
 
 import numpy as np
+from QEfficient.generation.text_generation_inference import get_compilation_dims
 
 from vllm.config import VllmConfig
 from vllm_qaic.logger import init_logger
@@ -63,6 +64,7 @@ class QaicDFlashProposer:
         spec_config = draft_vllm_config.speculative_config
         # Public num_speculative_tokens is block_size - 1 (bonus token in slot 0).
         self.block_size: int = spec_config.num_speculative_tokens + 1
+        self.target_seq_len: int = self.block_size
         self.decode_bsz: int = draft_vllm_config.scheduler_config.max_num_seqs
 
         # Runner sets tlm_prefill_seq_len from the loaded TLM before load_model().
@@ -102,8 +104,31 @@ class QaicDFlashProposer:
         self._req_state: dict[str, _ReqState] = {}
         self._prefill_pending: list[dict] = []
 
+    def _validate_target_width(self, width: int) -> None:
+        if width < self.block_size or width % self.block_size:
+            raise ValueError("DLM target width must be a positive block_size multiple.")
+        if self.tlm_prefill_seq_len <= 0 or self.tlm_prefill_seq_len % width:
+            raise ValueError("DLM target width must divide the TLM prefill length.")
+
     def load_model(self) -> None:
-        self.num_sub_blocks = self.tlm_prefill_seq_len // self.block_size
+        additional = self._draft_vllm_config.additional_config or {}
+        override = additional.get("override_qaic_config") or {}
+        qaic_config = dict(override.get("qaic_config") or {})
+        requested_width = qaic_config.get("dflash_target_seq_len")
+        width = self.tlm_prefill_seq_len if requested_width is None else requested_width
+        if type(width) is not int:
+            raise ValueError("DLM target width must be an integer.")
+        self._validate_target_width(width)
+        # Use the TLM width, not the draft's block-sized noise specialization.
+        # Keep an omitted override compatible with legacy block-width QPCs.
+        if width != self.block_size:
+            qaic_config["dflash_target_seq_len"] = width
+        else:
+            qaic_config.pop("dflash_target_seq_len", None)
+        self._draft_vllm_config.additional_config = {
+            **additional,
+            "override_qaic_config": {**override, "qaic_config": qaic_config},
+        }
         logger.info(
             "Loading DFlash DLM %s (block_size=%d, decode_bsz=%d, "
             "tlm_prefill_seq_len=%d, mask_token_id=%d) ...",
@@ -114,6 +139,45 @@ class QaicDFlashProposer:
             self.mask_token_id,
         )
         self.model = load_qaic_model(self._draft_vllm_config, "draft")
+        cache_shapes = [info[0] for info in self.model.kv_cache_info]
+        if any(len(s) != 4 for s in cache_shapes):
+            raise ValueError("DFlash DLM QPC requires rank-4 KV caches.")
+        # Standalone QPCs can keep KV internal, with no transfer bindings.
+        capacity = (
+            min(s[2] for s in cache_shapes)
+            if cache_shapes
+            else get_compilation_dims(self.model.qpc_path)[1]
+        )
+        if capacity <= 0:
+            raise ValueError("DFlash DLM QPC requires positive KV capacity.")
+        self.max_model_len = min(self.max_model_len, capacity)
+        target_info = self.model.get_io_shape_and_dtype("target_hidden")
+        position_info = self.model.get_io_shape_and_dtype("position_ids_target")
+        if target_info is None or position_info is None:
+            raise ValueError("DFlash DLM QPC is missing target inputs.")
+        target_shape = target_info[0]
+        if (
+            len(target_shape) != 3
+            or target_shape[0] != self.decode_bsz
+            or target_shape[2] != self.hidden_size
+            or position_info[0] != target_shape[:2]
+        ):
+            raise ValueError("DFlash DLM QPC target shapes do not match the model.")
+        width = self.target_seq_len = target_shape[1]
+        if requested_width is not None and requested_width != width:
+            raise ValueError(f"DLM width mismatch: {width} != {requested_width}.")
+        self._validate_target_width(width)
+        self.num_sub_blocks = self.tlm_prefill_seq_len // width
+        self._dlm_position_ids_target = np.full(
+            (self.decode_bsz, width), -1, dtype=np.int64
+        )
+        self._dlm_target_hidden = np.zeros(target_shape, dtype=np.float32)
+        logger.info(
+            "DFlash DLM target length=%d, noise length=%d, prefill calls/chunk=%d",
+            self.target_seq_len,
+            self.block_size,
+            self.num_sub_blocks,
+        )
         # DLM logits output shape: (decode_bsz, block_size, vocab).
         self._dlm_logits_buf = np.zeros(
             (self.decode_bsz, self.block_size, self.vocab_size),
@@ -138,6 +202,8 @@ class QaicDFlashProposer:
         self._dlm_input_ids[:] = self._mask_row
         self._dlm_position_ids[:] = -1
         self._dlm_position_ids_target[:] = -1
+        if self.target_seq_len != self.block_size:
+            self._dlm_target_hidden.fill(0)
         self._dlm_batch_index[:] = -1
 
     def build_prefill_pending(
@@ -188,6 +254,34 @@ class QaicDFlashProposer:
 
         self._prefill_pending = pending
 
+    def queue_prefill(
+        self,
+        req_id: str,
+        slot: int,
+        target_hidden: np.ndarray,
+        length: int,
+        logits: np.ndarray,
+    ) -> None:
+        """Own a completed prompt's features before its handoff buffer is released."""
+        if target_hidden.shape != (length, self.hidden_size):
+            raise ValueError("DFlash features do not match the prompt.")
+        width = self.tlm_prefill_seq_len
+        hidden = np.zeros(
+            (-(-length // width), 1, width, self.hidden_size), dtype=target_hidden.dtype
+        )
+        hidden.reshape(-1, self.hidden_size)[:length] = target_hidden
+        self._prefill_pending.append(
+            {
+                "target_hidden": list(hidden),
+                "prefill_positions": np.arange(length, dtype=np.int64),
+                "prefill_cum_sum": np.array([length], dtype=np.int64),
+                "batch_indices": np.array([slot], dtype=np.int64),
+                "prefill_is_partial": np.array([False]),
+                "last_chunk_logits": logits,
+                "req_id": req_id,
+            }
+        )
+
     def update_prefill_kv(self) -> None:
         """Drain pending DLM prefill work items; no-op when nothing pending."""
         for ctx in self._prefill_pending:
@@ -223,6 +317,14 @@ class QaicDFlashProposer:
         st = self._state_for(req_id)
         is_final_chunk = not bool(prefill_is_partial[0])
         block_size = self.block_size
+        last_pos = int(prefill_positions[n_tokens - 1])
+        # Once the next noise block cannot fit, this request stays TLM-only.
+        if last_pos + block_size >= self.max_model_len:
+            st.position_counter = last_pos
+            st.dlm_candidates = None
+            st.candidates_from_prefill = False
+            return
+        target_seq_len = self.target_seq_len
         active_slot = 0
         active_kv_slot = int(batch_indices[0])
 
@@ -236,11 +338,11 @@ class QaicDFlashProposer:
 
         def _hidden_subblock(sub_start: int) -> np.ndarray:
             # A block never straddles a chunk boundary (tlm_prefill_seq_len is a
-            # multiple of block_size), so a sub-block lives in exactly one chunk.
+            # multiple of target_seq_len), so a sub-block lives in one chunk.
             chunk_of = sub_start // pfl
             within = sub_start - chunk_of * pfl
             return np.ascontiguousarray(
-                target_hidden[chunk_of][0, within : within + block_size, :]
+                target_hidden[chunk_of][0, within : within + target_seq_len, :]
             )
 
         def _run_dlm_one_subblock(
@@ -271,14 +373,15 @@ class QaicDFlashProposer:
             return self._dlm_logits_buf[active_slot]
 
         if not is_final_chunk:
-            n_sub = -(-n_tokens // block_size)  # ceil
+            n_sub = -(-n_tokens // target_seq_len)  # ceil
             for sub_i in range(n_sub):
-                sub_start = sub_i * block_size
-                sub_end = sub_start + block_size
+                sub_start = sub_i * target_seq_len
+                sub_end = sub_start + target_seq_len
+                noise_start = int(prefill_positions[min(sub_end, n_tokens) - 1]) + 1
                 _run_dlm_one_subblock(
                     _hidden_subblock(sub_start),
                     positions_padded[sub_start:sub_end],
-                    positions_padded[sub_start:sub_end] + block_size,
+                    np.arange(noise_start, noise_start + block_size, dtype=np.int64),
                     np.full((block_size,), self.mask_token_id, dtype=np.int64),
                 )
             st.position_counter = int(prefill_positions[n_tokens - 1])
@@ -286,25 +389,25 @@ class QaicDFlashProposer:
 
         # Final chunk: last_sub holds the last real token and receives the bonus.
         last_real_idx = n_tokens - 1
-        last_sub = last_real_idx // block_size
-        last_pos = int(prefill_positions[last_real_idx])
+        last_sub = last_real_idx // target_seq_len
         assert last_sub < n_chunks * self.num_sub_blocks, (
             f"DFlash bonus sub-block index {last_sub} out of range "
             f"(total sub-blocks={n_chunks * self.num_sub_blocks})."
         )
 
         for sub_i in range(last_sub):
-            sub_start = sub_i * block_size
-            sub_end = sub_start + block_size
+            sub_start = sub_i * target_seq_len
+            sub_end = sub_start + target_seq_len
+            noise_start = int(prefill_positions[sub_end - 1]) + 1
             _run_dlm_one_subblock(
                 _hidden_subblock(sub_start),
                 positions_padded[sub_start:sub_end],
-                positions_padded[sub_start:sub_end] + block_size,
+                np.arange(noise_start, noise_start + block_size, dtype=np.int64),
                 np.full((block_size,), self.mask_token_id, dtype=np.int64),
             )
 
-        sub_start = last_sub * block_size
-        sub_end = sub_start + block_size
+        sub_start = last_sub * target_seq_len
+        sub_end = sub_start + target_seq_len
         target_hidden_slice = _hidden_subblock(sub_start)
         position_ids_target_row = positions_padded[sub_start:sub_end]
         # DLM writes its KV at the block_size positions after the last real token.
@@ -339,6 +442,8 @@ class QaicDFlashProposer:
         commit: bool = True,
     ) -> list[list[int]]:
         """Batched DLM forward; commit=False still advances KV but discards drafts."""
+        # Like the ordinary draft proposer, initialize prompts before decode.
+        self.update_prefill_kv()
         num_reqs = input_batch.num_reqs
         req_ids = input_batch.req_ids[:num_reqs]
         in_decode_phase = (
@@ -389,15 +494,19 @@ class QaicDFlashProposer:
 
             accepted_length = n_advanced - 1
             prev_counter = st.position_counter
+            st.position_counter = prev_counter + n_advanced
+            # Also protect discarded forwards when the batch-wide gate is closed.
+            if st.position_counter + block_size >= self.max_model_len:
+                st.dlm_candidates = None
+                continue
             row_pids_target = np.arange(
                 prev_counter + 1,
                 prev_counter + 1 + block_size,
                 dtype=np.int64,
             )
             row_pids_target[accepted_length + 1 :] = -1
-            position_ids_target[i] = row_pids_target
+            position_ids_target[i, :block_size] = row_pids_target
 
-            st.position_counter = prev_counter + n_advanced
             position_ids[i] = np.arange(
                 st.position_counter + 1,
                 st.position_counter + 1 + block_size,
@@ -405,7 +514,7 @@ class QaicDFlashProposer:
             )
 
             input_ids[i, 0] = new_tlm_token
-            target_hidden_block[i] = target_hidden[i, :block_size, :]
+            target_hidden_block[i, :block_size] = target_hidden[i, :block_size, :]
             batch_index[i, 0] = int(batch_indices[i])
             active_slots.append(i)
 
