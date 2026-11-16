@@ -638,9 +638,17 @@ def pytest_collection_modifyitems(session, config, items):
     for item in items:
         marker = item.get_closest_marker("qaic_test_config")
         kwargs = marker.kwargs if marker is not None else {}
-        num_device_groups = kwargs.get("num_device_groups", 1)
-        device_group_size = kwargs.get("device_group_size", 1)
-        required = num_device_groups * device_group_size
+        roles = ("encode", "prefill", "decode")
+        if any(f"num_{role}_workers" in kwargs for role in roles):
+            required = sum(
+                kwargs.get(f"num_{role}_workers", 0)
+                * kwargs.get(f"{role}_device_group_size", 1)
+                for role in roles
+            )
+        else:
+            num_device_groups = kwargs.get("num_device_groups", 1)
+            device_group_size = kwargs.get("device_group_size", 1)
+            required = num_device_groups * device_group_size
         if required > pool_size:
             item.add_marker(
                 pytest.mark.skip(
