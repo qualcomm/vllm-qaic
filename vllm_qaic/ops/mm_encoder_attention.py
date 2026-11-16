@@ -42,6 +42,42 @@ from vllm_qaic.ops._triton_flags import triton_op_enabled
 triton_en = triton_op_enabled("MM_ENCODER_ATTENTION")
 
 
+# The fused QAIC SDPA kernel fails above ~16k keys (e.g. the max-size dummy image
+# of vLLM's encoder profiling run, ~64k tokens in one segment) and the runtime
+# retries through a slow fallback (~4 s per call). Above this length, compute
+# attention with matmul + softmax over query-row chunks (exact: softmax is
+# per query row), which keeps the score matrix bounded.
+_FUSED_MAX_KV = 16384
+_MAX_SCORE_ELEMS = 1 << 29  # 1 GiB of fp16 attention scores per chunk
+
+
+def _sdpa(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    scale: float | None,
+    enable_gqa: bool,
+) -> torch.Tensor:
+    """``F.scaled_dot_product_attention`` on (b, h, s, d) tensors."""
+    if k.shape[-2] <= _FUSED_MAX_KV:
+        return F.scaled_dot_product_attention(
+            q, k, v, dropout_p=0.0, scale=scale, enable_gqa=enable_gqa
+        )
+    if enable_gqa and q.shape[1] != k.shape[1]:
+        rep = q.shape[1] // k.shape[1]
+        k = torch.repeat_interleave(k, rep, dim=1)
+        v = torch.repeat_interleave(v, rep, dim=1)
+    if scale is None:
+        scale = q.shape[-1] ** -0.5
+    kt = k.transpose(-1, -2)
+    rows = max(1, _MAX_SCORE_ELEMS // (q.shape[0] * q.shape[1] * k.shape[-2]))
+    out = [
+        torch.softmax((q[..., i : i + rows, :] @ kt) * scale, dim=-1) @ v
+        for i in range(0, q.shape[-2], rows)
+    ]
+    return torch.cat(out, dim=-2)
+
+
 def _batched_sdpa(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -51,9 +87,7 @@ def _batched_sdpa(
 ) -> torch.Tensor:
     """SDPA over a (b, s, h, d) packed tensor — matches upstream ``apply_sdpa``."""
     q, k, v = (einops.rearrange(x, "b s h d -> b h s d") for x in (q, k, v))
-    out = F.scaled_dot_product_attention(
-        q, k, v, dropout_p=0.0, scale=scale, enable_gqa=enable_gqa
-    )
+    out = _sdpa(q, k, v, scale, enable_gqa)
     return einops.rearrange(out, "b h s d -> b s h d")
 
 
@@ -128,9 +162,8 @@ def _grouped_sdpa(
         sv = segments_v.reshape(b * group_count, group_len, h_kv, d).transpose(1, 2)
 
         # Single batched SDPA for this group — no mask needed!
-        out_g = F.scaled_dot_product_attention(
-            sq, sk, sv, dropout_p=0.0, scale=scale, enable_gqa=enable_gqa
-        )  # (b * group_count, h_q, group_len, d)
+        out_g = _sdpa(sq, sk, sv, scale, enable_gqa)
+        # (b * group_count, h_q, group_len, d)
 
         # Reshape back to (b, group_count, group_len, h_q, d).
         out_g = out_g.transpose(1, 2).reshape(b, group_count, group_len, h_q, d)
@@ -200,14 +233,8 @@ def _qaic_sdpa(
         def _pack(x: torch.Tensor, h: int) -> torch.Tensor:
             return x.reshape(b * n, seg_len, h, d).transpose(1, 2)
 
-        out = F.scaled_dot_product_attention(
-            _pack(q, h_q),
-            _pack(k, h_kv),
-            _pack(v, h_kv),
-            dropout_p=0.0,
-            scale=scale,
-            enable_gqa=enable_gqa,
-        )  # (b*n, h_q, seg_len, d)
+        out = _sdpa(_pack(q, h_q), _pack(k, h_kv), _pack(v, h_kv), scale, enable_gqa)
+        # (b*n, h_q, seg_len, d)
 
         return out.transpose(1, 2).reshape(b, total_s, h_q, d)
 
