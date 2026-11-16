@@ -88,7 +88,7 @@ _MOE_ACTIVATION_IDS = {
 }
 
 _UNQUANTIZED_FUSED_MOE_HMX_KERNEL = (
-    "multinsp_multithreaded_unquantized_fused_moe_route_compute_hmx"
+    "multinsp_multithreaded_unquantized_fused_moe_hmx"
 )
 
 
@@ -148,7 +148,7 @@ def _unquantized_fused_moe_hvx_op(
     apply_router_weight_on_input: bool,
     has_expert_map: bool,
 ) -> Tensor:
-    """Low-level QAIC HVX routed-MoE variant using route_out + reduce."""
+    """Run grouping, HVX compute, and reduction in a single device launch."""
     num_tokens = x.shape[0]
     hidden_size = x.shape[1]
     num_experts = w13_weight.shape[0]
@@ -160,10 +160,10 @@ def _unquantized_fused_moe_hvx_op(
     workers = _NSP_COUNT * _THREAD_COUNT
     route_out = torch.empty((total_routes, hidden_size), dtype=x.dtype, device=x.device)
     expert_route_indices = torch.empty(
-        (total_routes,), dtype=torch.float32, device=x.device
+        (_NSP_COUNT, total_routes), dtype=torch.float32, device=x.device
     )
     expert_offsets = torch.empty(
-        (num_experts + 1,), dtype=torch.float32, device=x.device
+        (_NSP_COUNT, num_experts + 1), dtype=torch.float32, device=x.device
     )
     worker_counts = torch.empty(
         (workers, num_experts), dtype=torch.float32, device=x.device
@@ -171,6 +171,7 @@ def _unquantized_fused_moe_hvx_op(
     worker_offsets = torch.empty(
         (workers, num_experts), dtype=torch.float32, device=x.device
     )
+    stage_status = torch.empty((4, workers), dtype=torch.int32, device=x.device)
     out = torch.empty_like(x)
     params = torch.tensor(
         [
@@ -190,37 +191,8 @@ def _unquantized_fused_moe_hvx_op(
         device=x.device,
     ).contiguous()
 
-    group_count_kernel = _kernel(
-        "multinsp_multithreaded_unquantized_fused_moe_route_group_count"
-    )
-    group_prefix_kernel = _kernel(
-        "multinsp_multithreaded_unquantized_fused_moe_route_group_prefix"
-    )
-    group_fill_kernel = _kernel(
-        "multinsp_multithreaded_unquantized_fused_moe_route_group_fill"
-    )
-    route_kernel = _kernel("multinsp_multithreaded_unquantized_fused_moe_route_compute")
-    reduce_kernel = _kernel("multinsp_multithreaded_unquantized_fused_moe_route_reduce")
-    group_count_kernel[_NSP_COUNT, _THREAD_COUNT](
-        topk_ids,
-        expert_map,
-        worker_counts,
-        params,
-    )
-    group_prefix_kernel[_NSP_COUNT, _THREAD_COUNT](
-        worker_counts,
-        worker_offsets,
-        expert_offsets,
-        params,
-    )
-    group_fill_kernel[_NSP_COUNT, _THREAD_COUNT](
-        topk_ids,
-        expert_map,
-        worker_offsets,
-        expert_route_indices,
-        params,
-    )
-    route_kernel[_NSP_COUNT, _THREAD_COUNT](
+    kernel = _kernel("multinsp_multithreaded_unquantized_fused_moe")
+    kernel[_NSP_COUNT, _THREAD_COUNT](
         x,
         topk_weights,
         topk_ids,
@@ -232,8 +204,11 @@ def _unquantized_fused_moe_hvx_op(
         expert_offsets,
         expert_map,
         params,
+        worker_counts,
+        worker_offsets,
+        out,
+        stage_status,
     )
-    reduce_kernel[_NSP_COUNT, _THREAD_COUNT](route_out, out, params)
     return out
 
 
@@ -253,7 +228,7 @@ def _unquantized_fused_moe_hmx_op(
     apply_router_weight_on_input: bool,
     has_expert_map: bool,
 ) -> Tensor:
-    """Low-level QAIC HMX routed-MoE variant using route_out + reduce."""
+    """Run grouping, HMX compute, and reduction in a single device launch."""
     num_tokens = x.shape[0]
     hidden_size = x.shape[1]
     num_experts = w13_weight.shape[0]
@@ -265,16 +240,19 @@ def _unquantized_fused_moe_hmx_op(
     workers = _NSP_COUNT * _THREAD_COUNT
     route_out = torch.empty((total_routes, hidden_size), dtype=x.dtype, device=x.device)
     expert_route_indices = torch.empty(
-        (total_routes,), dtype=torch.float32, device=x.device
+        (_NSP_COUNT, total_routes), dtype=torch.float32, device=x.device
     )
     expert_offsets = torch.empty(
-        (num_experts + 1,), dtype=torch.float32, device=x.device
+        (_NSP_COUNT, num_experts + 1), dtype=torch.float32, device=x.device
     )
     worker_counts = torch.empty(
         (workers, num_experts), dtype=torch.float32, device=x.device
     )
     worker_offsets = torch.empty(
         (workers, num_experts), dtype=torch.float32, device=x.device
+    )
+    stage_status = torch.empty(
+        (4, _NSP_COUNT * _HMX_THREAD_COUNT), dtype=torch.int32, device=x.device
     )
     out = torch.empty_like(x)
     params = torch.tensor(
@@ -295,37 +273,8 @@ def _unquantized_fused_moe_hmx_op(
         device=x.device,
     ).contiguous()
 
-    group_count_kernel = _kernel(
-        "multinsp_multithreaded_unquantized_fused_moe_route_group_count"
-    )
-    group_prefix_kernel = _kernel(
-        "multinsp_multithreaded_unquantized_fused_moe_route_group_prefix"
-    )
-    group_fill_kernel = _kernel(
-        "multinsp_multithreaded_unquantized_fused_moe_route_group_fill"
-    )
-    route_kernel = _kernel(_UNQUANTIZED_FUSED_MOE_HMX_KERNEL)
-    reduce_kernel = _kernel("multinsp_multithreaded_unquantized_fused_moe_route_reduce")
-    group_count_kernel[_NSP_COUNT, _THREAD_COUNT](
-        topk_ids,
-        expert_map,
-        worker_counts,
-        params,
-    )
-    group_prefix_kernel[_NSP_COUNT, _THREAD_COUNT](
-        worker_counts,
-        worker_offsets,
-        expert_offsets,
-        params,
-    )
-    group_fill_kernel[_NSP_COUNT, _THREAD_COUNT](
-        topk_ids,
-        expert_map,
-        worker_offsets,
-        expert_route_indices,
-        params,
-    )
-    route_kernel[_NSP_COUNT, _HMX_THREAD_COUNT](
+    kernel = _kernel(_UNQUANTIZED_FUSED_MOE_HMX_KERNEL)
+    kernel[_NSP_COUNT, _HMX_THREAD_COUNT](
         x,
         topk_weights,
         topk_ids,
@@ -337,8 +286,11 @@ def _unquantized_fused_moe_hmx_op(
         expert_offsets,
         expert_map,
         params,
+        worker_counts,
+        worker_offsets,
+        out,
+        stage_status,
     )
-    reduce_kernel[_NSP_COUNT, _THREAD_COUNT](route_out, out, params)
     return out
 
 
