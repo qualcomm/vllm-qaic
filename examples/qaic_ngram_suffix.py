@@ -36,7 +36,7 @@ llm = LLM(
     model="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
     max_num_seqs=decode_bsz,  # determines decode batch size
     max_model_len=ctx_len,  # ctx_len (prompt + generated tokens, no padding)
-    long_prefill_token_threshold=seq_len,  # seq_len
+    additional_config={"override_qaic_config": {"prefill_seq_len": seq_len}},
     quantization="mxfp6",  # Preferred quantization
     kv_cache_dtype="mxint8",  # Preferred option to save KV cache performance
     disable_log_stats=False,
@@ -72,7 +72,6 @@ llm = LLM(
     model="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
     max_num_seqs=decode_bsz,  # determines decode batch size
     max_model_len=ctx_len,  # ctx_len (prompt + generated tokens, no padding)
-    long_prefill_token_threshold=seq_len,  # seq_len
     quantization="mxfp6",  # Preferred quantization
     kv_cache_dtype="mxint8",  # Preferred option to save KV cache performance
     disable_log_stats=False,
@@ -83,7 +82,10 @@ llm = LLM(
         "num_speculative_tokens": 5,
         "method": "suffix",
     },
-    additional_config={"device_group": [0]},
+    additional_config={
+        "device_group": [0],
+        "override_qaic_config": {"prefill_seq_len": seq_len},
+    },
 )
 # Generate texts from the prompts. The output is a list of RequestOutput objects
 # that contain the prompt, generated text, and other information.

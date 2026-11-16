@@ -91,10 +91,9 @@ version, installs vllm, then the `py3-none-any` AOT wheel.
 > `TRANSFORMERS_VERSION_AOT=5.5.4 ./install.sh aot`.
 
 ---
+## AOT using triton-cpu kernels (Optional for Speculative Decoding)
 
-## AOT with triton-cpu (Speculative Decoding)
-
-Speculative Decoding in AOT mode needs the `triton-cpu` backend so the rejection-sampler
+Speculative Decoding can use triton based rejection sample if it is enabled by installing triton-cpu
 Triton kernels can run on CPU. It is **opt-in** via `TRITON_CPU=1`, because it is a large C++
 build (5–10 GB, tens of minutes).
 
@@ -156,7 +155,7 @@ python -c "import torch; print(torch.__version__)"        # expect 2.7.0+cpu
 pip show torch-qaic                                       # must NOT be installed
 ```
 
-**triton-cpu, if installed:**
+**triton-cpu, if installed:** (Optional)
 
 ```bash
 python -c "

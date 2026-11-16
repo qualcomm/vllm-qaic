@@ -9,10 +9,12 @@ import json
 import os
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass
 from queue import Queue
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -50,6 +52,8 @@ from vllm_qaic.utils.qaic_utils import _clean_config, compute_max_decode_tokens
 logger = init_logger(__name__)
 
 lock = threading.Lock()
+
+UINT16_MAX = np.iinfo(np.uint16).max  # 65535
 
 
 class QaicCompilationComplete(Exception):
@@ -126,8 +130,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 self.is_qaic_pooler = True
                 self.normalize = bool(override_qaic_config.get("normalize", False))
                 self.softmax = bool(override_qaic_config.get("softmax", False))
-            # upstream vllm v0.23 removed "score" as a PoolingTask; cross-encoder
-            # scoring maps to "classify" instead.
+            # Upstream vLLM v0.23 removed "score" as a PoolingTask;
+            # cross-encoder scoring maps to "classify" instead.
             _raw_task: str | None = override_qaic_config.get("task", None)
             self.task = "classify" if _raw_task == "score" else _raw_task
 
@@ -135,9 +139,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
 
         self.config = config
         self.vocab_size = config.get_text_config().vocab_size
-        # `long_prefill_token_threshold` will define prefill chunk length.
-        # Compiler profiles may supply multiple shapes; use their largest length
-        # so chunking and padding operate on one scalar sequence length.
+        # `override_qaic_config["prefill_seq_len"]` defines the prefill chunk length.
         self.prefill_seq_len: int
         if self.config.model_type == "whisper":
             # Encoder-decoder models have chunked prefill disabled by vllm,
@@ -149,10 +151,11 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 "Prefill seq_len missing in override_qaic_config"
             )
             prefill_seq_len = override_qaic_config["prefill_seq_len"]
-            self.prefill_seq_len = (
+            self.prefill_seq_len = cast(
+                int,
                 max(prefill_seq_len)
                 if isinstance(prefill_seq_len, (list, tuple))
-                else int(prefill_seq_len)
+                else int(prefill_seq_len),
             )
 
         self.ctx_len = model_config.max_model_len
@@ -169,8 +172,9 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         )
 
         self.num_logits_to_keep: int | None = None
-        self.decode_logits: dict[str, np.ndarray] | None = None
         self.is_spec_decode_target_model = False
+        # pending_exec_queue of each in-flight async prefill batch, oldest first
+        self.pending_prefill_batch_queues: deque[Queue] = deque()
 
         # Variable-K decode specializations: compile with [0, K] for ngram/suffix
         # and dispatch to the smallest kernel that covers actual proposals each step.
@@ -179,9 +183,16 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             if vllm_config.speculative_config
             else None
         )
+        self.is_kv_consumer: bool = bool(
+            vllm_config.kv_transfer_config
+            and vllm_config.kv_transfer_config.kv_role == "kv_consumer"
+        )
+        _uses_variable_k = _method in ("ngram", "suffix") or (
+            _method == "draft_model" and self.is_kv_consumer
+        )
         self.decode_ks: list[int] = (
             [0, self.num_spec_tokens]
-            if _method in ("ngram", "suffix") and self.num_spec_tokens > 0
+            if _uses_variable_k and self.num_spec_tokens > 0
             else [self.num_spec_tokens]
         )
         # DFlash public num_speculative_tokens already excludes the slot-0 bonus
@@ -194,22 +205,28 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self.sampler = Sampler(logprobs_mode=model_config.logprobs_mode)
         self.pad = np.full(self.prefill_seq_len, fill_value=-1, dtype=np.int64)
 
-        # Pre-allocate one input dict per K so session.run() receives the correct
-        # static input shape for hardware dispatch.
+        # Pre-allocate one input dict per K for static dispatch shapes.
         self.decode_batch_inputs_by_k: dict[int, dict] = {}
+        self.decode_logits_by_k: dict[int, dict] = {}
+        self.decode_num_logits_buffer_by_k: dict[int, dict] = {}
         for _k in self.decode_ks:
+            self.decode_batch_inputs_by_k[_k] = self._make_decode_batch_input_for_k(_k)
             _mdt = _k + 1
-            _d: dict = {
-                "input_ids": np.full((self.decode_bsz, _mdt), -1, dtype=np.int64),
-                "position_ids": np.full((self.decode_bsz, _mdt), -1, dtype=np.int64),
-                "batch_index": np.full((self.decode_bsz, 1), -1, dtype=np.int64),
-            }
-            if self.lora_mode:
-                _d["lora_ids"] = np.full((self.decode_bsz, 1), -1, dtype=np.int64)
-            self.decode_batch_inputs_by_k[_k] = _d
+            self.decode_logits_by_k[_k] = dict(
+                logits=np.empty(
+                    (self.decode_bsz, _mdt, self.vocab_size), dtype=np.float32
+                )
+            )
+            self.decode_num_logits_buffer_by_k[_k] = dict(
+                num_logits_to_keep=np.empty((_mdt, 1), dtype=np.int64)
+            )
 
         # Backward-compat alias pointing at the max-K input dict.
         self.decode_batch_inputs = self.decode_batch_inputs_by_k[self.decode_ks[-1]]
+        self.decode_logits = self.decode_logits_by_k[self.decode_ks[-1]]
+        self.decode_num_logits_buffer = self.decode_num_logits_buffer_by_k[
+            self.decode_ks[-1]
+        ]
         self.list_of_comp_ctx_lengths: dict[int, np.ndarray] | None = None
         # Async scheduling
         self.use_async_scheduling = vllm_config.scheduler_config.async_scheduling
@@ -372,6 +389,30 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         """Expose QPC output conversion without leaking the session to runners."""
         return self.session.to_host_array(binding_name, buffer)
 
+    @staticmethod
+    def _warn_on_decode_k_mismatch(
+        configured_decode_ks: list[int], session_decode_ks: list[int]
+    ) -> None:
+        configured = set(configured_decode_ks)
+        available = set(session_decode_ks)
+        extra_qpc_ks = sorted(available - configured)
+        missing_qpc_ks = sorted(configured - available)
+
+        if extra_qpc_ks:
+            logger.warning(
+                "QPC contains extra decode specializations for K=%s; vLLM "
+                "configured K=%s.",
+                extra_qpc_ks,
+                sorted(configured),
+            )
+        if missing_qpc_ks:
+            logger.warning(
+                "QPC is missing decode specializations for configured K=%s; "
+                "available QPC K=%s will be used.",
+                missing_qpc_ks,
+                sorted(available),
+            )
+
     def load_model(
         self,
         qpc_path: str,
@@ -443,76 +484,51 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 return
         self.prefill_num_logits_buffer = None
         self.prefill_logits = dict(
-            logits=np.random.randn(self.prefill_bsz, 1, self.vocab_size).astype(
-                self.logits_dtype
+            logits=np.empty(
+                (self.prefill_bsz, 1, self.vocab_size), dtype=self.logits_dtype
             )
         )
         self.batch_prefill_logits = np.empty(
             (self.decode_bsz, self.vocab_size), dtype=self.logits_dtype
         )
-        self.decode_num_logits_buffer = None
         if self.num_logits_to_keep is not None:
             self.is_spec_decode_target_model = True
-            # Derive which K values are actually compiled in this QPC.
-            # Falls back to the init-time decode_ks if allowed_shapes is unavailable.
-            self.decode_ks = self._decode_ks_from_session()
+            configured_decode_ks = list(self.decode_ks)
+            session_decode_ks = self._decode_ks_from_session()
+            self._warn_on_decode_k_mismatch(configured_decode_ks, session_decode_ks)
+            self.decode_ks = session_decode_ks
             self.active_k = self.decode_ks[-1]
 
-            # Ensure decode_batch_inputs_by_k covers every K in the (possibly
-            # updated) decode_ks — _run_decode indexes it by current_k.
             for _k in self.decode_ks:
                 if _k not in self.decode_batch_inputs_by_k:
+                    self.decode_batch_inputs_by_k[_k] = (
+                        self._make_decode_batch_input_for_k(_k)
+                    )
+                if _k not in self.decode_logits_by_k:
                     _mdt = _k + 1
-                    _d: dict = {
-                        "input_ids": np.full(
-                            (self.decode_bsz, _mdt), -1, dtype=np.int64
-                        ),
-                        "position_ids": np.full(
-                            (self.decode_bsz, _mdt), -1, dtype=np.int64
-                        ),
-                        "batch_index": np.full(
-                            (self.decode_bsz, 1), -1, dtype=np.int64
-                        ),
-                    }
-                    if self.lora_mode:
-                        _d["lora_ids"] = np.full(
-                            (self.decode_bsz, 1), -1, dtype=np.int64
+                    self.decode_logits_by_k[_k] = dict(
+                        logits=np.empty(
+                            (self.decode_bsz, _mdt, self.vocab_size),
+                            dtype=np.float32,
                         )
-                    self.decode_batch_inputs_by_k[_k] = _d
+                    )
+                if _k not in self.decode_num_logits_buffer_by_k:
+                    self.decode_num_logits_buffer_by_k[_k] = dict(
+                        num_logits_to_keep=np.empty((_k + 1, 1), dtype=np.int64)
+                    )
 
-            # Pre-allocate per-K logit output buffers.
-            self.decode_logits_by_k: dict[int, dict] = {}
-            self.decode_num_logits_buffer_by_k: dict[int, dict] = {}
-            for _k in self.decode_ks:
-                _mdt = _k + 1
-                self.decode_logits_by_k[_k] = dict(
-                    logits=np.random.randn(
-                        self.decode_bsz, _mdt, self.vocab_size
-                    ).astype(np.float32)
-                )
-                self.decode_num_logits_buffer_by_k[_k] = dict(
-                    num_logits_to_keep=np.zeros((_mdt, 1), np.int64)
-                )
-
-            # Backward-compat aliases pointing at max-K buffers.
             self.decode_logits = self.decode_logits_by_k[self.decode_ks[-1]]
             self.decode_num_logits_buffer = self.decode_num_logits_buffer_by_k[
                 self.decode_ks[-1]
             ]
             self.prefill_num_logits_buffer = dict(
-                num_logits_to_keep=np.zeros((1, 1), np.int64)
+                num_logits_to_keep=np.empty((1, 1), dtype=np.int64)
             )
-        else:
-            self.decode_logits = dict(
-                logits=np.random.randn(self.decode_bsz, 1, self.vocab_size).astype(
-                    np.float32
-                )
-            )
-        # CCL state for prefill: dict keyed by prefill exec-object slot id, value
+        # CCL state for disaggregated prefill: dict keyed by exec-object slot id, value
         # is the bucket currently in flight on that slot (0 = idle). Used by
         # _run_pipeline_prefill to pick one CCL per batch =
         # max(needed-by-this-batch, max-in-flight).
-        if self.comp_ctx_lengths_prefill:
+        if self.disagg_producer_en and self.comp_ctx_lengths_prefill:
             prefill_start = self.session.decode_num_execObj
             self.active_ccl: dict[int, int] = {
                 i: 0
@@ -525,7 +541,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             self.ignore_batch_index = False
         else:
             self.ignore_batch_index = True
-            self.decode_batch_inputs.pop("batch_index", None)
+            for _decode_inputs in self.decode_batch_inputs_by_k.values():
+                _decode_inputs.pop("batch_index", None)
         if self.disagg_producer_en:
             self.decode_bsz = 0
 
@@ -538,7 +555,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         return allowed_seqlens
 
     @property
-    def kv_cache_info(self) -> list[tuple]:  # [(kv_shape, kv_type, kv_size)]
+    def kv_cache_info(self) -> list[tuple]:
+        # [(kv_shape, kv_type, kv_size, kv_kind)]
         return self.session.kv_cache_info
 
     def get_io_shape_and_dtype(
@@ -586,8 +604,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 _ = self.session.set_data_for_kv_handoff(
                     kv_caches[bidx],
                     [("batch_index", bidx), ("ctx_start", 0)],
-                    self.decode_execObj_idx,
                     self.session.decode_buff_map,
+                    self.decode_execObj_idx or 0,
                 )
         return
 
@@ -628,6 +646,15 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     break
             chosen_ccl = max(chosen_ccl, max(self.active_ccl.values()))
             comp_ctx_val = self.list_of_comp_ctx_lengths[chosen_ccl]
+
+        # Remove the oldest batch if all of its execObjs have completed.
+        while (
+            self.pending_prefill_batch_queues
+            and self.pending_prefill_batch_queues[0].empty()
+        ):
+            self.pending_prefill_batch_queues.popleft()
+        # Track this batch so a later chunk with no free execObj can wait on it.
+        self.pending_prefill_batch_queues.append(pending_exec_queue)
 
         idx_start = 0
         for index, idx_end in enumerate(prefill_cum_sum):
@@ -698,7 +725,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     if comp_ctx_val is not None:
                         chunk_inputs["comp_ctx_lengths"] = comp_ctx_val
                     # TODO: Workaround for CCL—LRT requires a buffer matching
-                    # logits shape
+                    # logits shape.
                     if logits is not None:
                         chunk_inputs["logits"] = logits[index : index + 1]
 
@@ -709,8 +736,12 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                         "All execObjs allocated; waiting for pending execObj "
                         "completion."
                     )
-                    eid = pending_exec_queue.get(timeout=120)
-                    self.complete_inf(eid, True, pipeline_prefill_en=True)
+                    # Oldest in-flight chunk is the head of the oldest batch's queue;
+                    # waiting on it keeps the pipeline running.
+                    if self.pending_prefill_batch_queues[0].empty():
+                        self.pending_prefill_batch_queues.popleft()
+                    eid = self.pending_prefill_batch_queues[0].get(timeout=120)
+                    self.complete_inf(eid, True)
                 # Submit Chunk to LRT Queue
                 exec_obj_idx = self.session.np_run_pipeline(
                     inputs=chunk_inputs,
@@ -729,7 +760,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 exec_obj_idx = pending_exec_queue.get(timeout=120)
                 if callback:
                     callback()
-                self.complete_inf(exec_obj_idx, True, pipeline_prefill_en=True)
+                self.complete_inf(exec_obj_idx, True)
         elif callback:
             # async path: free shm buffers, overlapping cleanup with device execution
             callback(self.stages)
@@ -848,7 +879,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     ]
 
                 if "num_logits_to_keep" in self.session.input_names:
-                    # SpD target QPC: prefill keeps 1 logit (last token position).
+                    # SpD target QPC: prefill keeps 1 logit (last token
+                    # position).
                     chunk_inputs["num_logits_to_keep"] = np.array([[1]], dtype=np.int64)
 
                 # DFlash: bind per-chunk hidden-states output buffers for the DLM.
@@ -876,6 +908,18 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     pending_exec_queue.put(exec_obj_idx)
 
         return
+
+    def _make_decode_batch_input_for_k(self, k: int) -> dict:
+        """Create a per-K decode input dict with sequence length ``k + 1``."""
+        mdt = k + 1
+        d: dict = {
+            "input_ids": np.zeros((self.decode_bsz, mdt), dtype=np.int64),
+            "position_ids": np.full((self.decode_bsz, mdt), -1, dtype=np.int64),
+            "batch_index": np.arange(self.decode_bsz, dtype=np.int64).reshape(-1, 1),
+        }
+        if self.lora_mode:
+            d["lora_ids"] = np.arange(self.decode_bsz, dtype=np.int64).reshape(-1, 1)
+        return d
 
     def _run_decode(
         self,
@@ -915,7 +959,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         if not self.ignore_batch_index:
             batch_inputs["batch_index"][:num_decodes, 0] = batch_indices
             if num_decodes < self.decode_bsz:
-                batch_inputs["batch_index"][num_decodes:] = -1
+                batch_inputs["batch_index"][num_decodes:] = UINT16_MAX
 
         if lora_ids is not None:
             batch_inputs["lora_ids"][:num_decodes] = lora_ids.reshape(num_decodes, 1)
@@ -1023,6 +1067,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
 
         Called either immediately (sync path) or after complete_inf (async path).
         """
+        assert self.encode_num_logits_buffer is not None
         output = self.encode_num_logits_buffer
         assert output is not None, "encode buffer not initialized"
         output_array = output[output_key][: len(prefill_cum_sum)]
@@ -1046,9 +1091,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 output_tensor = F.softmax(output_tensor, dim=1)
         return output_tensor
 
-    def complete_inf(
-        self, index: int, is_prefill: bool, pipeline_prefill_en: bool = False
-    ):
+    def complete_inf(self, index: int, is_prefill: bool):
         """Complete the inference execution for the given execution object index.
 
         Args:
@@ -1056,7 +1099,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             is_prefill: True if completing a prefill inference, False for decode.
         """
         self.session.complete_inf(index, is_prefill)
-        if pipeline_prefill_en and self.comp_ctx_lengths_prefill is not None:
+        if is_prefill and self.disagg_producer_en and self.comp_ctx_lengths_prefill:
             # Slot is no longer in flight; drop its CCL so max(active_ccl)
             # reflects only what's still running.
             self.active_ccl[index] = 0
@@ -1068,10 +1111,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
     @property
     def async_scheduling_exec_timeout(self) -> int | None:
         return self.session.async_scheduling_exec_timeout
-
-    @property
-    def has_no_available_prefill_exec_objs(self) -> int:
-        return self.session.prefill_available_exec_objs.empty()
 
     def run_encode(
         self,
@@ -1104,6 +1143,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         assert encode_num_logits_buffer is not None, (
             "run_encode requires an output buffer"
         )
+        assert output_key is not None
         if (
             self.encode_num_logits_buffer is None
             or encode_num_logits_buffer[output_key].shape
@@ -1121,6 +1161,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         else:
             self.encode_execObj_idx = encode_exec_obj_idx
 
+        assert self.encode_num_logits_buffer is not None
         return self.encode_num_logits_buffer
 
     def disagg_dummy_run(self):
@@ -1175,86 +1216,37 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
 
         # Prepare decode inputs
         if self.session.cluster_id == "decode":
-            # decode inputs
             if self.uses_mrope:
-                # QEfficient requires position ids to be (4, batch_size, seq_len)
                 decode_single_inputs = {
                     "input_ids": np.array([[0]]),
                     "position_ids": np.zeros((4, 1, 1), dtype=np.int64),
-                }
-                decode_batch_inputs = {
-                    "input_ids": np.zeros((self.decode_bsz, 1), dtype=np.int64),
-                    "position_ids": np.full(
-                        (4, self.decode_bsz, 1), -1, dtype=np.int64
-                    ),
                 }
             else:
                 decode_single_inputs = {
                     "input_ids": np.array([[0]]),
                     "position_ids": np.array([[0]]),
                 }
-                decode_batch_inputs = {
-                    "input_ids": np.zeros((self.decode_bsz, 1), dtype=np.int64),
-                    "position_ids": np.full((self.decode_bsz, 1), -1, dtype=np.int64),
-                }
             if self.is_spec_decode_target_model:
-                # decode on this model has multiple tokens per batch (aka precode)
                 decode_single_inputs = dict(
                     input_ids=np.zeros((1, self.num_logits_to_keep), dtype=np.int64),
                     position_ids=np.full(
                         (1, self.num_logits_to_keep), -1, dtype=np.int64
                     ),
                 )
-                decode_batch_inputs = dict(
-                    input_ids=np.zeros(
-                        (self.decode_bsz, self.num_logits_to_keep), dtype=np.int64
-                    ),
-                    position_ids=np.full(
-                        (self.decode_bsz, self.num_logits_to_keep), -1, dtype=np.int64
-                    ),
-                )
             if "batch_index" in self.session.input_names:
                 decode_single_inputs["batch_index"] = np.array([[0]])
-                decode_batch_inputs["batch_index"] = np.arange(
-                    self.decode_bsz, dtype=np.int64
-                ).reshape(-1, 1)
                 self.ignore_batch_index = False
             else:
                 self.ignore_batch_index = True
 
             if self.lora_mode:
                 decode_single_inputs["lora_ids"] = np.array([[0]])
-                decode_batch_inputs["lora_ids"] = np.arange(
-                    self.decode_bsz, dtype=np.int64
-                ).reshape(-1, 1)
-
-            # TODO: mllama3.2 is currently not supported in v0.15.0
-            # if input_info := self.get_io_shape_and_dtype("cross_attention_mask"):
-            #     self.is_cross_attention = True
-            #     (dims, dtype, _) = input_info
-            #     self.prefill_cross_attention_mask = np.zeros(
-            #         (dims[0], dims[1], dims[2], dims[3]), dtype=dtype
-            #     )
-            #     decode_single_inputs["cross_attention_mask"] = np.ones(
-            #         (1, dims[2], dims[3]), dtype=dtype
-            #     )
-            #     decode_batch_inputs["cross_attention_mask"] = np.ones(
-            #         (dims[0], 1, dims[2], dims[3]), dtype=dtype
-            #     )
-            # else:
-            #     self.is_cross_attention = False
 
             self.decode_single_inputs = decode_single_inputs
-            self.decode_batch_inputs = decode_batch_inputs
-            # Re-inject any mm kwargs (e.g. image_idx) that _load_multimodal()
-            # added to decode_batch_inputs before this dict was replaced.
             if getattr(self, "default_mm_kwargs", None):
-                self.decode_batch_inputs.update(self.default_mm_kwargs)
-            # Keep decode_batch_inputs_by_k in sync: _run_decode reads from this
-            # map, so it must point at the rebuilt dict that carries the correct
-            # (MRoPE-aware) position_ids / batch_index / mm-kwargs shapes.
-            for _k in self.decode_batch_inputs_by_k:
-                self.decode_batch_inputs_by_k[_k] = self.decode_batch_inputs
+                for _decode_inputs in self.decode_batch_inputs_by_k.values():
+                    _decode_inputs.update(self.default_mm_kwargs)
+            self.decode_batch_inputs = self.decode_batch_inputs_by_k[self.decode_ks[-1]]
         # TODO: Clean up
         # self._input_map_chg_needed = "decoder_input_ids" in self.session.input_names
         # # This is a hack for mapping names to qpc input,
@@ -1308,7 +1300,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     if self.is_multimodal_model and self.default_mm_kwargs:
                         prefill_inputs.update(self.default_mm_kwargs)
                     KvCache_buff = []
-                    for kv_shape, kv_type, _ in self.kv_cache_info:
+                    for kv_shape, kv_type, _, _ in self.kv_cache_info:
                         _kv_shape = (1,) + kv_shape[1:]
                         KvCache_buff.append(np.empty(shape=_kv_shape, dtype=kv_type))
                     if self.comp_ctx_lengths_prefill is not None:
@@ -1326,48 +1318,39 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 logger.info("Finished dummy prefill run")
             if self.session.cluster_id == "decode":
                 logger.info("Running dummy decode run with bsz %s", self.decode_bsz)
-                bidx = 0
-                input_kv_buffers: dict[str, Any] = {}
                 KvCache_buff = []
-                for kv_shape, kv_type, _ in self.kv_cache_info:
-                    _kv_shape = (self.decode_bsz,) + kv_shape[1:]
+                for kv_shape, kv_type, _, _ in self.kv_cache_info:
                     KvCache_buff.append(np.empty(shape=kv_shape, dtype=kv_type))
 
                 decode_logits_shape = (
-                    (self.decode_bsz, 1, self.vocab_size)
+                    (self.decode_bsz, self.max_decode_tokens, self.vocab_size)
                     if self.logits_ndim == 3
                     else (self.decode_bsz, self.vocab_size)
                 )
-                self.session.create_output_buffers(
-                    input_kv_buffers, decode_logits_shape, self.logits_dtype
-                )
-                # Pre-allocate logits buffer into every decode_batch_inputs_by_k
-                # entry so _run_decode can reuse it for all K values. The decode
-                # QPC logits binding is float16, so the buffer must match.
                 for _k_buf in self.decode_batch_inputs_by_k.values():
                     self.session.create_output_buffers(
                         _k_buf,
                         decode_logits_shape,
                         self.logits_dtype,
                     )
-                # CCL: seed comp_ctx_lengths buffer for the dummy run; _run_decode
-                # overwrites it per step with the selected bucket buffer.
                 if self.comp_ctx_lengths_decode is not None:
                     self.decode_batch_inputs["comp_ctx_lengths"] = np.zeros(
                         self.comp_ctx_lengths_decode[-1], dtype=np.int64
                     )
+                if self.is_spec_decode_target_model:
+                    self.decode_batch_inputs.update(
+                        self.decode_num_logits_buffer_by_k[self.active_k]
+                    )
                 _ = self.session.set_data_for_kv_handoff(
                     KvCache_buff,
-                    [("batch_index", bidx), ("ctx_start", 0)],
-                    self.decode_execObj_idx,
+                    [("batch_index", 0), ("ctx_start", 0)],
                     self.session.decode_buff_map,
+                    self.decode_execObj_idx,
                 )
-                bidx += 1
                 exec_obj_idx = self.session.np_run(
                     self.decode_batch_inputs, is_prefill=False
                 )
                 self.session.complete_inf(exec_obj_idx, is_prefill=False)
-                # self.decode_batch_inputs = decode_batch_inputs_temp
                 logger.info("Finished dummy decode run with bsz %s", self.decode_bsz)
             logger.debug("finished dummy run")
 
@@ -1426,7 +1409,9 @@ def _derive_dflash_config(vllm_config) -> None:
 
 
 def load_qaic_model(
-    vllm_config: VllmConfig, speculative_model_type: str | None = None
+    vllm_config: VllmConfig,
+    speculative_model_type: str | None = None,
+    raise_on_compile_complete: bool = True,
 ) -> nn.Module:
     # DFlash: derive cross-checkpoint config before the draft build
     # clears speculative_config.
@@ -1436,6 +1421,7 @@ def load_qaic_model(
     ):
         _derive_dflash_config(vllm_config)
 
+    original_speculative_config = vllm_config.speculative_config
     # Draft model must compile with max_decode_tokens=1. Clear speculative_config
     # so QaicCausalLM doesn't inherit num_spec_tokens from the target config.
     if speculative_model_type == "draft":
@@ -1443,6 +1429,9 @@ def load_qaic_model(
 
         vllm_config = copy(vllm_config)
         vllm_config.speculative_config = None
+        # Draft model has its own KV cache on separate devices and must NOT
+        # participate in KV transfer between prefill/decode servers.
+        vllm_config.kv_transfer_config = None
 
     # Create a model instance
     if vllm_config.model_config.is_multimodal_model:
@@ -1466,8 +1455,12 @@ def load_qaic_model(
             f"{speculative_model_type}!!\n"
         )
 
-    qaic_compile_config = _get_qaic_compile_config(vllm_config, speculative_model_type)
-    qpc_path = qaic_compile_config.qpc_path
+    qaic_compile_config = _get_qaic_compile_config(
+        vllm_config,
+        speculative_model_type,
+        speculative_config=original_speculative_config,
+    )
+    qpc_path: str | None = qaic_compile_config.qpc_path
 
     # set lora max adapters
     if vllm_config.lora_config:
@@ -1487,8 +1480,8 @@ def load_qaic_model(
             "pooling_device", None
         ) == "qaic" and override_qaic_config.get("task") not in ("score", "classify"):
             assert override_qaic_config.get("pooling_method"), (
-                "pooling_method must be provided in override_qaic_config for qaic"
-                "pooling task"
+                "pooling_method must be provided in override_qaic_config"
+                " for qaic pooling task"
             )
 
     # if provided qpc is valid
@@ -1687,11 +1680,16 @@ def load_qaic_model(
     logger.info("Using qpc:-%s", qpc_path)
 
     if qaic_compile_config.compile_only:
-        # Hack for Model-IP execution flow
-        # TODO: remove this in future
-        # This will create error in parent process if exited,
-        # need better solution in future
-        raise QaicCompilationComplete()
+        if raise_on_compile_complete:
+            # Hack for Model-IP execution flow
+            # TODO: remove this in future
+            # This will create error in parent process if exited,
+            # need better solution in future
+            raise QaicCompilationComplete()
+        # A target with a draft model must return so the drafter can compile.
+        # Set safe defaults because model.load_model() does not run here.
+        model.disagg_serving_en = False
+        return model.eval()
 
     # Load the weights from the cached or downloaded files.
     # model_config.qpc in None
@@ -1845,6 +1843,22 @@ def get_hf_model(
         # If tie_word_embeddings is not set correctly,
         # single QPC's output would be wrong
         hf_config.tie_word_embeddings = pretrained_hf_config.tie_word_embeddings
+    # For Gptoss models, vllm sets the quantization to gpt_oss_mxfp4 while qeff
+    # needs mxfp4 quantization. Because of this mismatch, qeff do not adds MoE
+    # weights to the graph and model generates garbage output
+    # Internally too qefficient doesn't support mxfp4, they will accept this
+    # flag and internally dequantize the model weights to fp16/fp32
+    architectures = getattr(hf_config, "architectures", None) or []
+    quantization_config = getattr(hf_config, "quantization_config", None)
+    if "GptOssForCausalLM" in architectures:
+        if isinstance(quantization_config, dict):
+            if quantization_config.get("quant_method") == "gpt_oss_mxfp4":
+                quantization_config["quant_method"] = "mxfp4"
+        elif (
+            quantization_config is not None
+            and getattr(quantization_config, "quant_method", None) == "gpt_oss_mxfp4"
+        ):
+            quantization_config.quant_method = "mxfp4"
     override_qaic_config = (
         additional_config.get("override_qaic_config") if additional_config else None
     )
@@ -1999,6 +2013,7 @@ def verify_adaptername_to_id_consistency(
 def _get_qaic_compile_config(
     vllm_config: VllmConfig,
     speculative_model_type: str = "default",
+    speculative_config: Any | None = None,
 ) -> QaicCompileConfig:
     mxfp6_en, mxint8_en = False, False
     # mxfp6
@@ -2016,12 +2031,18 @@ def _get_qaic_compile_config(
     # Number of kv cache blocks should be same as num_gpu_blocks, if CPL==blk_size
     kv_cache_batch_size = vllm_config.cache_config.num_cpu_blocks
     additional_config = vllm_config.additional_config or {}
+    is_kv_consumer = bool(
+        vllm_config.kv_transfer_config
+        and vllm_config.kv_transfer_config.kv_role == "kv_consumer"
+    )
     prefill_only = None
     # prefill_only options
     if vllm_config.kv_transfer_config:
         kv_role = vllm_config.kv_transfer_config.kv_role
-        if kv_role in ["kv_producer", "kv_consumer"]:
-            prefill_only = kv_role == "kv_producer"
+        if kv_role == "kv_producer":
+            prefill_only = True
+        elif is_kv_consumer:
+            prefill_only = False
 
     _device_group = additional_config.get("device_group")
 
@@ -2036,8 +2057,7 @@ def _get_qaic_compile_config(
         "prefill_seq_len": 128,
         "ctx_len": vllm_config.model_config.max_model_len,
         "batch_size": vllm_config.scheduler_config.max_num_seqs
-        if vllm_config.kv_transfer_config
-        and vllm_config.kv_transfer_config.kv_role == "kv_consumer"
+        if is_kv_consumer
         else 1,
         "full_batch_size": vllm_config.scheduler_config.max_num_seqs,
         "kv_cache_batch_size": kv_cache_batch_size,
@@ -2058,6 +2078,14 @@ def _get_qaic_compile_config(
     cfg.pop("weight_free", None)
     # update through environment variable
     cfg.update(_clean_config(QAIC_DEVICE_CONFIG[speculative_model_type]))
+    if speculative_model_type == "draft":
+        # The draft model is never disaggregated: it always runs its own
+        # prefill inline (see qaic_draft_model.py's propose()), so it needs
+        # both Prefill and Decode specializations compiled. Undo any
+        # prefill_only=False inherited from the decode instance's shared
+        # override_qaic_config, which is only correct for the disaggregated
+        # target (whose prefill runs on a separate prefill server).
+        cfg["prefill_only"] = prefill_only
     # set aic num core as per the hw if not provided
     if cfg["num_cores"] is None:
         _hw_num_cores = 16
@@ -2079,9 +2107,13 @@ def _get_qaic_compile_config(
                 _hw_num_cores = min(_hw_num_cores, _nsp_info[1].nspTotal)
         cfg["num_cores"] = _hw_num_cores
         # Applicable for draft-target spd scheme
-        if (
-            vllm_config.speculative_config
-            and "draft" in vllm_config.speculative_config.method
+        effective_speculative_config = (
+            speculative_config
+            if speculative_config is not None
+            else vllm_config.speculative_config
+        )
+        if effective_speculative_config and "draft" in (
+            effective_speculative_config.method
         ):
             other_cfg: dict[str, Any] = {"device_group": cfg["device_group"]}
             draft_override: dict[str, Any] | None = (
@@ -2139,13 +2171,20 @@ def _get_qaic_compile_config(
         # no proposals) and K=max (full SpD).  The K=0 kernel is used on steps
         # where the proposer finds no matches, avoiding the wasted 5-token
         # forward pass.  For draft_model the single K is sufficient.
+        uses_variable_k = bool(
+            spec_cfg
+            and (
+                spec_cfg.method in ("ngram", "suffix")
+                or (spec_cfg.method == "draft_model" and is_kv_consumer)
+            )
+        )
         if spec_cfg and spec_cfg.method == "dflash" and K:
             # DFlash public K is block_size - 1 (bonus token in slot 0), so the
             # DLM block_size is K + 1; keep all block_size logits.
             cfg["num_speculative_tokens"] = K
             cfg["dflash_block_size"] = K + 1
             num_logits_to_keep = K + 1
-        elif spec_cfg and spec_cfg.method in ("ngram", "suffix") and K:
+        elif uses_variable_k and K:
             cfg["num_speculative_tokens"] = [0, K]
             num_logits_to_keep = K + 1
         else:
@@ -2183,8 +2222,8 @@ def _get_qaic_compile_config(
             cfg["prefill_seq_len"] = 1
 
         if kv_offload:
-            # Dual QPC approach: select which QPC to load based on which path
-            # is skipped.
+            # Dual QPC approach: select which QPC to load based on which
+            # path is skipped.
             skip_lang = cfg.get("skip_lang", False)
             skip_vision = cfg.get("skip_vision", False)
             if not skip_lang and not skip_vision:
@@ -2201,9 +2240,20 @@ def _get_qaic_compile_config(
                 "Please set `max_num_seqs` (decode batch size) to 1."
             )
             del cfg["full_batch_size"]
-    qaic_config: dict[str, Any] | None = (override_qaic_config or {}).pop(
-        "qaic_config", None
+    # QEfficient consumes qaic_config at both model construction and compile
+    # time. Keep a private copy so adding QAIC defaults below does not mutate
+    # the caller's override, then restore the finalized value to cfg before
+    # qeff_model.compile(**cfg).
+    configured_qaic_config = (override_qaic_config or {}).get("qaic_config")
+    qaic_config: dict[str, Any] | None = (
+        deepcopy(configured_qaic_config) if configured_qaic_config is not None else None
     )
+    for key in ("replicate_kv_heads", "num_replicate_kv_heads"):
+        if override_qaic_config and key in override_qaic_config:
+            if qaic_config is None:
+                qaic_config = {}
+            qaic_config.setdefault(key, override_qaic_config.pop(key))
+            cfg.pop(key, None)
     if speculative_model_type in ("target", "turbo"):
         if qaic_config is None:
             qaic_config = {}
@@ -2306,6 +2356,10 @@ def _get_qaic_compile_config(
         from .qaic_session_np import VLLM_KV_CACHE_PREFIX
 
         cfg["kv_cache_prefix"] = VLLM_KV_CACHE_PREFIX
+    if qaic_config is not None:
+        # qeff_model.compile(**cfg) is the production boundary that applies
+        # blocking and MoE transforms. Do not drop this nested configuration.
+        cfg["qaic_config"] = qaic_config
     print(cfg)
     device_group = cfg.pop("device_group")
     if "io_encrypt" in cfg:
@@ -2317,7 +2371,7 @@ def _get_qaic_compile_config(
     if vllm_config.kv_transfer_config and "prefill_only" in cfg:
         assert (
             (kv_role == "kv_producer" and cfg["prefill_only"])
-            or (kv_role == "kv_consumer" and not cfg["prefill_only"])
+            or (is_kv_consumer and not cfg["prefill_only"])
             or (kv_role == "kv_both" and cfg["prefill_only"] is None)
         ), (
             "prefill_only False is only supported for kv_consumer"

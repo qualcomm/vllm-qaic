@@ -24,6 +24,7 @@ from torch import nn
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.forward_context import get_forward_context, set_forward_context
@@ -536,12 +537,15 @@ class QaicModelRunnerAoT(GPUModelRunner):
         ]
         self.num_decode_tokens = 0
         self.max_decode_tokens = compute_max_decode_tokens(self.speculative_config)
-        # Variable-K decode specializations: for ngram/suffix we compile two
-        # kernels (K=0 and K=max_k) and select the cheapest one each step.
+        # Variable-K methods compile K=0 and K=max. Draft-model needs K=0 only
+        # on a disaggregated consumer, whose first transferred token has no draft.
         _method = self.speculative_config.method if self.speculative_config else None
+        _uses_variable_k = _method in ("ngram", "suffix") or (
+            _method == "draft_model" and self.is_kv_consumer
+        )
         self.decode_ks: list[int] = (
             [0, self.num_spec_tokens]
-            if _method in ("ngram", "suffix") and self.max_decode_tokens > 1
+            if _uses_variable_k and self.max_decode_tokens > 1
             else [self.num_spec_tokens]
         )
         # DFlash public num_speculative_tokens already excludes the slot-0 bonus
@@ -728,12 +732,24 @@ class QaicModelRunnerAoT(GPUModelRunner):
         decode request has proposals for this step; select max_k otherwise.
         With single-spec: always returns the sole K (no-op).
         """
-        if len(self.decode_ks) <= 1 or self.num_decodes == 0:
+        if len(self.decode_ks) <= 1:
             return self.decode_ks[-1]
+        if self.num_decodes == 0:
+            # kv_consumer first disagg step: the sequence is classified as
+            # prefill by the batch reorder (num_computed < num_prompt), but the
+            # decode QPC must run with k=0 because no draft proposals exist yet.
+            return 0
         spec_tokens = scheduler_output.scheduled_spec_decode_tokens
         if spec_tokens and any(len(v) > 0 for v in spec_tokens.values()):
             return self.decode_ks[-1]  # proposals exist → full SpD kernel
         return 0  # no proposals → cheap fallback kernel
+
+    def _num_decode_rows_to_pad(self, num_reqs: int) -> int:
+        """Return how many leading request rows execute through the decode QPC."""
+        # A consumer can mix ordinary decode requests with newly transferred
+        # requests that the scheduler still classifies as prefill. Both groups
+        # execute through decode, so every consumer row needs the same MDT shape.
+        return num_reqs if self.is_kv_consumer else self.num_decodes
 
     def _pool(
         self,
@@ -830,7 +846,8 @@ class QaicModelRunnerAoT(GPUModelRunner):
             ]
             # Pad decode requests to active_k+1 tokens (1 for K=0 fallback,
             # max_decode_tokens for the full SpD kernel).
-            num_scheduled_tokens[: self.num_decodes] = self.active_k + 1
+            num_pad_reqs = self._num_decode_rows_to_pad(num_reqs)
+            num_scheduled_tokens[:num_pad_reqs] = self.active_k + 1
             total_num_scheduled_tokens = np.sum(num_scheduled_tokens)
 
         # Get request indices.
@@ -972,9 +989,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
         if (
             self.use_async_scheduling
             and self._pending_output is not None
-            and (
-                not self.is_kv_producer or self.model.has_no_available_prefill_exec_objs
-            )
+            and not self.is_kv_producer
         ):
             # Drain the previous batch's exec object. For kv producer drain only if
             # there are no available exec objs.
@@ -1098,16 +1113,15 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 mm_kwargs, _ = _res
                 mm_kwargs_list.append(mm_kwargs)
         else:
-            # TODO: if we can support ec connector, it will go here
-            # with self.maybe_get_ec_connector_output(
-            #    scheduler_output,
-            #    encoder_cache=self.encoder_cache,
-            # ) as ec_connector_output:
-            self._execute_mm_encoder(scheduler_output)
-            prefill_req_ids = self.input_batch.req_ids[self.num_decodes :]
-            mm_embeds = self._gather_mm_embeddings(
-                scheduler_output, req_ids=prefill_req_ids
-            )
+            with self.maybe_get_ec_connector_output(
+                scheduler_output,
+                encoder_cache=self.encoder_cache,
+            ):
+                self._execute_mm_encoder(scheduler_output)
+                prefill_req_ids = self.input_batch.req_ids[self.num_decodes :]
+                mm_embeds = self._gather_mm_embeddings(
+                    scheduler_output, req_ids=prefill_req_ids
+                )
             for mm_embed in mm_embeds:
                 _kw = self.model.prepare_embedding_mm_kwargs(mm_embed)  # type: ignore
                 mm_kwargs_list.append(_kw)
@@ -1130,12 +1144,21 @@ class QaicModelRunnerAoT(GPUModelRunner):
                     "after execute_model() returns None."
                 )
 
-            self._update_states(scheduler_output)
-
             if self.model.is_vision_encoder:
-                # This is referencing to gpu_model_runner
-                # if has_ec_transfer() and get_ec_transfer().is_producer
+                # Defer freeing encoder_cache until after the encoder runs, and
+                # skip hashes (re)scheduled this same step, so a just-encoded
+                # entry isn't dropped before _gather_mm_embeddings reads it.
+                saved_free_hashes = list(scheduler_output.free_encoder_mm_hashes)
+                scheduler_output.free_encoder_mm_hashes.clear()
+                self._update_states(scheduler_output)
+                scheduled_mm_hashes, _, _ = self._batch_mm_inputs_from_scheduler(
+                    scheduler_output
+                )
+                scheduled_mm_hashes = set(scheduled_mm_hashes)
                 self._execute_mm_encoder(scheduler_output)
+                for mm_hash in saved_free_hashes:
+                    if mm_hash not in scheduled_mm_hashes:
+                        self.encoder_cache.pop(mm_hash, None)
                 # Gather the encoder outputs that _execute_mm_encoder placed in
                 # the encoder cache; pass all req_ids since every request in this
                 # batch is a vision-encoder pooling request.
@@ -1145,6 +1168,8 @@ class QaicModelRunnerAoT(GPUModelRunner):
                     for_pooling_output=True,
                 )
                 return self.make_encoder_model_runner_output(mm_embeds)
+
+            self._update_states(scheduler_output)
 
             if not num_scheduled_tokens:
                 if not has_kv_transfer_group():
@@ -1683,13 +1708,32 @@ class QaicModelRunnerAoT(GPUModelRunner):
         time_before_load = time.perf_counter()
         from vllm_qaic.model_loader.qaic import load_qaic_model
 
+        _has_draft_model = (
+            self.speculative_config is not None
+            and self.speculative_config.uses_draft_model()
+            and self.drafter is not None
+        )
         with set_current_vllm_config(self.vllm_config):
             speculative_model_type = "default"
             if self.num_spec_tokens:
                 speculative_model_type = "target"
+            # When a draft model is present, defer the compile-only early
+            # exit until the drafter has also compiled (see
+            # QaicDraftModelProposer.load_model() below) -- otherwise the
+            # process exits after the target compiles and the draft's QPC
+            # never gets built.
             self.model: nn.Module = load_qaic_model(
-                self.vllm_config, speculative_model_type
+                self.vllm_config,
+                speculative_model_type,
+                raise_on_compile_complete=not _has_draft_model,
             )
+            # Sync decode_ks from the loaded model: _decode_ks_from_session()
+            # corrects it to the QPC's actual specializations (e.g. [0] for a
+            # seq_len=1-only QPC, or [0, K] for a multi-spec QPC).  Without this
+            # sync the runner may hold stale init-time values that differ from
+            # what the model's _run_decode buffers support.
+            self.decode_ks = list(self.model.decode_ks)  # type: ignore[arg-type]
+            self.active_k = self.decode_ks[-1]
             # FIXME load_lora_model parameters have changed in the mixin
             if self.lora_config:
                 self.model = self.load_lora_model(
@@ -1710,11 +1754,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 "QaicLMCacheConnectorV1 currently does not support"
                 " models with hybrid KV cache"
             )
-        if (
-            self.speculative_config is not None
-            and self.speculative_config.uses_draft_model()
-            and self.drafter is not None
-        ):
+        if _has_draft_model and self.drafter is not None:
             self.drafter.load_model()
         elif (
             self.speculative_config is not None
@@ -1730,6 +1770,20 @@ class QaicModelRunnerAoT(GPUModelRunner):
         logger.info(
             "Model loading took %.6f seconds",
             time_after_load - time_before_load,
+        )
+
+    def _qaic_warm_up_drafter(self) -> None:
+        # Runs outside _qaic_dummy_run so disagg decode nodes (which return
+        # early there) still compile the ngram kernel at start-up.
+        from vllm_qaic.spec_decode.ngram_warmup import (  # noqa: PLC0415
+            maybe_warm_up_ngram_proposer,
+        )
+
+        # The parent only sets self.drafter when speculative decoding is on.
+        maybe_warm_up_ngram_proposer(
+            self.speculative_config,
+            getattr(self, "drafter", None),
+            self.input_batch,
         )
 
     def _qaic_dummy_run(self) -> None:
@@ -1897,6 +1951,16 @@ class QaicModelRunnerAoT(GPUModelRunner):
                     mm_embeds.append(torch.cat(mm_embeds_req, dim=-2))
         return mm_embeds
 
+    def _update_states(self, scheduler_output: SchedulerOutput) -> None:
+        # Capture the mm_hashes the scheduler is freeing this step BEFORE the
+        # base implementation pops them from self.encoder_cache. The base pop
+        # drops the torch view over the SHM buffer; only AFTER that is it safe
+        # to unlink the SHM segment (else use-after-free on the torch tensor).
+        freed_mm_hashes = list(scheduler_output.free_encoder_mm_hashes)
+        super()._update_states(scheduler_output)
+        if freed_mm_hashes and has_ec_transfer() and not get_ec_transfer().is_producer:
+            get_ec_transfer().free_caches(freed_mm_hashes)
+
     def make_encoder_model_runner_output(
         self,
         mm_embeds: list[torch.Tensor],
@@ -1912,6 +1976,15 @@ class QaicModelRunnerAoT(GPUModelRunner):
             req_id_to_index=self.input_batch.req_id_to_index.copy(),
         )
 
+        if (
+            mm_embeds is not None
+            and has_ec_transfer()
+            and get_ec_transfer().is_producer
+        ):
+            mm_embeds = [
+                torch.zeros((1,) * t.ndim, dtype=t.dtype, device=t.device)
+                for t in mm_embeds
+            ]
         model_runner_output.pooler_output = mm_embeds
 
         return model_runner_output

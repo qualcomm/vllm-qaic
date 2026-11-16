@@ -21,7 +21,8 @@ Input (Image + Text)
         |
         v
     Generated Text
-```text
+```
+
 The vision encoder runs on one device group and the language decoder on another, allowing independent scaling and optimization.
 
 ## Supported Models
@@ -54,7 +55,6 @@ vision_bsz = 4
 engine_args = {
     "model": "Qwen/Qwen2.5-VL-32B-Instruct",
     "max_model_len": ctx_len,
-    "long_prefill_token_threshold": seq_len,
     "max_num_seqs": decode_bsz,
     "quantization": "mxfp6",
     "kv_cache_dtype": "mxint8",
@@ -62,6 +62,7 @@ engine_args = {
     "additional_config": {
         "override_qaic_config": {
             "device_group": [1],       # Language on QID 1
+            "prefill_seq_len": seq_len,
             "height": [364, 512],      # Compiled resolutions
             "width": [532, 910],
         },
@@ -93,7 +94,8 @@ for inp, emb in zip(inputs, embeddings):
     inp["multi_modal_data"]["image"] = emb.outputs.data
 
 outputs = llm_lang.generate(inputs, SamplingParams(temperature=0.0, max_tokens=64))
-```text
+```
+
 ## Dynamic Resolution (Qwen2.5-VL / Qwen3-VL)
 
 For Qwen VL models, provide lists of heights and widths that the model is compiled for:
@@ -105,7 +107,8 @@ additional_config={
         "width": [532, 910, 1280],   # Supported input widths
     },
 }
-```text
+```
+
 If an input image doesn't match a compiled resolution exactly, it's resized to the best available match.
 
 !!! warning "Constraints"

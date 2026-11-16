@@ -41,7 +41,7 @@ partial-json-parser # used for parsing partial JSON outputs
 jsonschema >= 4.23.0 # required for MiniMax M3 tool schema validation
 pyzmq >= 25.0.0
 msgspec
-mistral_common[image] >= 1.11.6
+mistral_common[image] == 1.11.6
 opencv-python-headless >= 4.13.0    # required for video IO
 pyyaml
 six>=1.16.0; python_version > '3.11' # transitive dependency of pandas that needs to be the latest version for python 3.12
@@ -66,4 +66,4 @@ timm==1.0.14
 soundfile==0.13.1
 librosa==0.10.2
 qwen-vl-utils==0.0.8
-# arctic-inference # Required for Speculative decoding usecase.
+# arctic-inference is optional; install it via the vllm-qaic[spd] extra.

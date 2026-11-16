@@ -8,13 +8,21 @@
 from typing import TYPE_CHECKING, Any
 
 import regex as re
-
+from enum import Enum
 from vllm_qaic.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.config import SpeculativeConfig, VllmConfig
 
 logger = init_logger(__name__)
+
+
+class KVCacheKind(Enum):
+    """Simple enum class to store different type of kv$ supported on qaic"""
+
+    FA = "FA"
+    LA_CONV = "LA_CONV"
+    LA_RECURRENT = "LA_RECURRENT"
 
 
 def compute_max_decode_tokens(

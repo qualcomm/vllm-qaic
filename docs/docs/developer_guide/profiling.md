@@ -22,7 +22,8 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
   --max-model-len 2048 \
   --quantization mxfp6 \
   --kv-cache-dtype mxint8
-```text
+```
+
 ## Output Structure
 
 Profiling produces per-iteration trace directories:
@@ -32,7 +33,8 @@ $VLLM_TORCH_PROFILER_DIR/
   lrt_trace_iter0_pid0/
   lrt_trace_iter1_pid0/
   ...
-```text
+```
+
 Each directory contains device-level execution traces from the Cloud AI runtime.
 
 ## Implementation
@@ -48,7 +50,8 @@ with optional_qaic_profiling(
     profiling_iter=self.profiling_iter,
 ):
     # Forward pass executes here
-```text
+```
+
 - **Zero overhead when disabled** (`VLLM_TORCH_PROFILER_DIR` unset)
 - Iteration counter increments after each profiled step
 - Traces written immediately under `profiling_dir`
@@ -60,7 +63,8 @@ Use the Cloud AI SDK tools to analyze LRT traces:
 ```bash
 # View trace summary
 ls $VLLM_TORCH_PROFILER_DIR/lrt_trace_iter0_pid0/
-```text
+```
+
 ## Interpreting Results
 
 | Observation | Likely Bottleneck |

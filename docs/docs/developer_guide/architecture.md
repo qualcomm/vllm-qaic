@@ -11,7 +11,8 @@ The plugin registers via Python entry points in `pyproject.toml`:
 ```toml
 [project.entry-points."vllm.platform_plugins"]
 qaic = "vllm_qaic:QaicPlugin"
-```text
+```
+
 At startup, vLLM discovers and loads the QAIC platform plugin, which registers:
 
 - The `QaicPlatform` class (device management, feature checks)
@@ -39,7 +40,8 @@ vllm.v1.engine
               +-- Attention Backend
                     +-- KV cache management
                     +-- Attention computation
-```text
+```
+
 ## Platform Class
 
 `QaicPlatform` (`vllm/platforms/qaic_base.py`) provides:
@@ -70,14 +72,16 @@ The vLLM QAIC plugin supports two execution modes, enabling flexibility between 
 HuggingFace Model -> QEfficient (export + compile) -> QPC -> qaic_model_runner (AOT) -> Output Tokens
                      --------------------------------        ---------------------
                        one-time compilation step               QAIC Device Session
-```text
+```
+
 ### PYT Mode (Eager)
 
 ```text
 vLLM Models -> qaic_model_runner (PYT) -> PyTorch execution on torch_qaic backend -> Output Tokens
                --------------------        ----------------------------------------
                  Model execution             Kernel dispatch to QAIC hardware
-```text
+```
+
 ## Device Topology
 
 ```text
@@ -86,7 +90,8 @@ Cloud AI 100 Ultra Card (64 NSP cores total)
 +-- QID 1:  16 NSP Cores
 +-- QID 2:  16 NSP Cores
 +-- QID 3:  16 NSP Cores
-```text
+```
+
 ## File Map
 
 | Component | Location |

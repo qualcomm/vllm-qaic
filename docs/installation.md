@@ -57,6 +57,25 @@ This guide covers installing `vllm-qaic` in both **AOT** (Ahead-of-Time compiled
 > resolved upstream when QEfficient supports 3.13 and relaxes the
 > `sentencepiece==0.2.0` pin.
 
+> [!WARNING]
+> **AOT mode does not work on Python 3.13.** AOT depends on `QEfficient`, whose own
+> `pyproject.toml` declares `requires-python = ">=3.10,<3.13"` and hard-pins
+> `sentencepiece==0.2.0`. `sentencepiece` publishes cp313 wheels only from 0.2.1
+> onward, so under Python 3.13 that pin forces a source build of 0.2.0, which fails:
+>
+> ```text
+> Building sentencepiece==0.2.0
+> /bin/sh: 1: pkg-config: not found
+> CMake Error at CMakeLists.txt:15 (cmake_minimum_required):
+>   Compatibility with CMake < 3.5 has been removed from CMake.
+> hint: `sentencepiece` (v0.2.0) was included because `qefficient` (v1.23.0.dev0)
+>       depends on `sentencepiece`
+> ```
+>
+> **Workaround:** use Python 3.11 or 3.12 for AOT environments. This will be
+> resolved upstream when QEfficient supports 3.13 and relaxes the
+> `sentencepiece==0.2.0` pin.
+
 Install the QAIC SDK before proceeding:
 
 - [SDK installation guide](https://quic.github.io/cloud-ai-sdk-pages/latest/Getting-Started/Installation/index.html)
@@ -127,7 +146,8 @@ The script handles all dependency ordering, version pinning, and `uv`/`pip` dete
 TRANSFORMERS_VERSION_AOT=4.55.3 ./scripts/install.sh aot
 TRANSFORMERS_VERSION_PYT=4.57.3 ./scripts/install.sh pyt
 
-# Enable triton-cpu backend for AOT Speculative Decoding
+# Optional: triton-cpu backend — only for the Numba/Triton rejection-sampler parity
+# tests (not needed for AOT Speculative Decoding, which uses Numba)
 # triton-cpu is a large C++ build — requires ~10 GB of free disk space at TRITON_CPU_SRC
 TRITON_CPU=1 ./scripts/install.sh aot
 
@@ -295,7 +315,7 @@ All `ARG`s are global (declared before the first `FROM`) and re-declared inside 
 | `QEFF_BRANCH` | `main` | QEfficient branch/tag to install |
 | `TORCH_VERSION_AOT` | `2.7.0+cpu` | CPU torch version for AOT |
 | `TORCHVISION_VERSION_AOT` | `0.22.0+cpu` | torchvision version for AOT |
-| `TRITON_CPU` | `1` | Set to `1` to build the triton-cpu backend (AOT SpD); Docker defaults ON, unlike `install.sh`'s default OFF |
+| `TRITON_CPU` | `0` | Set to `1` to build the optional triton-cpu backend (Numba/Triton rejection-sampler parity tests only; not needed for AOT SpD) |
 | `TRITON_CPU_COMMIT` | `e60f448f8f197073b75d6d3e77347414a5db3ee7` | Pinned triton-cpu commit hash |
 | `TRITON_CPU_COMPILE_MAX_JOBS` | `4` | Parallel build jobs for triton-cpu compilation |
 | `VLLM_BUILD_RUST` | `1` | Set to `1` to build vLLM's experimental Rust OpenAI frontend (`vllm-rs`) |
@@ -341,7 +361,7 @@ docker build --target release -f docker/Dockerfile.pyt -t vllm-qaic-pyt:1.24 .
 # Release (override version / device arch)
 docker build --target release -f docker/Dockerfile.aot \
   --build-arg VLLM_QAIC_GIT_REF=v1.24 --build-arg QEFF_BRANCH=main \
-  -t vllm-qaic-aot:1.23 .
+  -t vllm-qaic-aot:1.24.
 docker build --target release -f docker/Dockerfile.pyt \
   --build-arg QAIC_DEVICE_ARCH=v81 -t vllm-qaic-pyt:1.24-v81 .
 
@@ -470,6 +490,28 @@ pip install /path/to/dist/aot/vllm_qaic-*aot*.whl
 pip install --no-deps /path/to/dist/pyt/py312/vllm_qaic-*pyt*.whl
 ```
 
+### Optional speculative-decoding dependencies
+
+The default `vllm-qaic` install does not install speculative-decoding-only
+packages. To opt in to them, install the `spd` extra. It currently includes
+`arctic-inference==0.1.1`, used by suffix speculative decoding; additional SPD
+dependencies can be added to this extra without making them mandatory for all
+users.
+
+For a locally built wheel, use a PEP 508 direct reference so pip selects the
+extra from that wheel's metadata:
+
+```bash
+VLLM_QAIC_WHEEL="$(realpath /path/to/dist/aot/vllm_qaic-*aot*.whl)"
+pip install "vllm_qaic[spd] @ file://${VLLM_QAIC_WHEEL}"
+```
+
+Do not pass `--no-deps` when installing the extra. Arctic Inference is
+currently distributed as a source archive, so pip will attempt to build it
+during installation; that build requires a compatible native build toolchain
+and may fail if one is unavailable. Installing the ordinary wheel without the
+`[spd]` extra remains unchanged.
+
 ---
 
 ## Verification
@@ -502,7 +544,7 @@ All version constants are defined in [`scripts/utility.sh`](../scripts/utility.s
 | Constant | Value | Description |
 |---|---|---|
 | `VLLM_VERSION` | `0.30.0` | vLLM release tag |
-| `VLLM_QAIC_VERSION` | `0.30.0` | vllm-qaic SDK/version tag (used in wheel tag and version suffix) |
+| `VLLM_QAIC_VERSION` | `1.24` | vllm-qaic SDK/version tag (used in wheel tag and version suffix) |
 | `TORCH_VERSION_AOT` | `2.7.0+cpu` | CPU torch for AOT (matches QEfficient exact pin) |
 | `TORCHVISION_VERSION_AOT` | `0.22.0+cpu` | torchvision for AOT (keep in sync with torch) |
 | `TORCH_VERSION_PYT` | `2.13.0+cpu` | CPU torch for PYT |
@@ -512,12 +554,12 @@ All version constants are defined in [`scripts/utility.sh`](../scripts/utility.s
 | `TORCH_QAIC_VERSION` | `0.1.0` | torch_qaic wheel version |
 | `VLLM_TARGET_DEVICE_AOT` | `empty` | vLLM build target for AOT mode |
 | `VLLM_TARGET_DEVICE_PYT` | `empty` | vLLM build target for PYT mode |
-| `TRITON_CPU` | `0` | Set to `1` to enable triton-cpu backend (AOT SpD) |
+| `TRITON_CPU` | `0` | Set to `1` to build the optional triton-cpu backend (parity tests only; not needed for AOT SpD) |
 | `TRITON_CPU_COMMIT` | `e60f448f...` | Pinned triton-cpu commit hash |
 | `TRITON_CPU_SRC` | `<repo>/.build/triton-cpu` | Clone destination for triton-cpu source |
 | `TRITON_CPU_COMPILE_MAX_JOBS` | `4` | Parallel build jobs for triton-cpu compilation |
 | `TRITON_CPU_SKIP_DISK_CHECK`¹ | `0` | Set to `1` to skip the 10 GB disk-space pre-flight check |
 | `TORCH_QAIC_BASE_PATH` | `/opt/qti-aic/integrations/torch_qaic` | SDK path for torch_qaic wheels |
-| `VLLM_QAIC_SDK_PATH` | `/opt/qti-aic/integrations/vllm_qaic` | SDK path for pre-built vllm-qaic wheels |
+| `VLLM_QAIC_SDK_PATH` | `/opt/qti-aic/integrations/vllm-qaic` | SDK path for pre-built vllm-qaic wheels |
 
 ¹ Defined in `scripts/install_triton_cpu.sh`, not `utility.sh`.

@@ -17,10 +17,10 @@ export QAIC_VISIBLE_DEVICES=0
         model="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
         max_num_seqs=4,
         max_model_len=2048,
-        long_prefill_token_threshold=128,
         quantization="mxfp6",
         kv_cache_dtype="mxint8",
         async_scheduling=False,
+        additional_config={"override_qaic_config": {"prefill_seq_len": 128}},
     )
 
     prompts = [
@@ -72,7 +72,7 @@ export QAIC_VISIBLE_DEVICES=0
 |-----------|---------|-------------------|
 | `max_num_seqs` | Decode batch size | Start with 4-8 |
 | `max_model_len` | Max context length | Match QPC compilation ctx_len |
-| `long_prefill_token_threshold` | Prefill sequence length | Match QPC seq_len (e.g., 128) |
+| `override_qaic_config["prefill_seq_len"]` | Prefill chunk length | Match QPC seq_len (e.g., 128) |
 | `quantization` | Compute precision | `"mxfp6"` for AOT |
 | `kv_cache_dtype` | KV cache precision | `"mxint8"` for AOT |
 | `gpu_memory_utilization` | Device memory fraction | 0.9-1.0 |

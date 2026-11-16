@@ -106,12 +106,11 @@ def test_llm_lora_offline_init_caching(
     ]
 
     llm_kwargs = dict(
-        model=model_name,
-        max_num_seqs=decode_bsz,
-        max_model_len=ctx_len,
-        long_prefill_token_threshold=seq_len,
-        quantization=dtype,
-        kv_cache_dtype=kv_dtype,
+        model=BASE_MODEL_NAME,
+        max_num_seqs=2,
+        max_model_len=64,
+        quantization="mxfp6",
+        kv_cache_dtype="mxint8",
         gpu_memory_utilization=1.0,
         enable_lora=True,
         max_loras=2,
@@ -120,6 +119,7 @@ def test_llm_lora_offline_init_caching(
         additional_config={
             "device_group": device_group,
             "lora_modules": lora_modules,
+            "override_qaic_config": {"prefill_seq_len": 32},
         },
     )
 

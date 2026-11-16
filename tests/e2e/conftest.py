@@ -148,6 +148,11 @@ def _parse_device_id_pool(value: str) -> list[int]:
 
 
 def pytest_addoption(parser):
+    # These options are consumed by the disaggregated-serving fixtures. Keep
+    # them on this initial E2E conftest so collection via tests/e2e registers
+    # them before pytest parses command-line arguments.
+    parser.addoption("--client-request-timeout", type=int, default=60)
+    parser.addoption("--disaggregated-startup-timeout", type=int, default=1200)
     parser.addoption("--seq-len", type=int, default=None)
     parser.addoption("--ctx-len", type=int, default=None)
     parser.addoption("--decode-bsz", type=int, default=4)
@@ -323,6 +328,14 @@ def override_qaic_config(pytestconfig):
     return pytestconfig.getoption("override_qaic_config")
 
 
+def _with_prefill_seq_len(override_qaic_config: dict | None, seq_len: int) -> dict:
+    """Return a copy of `override_qaic_config` with `prefill_seq_len` defaulted
+    to `seq_len`; the QAIC prefill chunk length is read only from there."""
+    config = dict(override_qaic_config or {})
+    config.setdefault("prefill_seq_len", seq_len)
+    return config
+
+
 def _is_port_free(host: str, port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         try:
@@ -404,11 +417,12 @@ def make_runner(
         override_qaic_config: dict | None = override_qaic_config,
         quantization: str | None = dtype,
         kv_cache_dtype: str = kv_dtype,
-        long_prefill_token_threshold: int | None = None,
         **kwargs,
     ):
         additional_config = {
-            "override_qaic_config": override_qaic_config,
+            "override_qaic_config": _with_prefill_seq_len(
+                override_qaic_config, seq_len
+            ),
             "device_group": dg,
         }
         if lora_modules is not None:
@@ -417,11 +431,6 @@ def make_runner(
             model_name,
             max_num_seqs=max_num_seqs if max_num_seqs is not None else decode_bsz,
             max_model_len=ctx_len,
-            long_prefill_token_threshold=(
-                seq_len
-                if long_prefill_token_threshold is None
-                else long_prefill_token_threshold
-            ),
             quantization=quantization,
             kv_cache_dtype=kv_cache_dtype,
             additional_config=additional_config,
@@ -543,7 +552,9 @@ def qaic_model(
     try:
         additional_config = {
             "device_group": ids,
-            "override_qaic_config": override_qaic_config,
+            "override_qaic_config": _with_prefill_seq_len(
+                override_qaic_config, seq_len
+            ),
         }
         if draft_override_qaic_config is not None:
             additional_config["draft_override_qaic_config"] = draft_override_qaic_config
@@ -556,7 +567,6 @@ def qaic_model(
             model_name,
             max_num_seqs=decode_bsz,
             max_model_len=ctx_len,
-            long_prefill_token_threshold=seq_len,
             quantization=dtype,
             kv_cache_dtype=kv_dtype,
             enable_prefix_caching=False,
@@ -594,6 +604,7 @@ def qaic_runner_factory(vllm_runner, device_pool_ids):
         draft_override_qaic_config=None,
         num_device_groups=1,
         device_group_size=1,
+        disable_log_stats=True,
     ):
         ids = _device_pool.acquire(
             device_pool_ids, num_device_groups * device_group_size
@@ -601,7 +612,9 @@ def qaic_runner_factory(vllm_runner, device_pool_ids):
         try:
             additional_config = {
                 "device_group": ids,
-                "override_qaic_config": override_qaic_config or {},
+                "override_qaic_config": _with_prefill_seq_len(
+                    override_qaic_config, seq_len
+                ),
             }
             if draft_override_qaic_config is not None:
                 additional_config["draft_override_qaic_config"] = (
@@ -611,11 +624,11 @@ def qaic_runner_factory(vllm_runner, device_pool_ids):
                 model_name,
                 max_num_seqs=decode_bsz,
                 max_model_len=ctx_len,
-                long_prefill_token_threshold=seq_len,
                 quantization=quantization,
                 kv_cache_dtype=kv_dtype,
                 enable_prefix_caching=False,
                 async_scheduling=False,
+                disable_log_stats=disable_log_stats,
                 speculative_config=speculative_config,
                 additional_config=additional_config,
             )
@@ -642,10 +655,18 @@ def pytest_collection_modifyitems(session, config, items):
     )
     for item in items:
         marker = item.get_closest_marker("qaic_test_config")
-        kwargs = _marker_kwargs(marker)
-        num_device_groups = kwargs.get("num_device_groups", 1)
-        device_group_size = kwargs.get("device_group_size", 1)
-        required = num_device_groups * device_group_size
+        kwargs = marker.kwargs if marker is not None else {}
+        roles = ("encode", "prefill", "decode")
+        if any(f"num_{role}_workers" in kwargs for role in roles):
+            required = sum(
+                kwargs.get(f"num_{role}_workers", 0)
+                * kwargs.get(f"{role}_device_group_size", 1)
+                for role in roles
+            )
+        else:
+            num_device_groups = kwargs.get("num_device_groups", 1)
+            device_group_size = kwargs.get("device_group_size", 1)
+            required = num_device_groups * device_group_size
         if required > pool_size:
             item.add_marker(
                 pytest.mark.skip(
@@ -669,6 +690,14 @@ def pytest_collection_modifyitems(session, config, items):
         ):
             item.add_marker(
                 pytest.mark.skip(reason="qaic_disagg package is not installed")
+            )
+
+        if (
+            item.get_closest_marker("arctic_inference_installed") is not None
+            and importlib.util.find_spec("arctic_inference") is None
+        ):
+            item.add_marker(
+                pytest.mark.skip(reason="arctic-inference package is not installed")
             )
 
 
@@ -712,6 +741,12 @@ class ServerRunner:
         trust_remote_code: bool = False,
     ):
         self.base_url = f"http://{host}:{port}"
+        additional_config = {
+            **additional_config,
+            "override_qaic_config": _with_prefill_seq_len(
+                additional_config.get("override_qaic_config"), seq_len
+            ),
+        }
 
         cmd = [*self._BACKEND_LAUNCHERS[backend], model_name] + [
             "--host",
@@ -735,8 +770,6 @@ class ServerRunner:
         ]
         if max_num_batched_tokens is not None:
             cmd += ["--max-num-batched-tokens", str(max_num_batched_tokens)]
-        else:
-            cmd += ["--long-prefill-token-threshold", str(seq_len)]
         if enable_lora:
             cmd.append("--enable-lora")
         if max_loras is not None:

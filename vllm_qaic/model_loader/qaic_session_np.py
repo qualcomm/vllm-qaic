@@ -13,6 +13,7 @@ import numpy as np
 import torch
 
 from vllm_qaic.logger import init_logger
+from vllm_qaic.utils.qaic_utils import KVCacheKind
 
 try:
     import qaicrt
@@ -100,6 +101,7 @@ VLLM_QAIC_ASYNC_SCHEDULING_EXEC_TIMEOUT_ENV = "VLLM_QAIC_ASYNC_SCHEDULING_EXEC_T
 VLLM_KV_CACHE_PREFIX = "vllmKvCache"
 VLLM_QAIC_USE_LEGACY_SLICING_SPEC_ENV = "VLLM_QAIC_USE_LEGACY_SLICING_SPEC"
 VLLM_QAIC_ENABLE_LRT_DEBUG_ENV = "VLLM_QAIC_ENABLE_LRT_DEBUG"
+VLLM_QAIC_DATA_PATH_TIMEOUT_MS_ENV = "VLLM_QAIC_DATA_PATH_TIMEOUT_MS"
 
 
 class QAICInferenceSession:
@@ -193,7 +195,10 @@ class QAICInferenceSession:
 
         # Create and load Program
         prog_properties = qaicrt.QAicProgramProperties()
-        prog_properties.dataPathTimeoutMs = 60_000
+        # MoE models needs high timeout due to expert parallelism
+        prog_properties.dataPathTimeoutMs = int(
+            os.getenv(VLLM_QAIC_DATA_PATH_TIMEOUT_MS_ENV, 60_000)
+        )
         queueProperties = qaicrt.QAicQueueProperties()
         queueProperties.numThreadsPerQueue = 1
         self.queue.initProperties(queueProperties)
@@ -263,7 +268,8 @@ class QAICInferenceSession:
                 kv_shape = tuple(_binding.dims)
                 kv_type = aic_to_np_dtype_mapping[_binding.type]
                 kv_size = _binding.size
-                self.kv_cache_info.append((kv_shape, kv_type, kv_size))
+                kv_kind = self._classify_kv_binding(name)
+                self.kv_cache_info.append((kv_shape, kv_type, kv_size, kv_kind))
 
         # Hybrid KV detected if more than one KV shape found
         _num_kv_cache_info = len(set(self.kv_cache_info))
@@ -297,6 +303,18 @@ class QAICInferenceSession:
             if name.startswith("log"):
                 self.prefill_buff_map.append((name, self.binding_index_map[name]))
 
+    def _classify_kv_binding(
+        self,
+        name: str,
+    ) -> KVCacheKind:
+        name = name.lower()
+        if "conv" in name:
+            return KVCacheKind.LA_CONV
+        elif "recurrent" in name:
+            return KVCacheKind.LA_RECURRENT
+        else:
+            return KVCacheKind.FA
+
     def _is_kv_cache_name(self, name: str) -> bool:
         if self.use_legacy_slicing_spec:
             return name.startswith("past_key") or name.startswith("past_value")
@@ -310,24 +328,31 @@ class QAICInferenceSession:
             {"start": "ctx_start"},
             {"start": 0},
         ]
-        _linear_attn_dim_spec = [
+        # Qwen3.5/Qwen3.6 recurrent (linear-attention) states are rank 4,
+        # but their last two dimensions are state dimensions rather than
+        # (context, head_size).  Do not apply ctx_start slicing to them.
+        _full_state_dim_spec = [
             {"start": "batch_index"},
+            {"start": 0},
             {"start": 0},
             {"start": 0},
         ]
         for binding in self.bindings:
             name = binding.name
-            ndim = len(binding.dims)
             if self._is_kv_cache_name(name) and name.endswith("_RetainedState"):
                 size = aic_to_np_dtype_mapping[binding.type]
                 base_name = name.replace("_RetainedState", "")
+                kv_kind = self._classify_kv_binding(name)
+                if kv_kind == KVCacheKind.FA:
+                    dimspec = _full_attn_dim_spec
+                else:
+                    dimspec = _full_state_dim_spec
+
                 buffer_specs.append(
                     {
                         "Name": f"{base_name}.*",
                         "ElemSize": size.itemsize,
-                        "DimSpecs": _full_attn_dim_spec
-                        if ndim == 4
-                        else _linear_attn_dim_spec,
+                        "DimSpecs": dimspec,
                     }
                 )
         json_spec = {"BufferSpecs": buffer_specs}
@@ -571,15 +596,15 @@ class QAICInferenceSession:
         self,
         kv_cache_buffers,
         slicing_parameters,
+        buff_map: list[tuple[str, int]],
         index=0,
-        buff_map: list[tuple[str, int]] | None = None,
     ):
         return self._set_data_with_slices(
             kv_cache_buffers,
             slicing_parameters,
             self.kv_slicing_spec_handle,
-            index,
             buff_map,
+            index,
         )
 
     def set_data_for_repetition_penalty(
@@ -589,8 +614,8 @@ class QAICInferenceSession:
             repetition_penalty_buffers,
             slicing_parameters,
             self.repetition_penalty_spec_handle,
-            index,
             self.repetition_penalty_map,
+            index,
         )
 
     def _set_data_with_slices(
@@ -598,20 +623,20 @@ class QAICInferenceSession:
         buffers,
         slicing_parameters,
         slicing_spec_handle,
+        buff_map: list[tuple[str, int]],
         index=0,
-        buff_map: list[tuple[str, int]] | None = None,
     ):
-        if isinstance(buffers, (list, np.ndarray)):
-            assert buff_map is not None
-            assert len(buffers) == len(buff_map) or len(buffers) + 1 == len(buff_map), (
-                "buffers must be a list of numpy arrays or a dictionary of numpy arrays"
-            )
-            slices_as_tuple_list = [
-                (name[1], buff) for name, buff in zip(buff_map, buffers, strict=False)
-            ]
-        else:
-            slices_as_tuple_list = self.get_tuple_list_from_dict(buffers)
-        status, slicingHandle = self.execObj[index].setDataWithSlices(
+        # `buffers` is an ordered collection with one top-level entry per
+        # binding in `buff_map`. It may be a list of arrays or a stacked array.
+        # Each entry registers one binding's buffer with the exec object.
+        assert len(buffers) == len(buff_map) or len(buffers) + 1 == len(buff_map), (
+            f"buffer count mismatch: got {len(buffers)} buffers "
+            f"but buff_map has {len(buff_map)} entries"
+        )
+        slices_as_tuple_list = [
+            (name[1], buff) for name, buff in zip(buff_map, buffers, strict=False)
+        ]
+        status, _ = self.execObj[index].setDataWithSlices(
             slices_as_tuple_list, slicing_spec_handle, slicing_parameters
         )
         assert status == qaicrt.QStatus.QS_SUCCESS, "Failed to setDataWithSlices"
@@ -689,8 +714,8 @@ class QAICInferenceSession:
             self.set_data_for_kv_handoff(
                 kv_cache_buffers,
                 [("batch_index", batch_index % self.full_batch_size), ("ctx_start", 0)],
-                exec_obj_idx,
                 self.prefill_buff_map[:-1],
+                exec_obj_idx,
             )
 
         self._make_inputs_contiguous(inputs)

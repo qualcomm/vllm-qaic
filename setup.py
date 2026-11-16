@@ -358,6 +358,7 @@ setup(
     },
     extras_require={
         "test": get_requirements("test.txt"),
+        "spd": ["arctic-inference==0.1.1"],
     },
     cmdclass=get_qaic_build_ext(),
 )
