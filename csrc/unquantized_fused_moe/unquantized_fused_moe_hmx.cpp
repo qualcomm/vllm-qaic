@@ -16,7 +16,13 @@
 #include "jit_dev_status_codes.h"
 #include "jit_qshim_api.h"
 
-namespace unquantized_fused_moe_hmx {
+// Shared grouping, synchronization, and reduction live in the HVX file.
+namespace unquantized_fused_moe_hvx __attribute__((visibility("hidden"))) {
+uint32_t fused_hmx_kernel_main(
+    const AicJitEntryPointConfig*, const AicJitPointerArray*);
+}
+
+namespace unquantized_fused_moe_hmx __attribute__((visibility("hidden"))) {
 
 enum ActivationId : int32_t {
   kSilu = 0,
@@ -917,8 +923,8 @@ inline __attribute__((always_inline)) uint32_t process_expert_routes_hmx(
   return JIT_DEV_STATUS_SUCCESS;
 }
 
-inline uint32_t route_compute_hmx_kernel_main(const AicJitEntryPointConfig* cfg,
-                                              const AicJitPointerArray* ptrs) {
+uint32_t route_compute_hmx_kernel_main(
+    const AicJitEntryPointConfig* cfg, const AicJitPointerArray* ptrs) {
   if (!valid_jit_args(cfg, ptrs, 11)) {
     return JIT_DEV_ERROR_INVALID_PARAMETER;
   }
@@ -1042,7 +1048,14 @@ inline uint32_t route_compute_hmx_kernel_main(const AicJitEntryPointConfig* cfg,
 
     const int32_t routes_per_core =
         (route_count + (int32_t)cfg->numCores - 1) / (int32_t)cfg->numCores;
-    const int32_t core_route_offset = (int32_t)cfg->coreID * routes_per_core;
+    // With few routes, assigning the first shard of every expert to NSP 0
+    // serializes decode. Rotate each expert's shards by its route-list offset
+    // so consecutive active experts use consecutive NSPs.
+    const int32_t first_core = route_begin % (int32_t)cfg->numCores;
+    const int32_t core_shard =
+        ((int32_t)cfg->coreID + (int32_t)cfg->numCores - first_core) %
+        (int32_t)cfg->numCores;
+    const int32_t core_route_offset = core_shard * routes_per_core;
     if (core_route_offset >= route_count) {
       continue;
     }
@@ -1078,10 +1091,9 @@ inline uint32_t route_compute_hmx_kernel_main(const AicJitEntryPointConfig* cfg,
 
 }  // namespace unquantized_fused_moe_hmx
 
-QAIC_KERNEL_API int32_t
-multinsp_multithreaded_unquantized_fused_moe_route_compute_hmx(
+QAIC_KERNEL_API int32_t multinsp_multithreaded_unquantized_fused_moe_hmx(
     const AicJitEntryPointConfig* entryConfig,
     const AicJitPointerArray* pointerArray) {
-  return unquantized_fused_moe_hmx::route_compute_hmx_kernel_main(entryConfig,
-                                                                  pointerArray);
+  return unquantized_fused_moe_hvx::fused_hmx_kernel_main(entryConfig,
+                                                       pointerArray);
 }

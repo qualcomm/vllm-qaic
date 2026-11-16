@@ -15,7 +15,13 @@
 #include "jit_dev_status_codes.h"
 #include "jit_qshim_api.h"
 
-namespace unquantized_fused_moe_hvx {
+// Internal device helper defined in the HMX translation unit.
+namespace unquantized_fused_moe_hmx __attribute__((visibility("hidden"))) {
+uint32_t route_compute_hmx_kernel_main(
+    const AicJitEntryPointConfig*, const AicJitPointerArray*);
+}
+
+namespace unquantized_fused_moe_hvx __attribute__((visibility("hidden"))) {
 
 enum ActivationId : int32_t {
   kSilu = 0,
@@ -1091,44 +1097,183 @@ inline uint32_t reduce_kernel_main(const AicJitEntryPointConfig* cfg,
   return JIT_DEV_STATUS_SUCCESS;
 }
 
+// Shared orchestration for both fused variants. Grouping and reduction run
+// on HVX threads; HMX supplies only the expert-compute implementation.
+template <uint32_t N>
+struct PointerArray {
+  uint32_t numPointers = N;
+  uint32_t reserved = 0;
+  AicJitPtr pointers[N];
+
+  const AicJitPointerArray* get() const {
+    return reinterpret_cast<const AicJitPointerArray*>(this);
+  }
+};
+
+template <bool Hmx>
+inline void sync_threads(uint32_t thread_id, uint32_t num_threads) {
+  if (num_threads > 1) {
+    if constexpr (Hmx) {
+      qaicSyncHVXAndHMXThreads(thread_id);
+    } else {
+      qaicSyncHVXThread(thread_id);
+    }
+  }
+}
+
+// A launch boundary used to join all threads on all NSPs. Join the local
+// threads before the NSP rendezvous, and release them only after it completes.
+// Propagate stage errors collectively so no peer waits at the next barrier.
+template <bool Hmx, bool Global>
+inline uint32_t finish_stage(const AicJitEntryPointConfig* cfg,
+                             volatile uint32_t* statuses, uint32_t status) {
+  const uint32_t worker = cfg->coreID * cfg->numThreads + cfg->threadID;
+  statuses[worker] = status;
+  sync_threads<Hmx>(cfg->threadID, cfg->numThreads);
+  if (Global && cfg->threadID == 0 && cfg->numCores > 1) {
+    const uint32_t nsp_mask = cfg->numCores == 32
+                                  ? UINT32_MAX
+                                  : (1U << cfg->numCores) - 1U;
+    const uint32_t sync_status = qshimSyncNSPs(nsp_mask);
+    if (sync_status != JIT_DEV_STATUS_SUCCESS) {
+      statuses[worker] = sync_status;
+    }
+  }
+  if (Global) {
+    sync_threads<Hmx>(cfg->threadID, cfg->numThreads);
+  }
+  const uint32_t first = Global ? 0U : cfg->coreID * cfg->numThreads;
+  const uint32_t end = Global ? cfg->numCores * cfg->numThreads
+                              : first + cfg->numThreads;
+  for (uint32_t i = first; i < end; ++i) {
+    if (statuses[i] != JIT_DEV_STATUS_SUCCESS) {
+      return statuses[i];
+    }
+  }
+  return JIT_DEV_STATUS_SUCCESS;
+}
+
+template <bool Hmx>
+uint32_t fused_kernel_main(const AicJitEntryPointConfig* cfg,
+                           const AicJitPointerArray* ptrs) {
+  if (cfg == nullptr || ptrs == nullptr || ptrs->numPointers < 15 ||
+      cfg->numCores == 0 || cfg->numCores > 32 || cfg->numThreads == 0 ||
+      cfg->threadID >= cfg->numThreads) {
+    return JIT_DEV_ERROR_INVALID_PARAMETER;
+  }
+
+  AicJitEntryPointConfig hvx_cfg = *cfg;
+  bool hvx_worker = true;
+  if constexpr (Hmx) {
+    int64_t hmx_thread = 0;
+    uint32_t status = qshimQuery(DEV_ATTR_QSHIM_HMX_THREAD_ID, &hmx_thread);
+    if (status != JIT_DEV_STATUS_SUCCESS) {
+      return status;
+    }
+    int64_t hvx_threads = 0;
+    status = qshimQuery(DEV_ATTR_QSHIM_NUM_HVX_UNITS, &hvx_threads);
+    if (status != JIT_DEV_STATUS_SUCCESS) {
+      return status;
+    }
+    if (hmx_thread < 0 || hmx_thread >= cfg->numThreads || hvx_threads <= 0 ||
+        cfg->numThreads != (uint32_t)hvx_threads + 1U) {
+      return JIT_DEV_ERROR_INVALID_PARAMETER;
+    }
+    hvx_worker = cfg->threadID != (uint32_t)hmx_thread;
+    hvx_cfg.numThreads = (uint32_t)hvx_threads;
+    hvx_cfg.threadID = cfg->threadID > (uint32_t)hmx_thread
+                           ? cfg->threadID - 1U
+                           : cfg->threadID;
+  }
+
+  const AicJitPtr* p = ptrs->pointers;
+  auto* statuses = reinterpret_cast<volatile uint32_t*>(p[14]);
+  if (statuses == nullptr) {
+    return JIT_DEV_ERROR_INVALID_PARAMETER;
+  }
+  // Each stage owns a separate row: another NSP may start the next stage
+  // before every peer has finished reading the previous row.
+  const uint32_t workers = cfg->numCores * cfg->numThreads;
+  const auto* params = reinterpret_cast<const float*>(p[10]);
+  if (params == nullptr) {
+    return JIT_DEV_ERROR_INVALID_PARAMETER;
+  }
+  const int32_t num_tokens = (int32_t)params[0];
+  const int32_t num_experts = (int32_t)params[4];
+  const int32_t topk = (int32_t)params[5];
+  if (num_tokens < 0 || num_experts <= 0 || topk <= 0) {
+    return JIT_DEV_ERROR_INVALID_PARAMETER;
+  }
+
+  // Group all routes independently on each NSP. The lists are small compared
+  // with expert weights, and local grouping removes three global rendezvous.
+  // Compute partitions work across the global workers, so each route is
+  // evaluated exactly once before the final global join and reduction.
+  const AicJitPtr indices =
+      p[7] + (uint64_t)cfg->coreID * num_tokens * topk * sizeof(float);
+  const AicJitPtr offsets =
+      p[8] + (uint64_t)cfg->coreID * (num_experts + 1) * sizeof(float);
+  const uint64_t worker_offset =
+      (uint64_t)cfg->coreID * hvx_cfg.numThreads * num_experts * sizeof(float);
+  const AicJitPtr counts = p[11] + worker_offset;
+  const AicJitPtr worker_offsets = p[12] + worker_offset;
+  AicJitEntryPointConfig group_cfg = hvx_cfg;
+  group_cfg.coreID = 0;
+  group_cfg.numCores = 1;
+
+  const PointerArray<4> count = {4, 0, {p[2], p[9], counts, p[10]}};
+  uint32_t status =
+      hvx_worker
+          ? route_group_count_kernel_main(&group_cfg, count.get())
+          : JIT_DEV_STATUS_SUCCESS;
+  status = finish_stage<Hmx, false>(cfg, statuses, status);
+
+  const PointerArray<4> prefix = {4, 0, {counts, worker_offsets, offsets, p[10]}};
+  status =
+      hvx_worker && status == JIT_DEV_STATUS_SUCCESS
+          ? route_group_prefix_kernel_main(&group_cfg, prefix.get())
+          : status;
+  status = finish_stage<Hmx, false>(cfg, statuses + workers, status);
+
+  const PointerArray<5> fill = {5, 0, {p[2], p[9], worker_offsets, indices, p[10]}};
+  status =
+      hvx_worker && status == JIT_DEV_STATUS_SUCCESS
+          ? route_group_fill_kernel_main(&group_cfg, fill.get())
+          : status;
+  status = finish_stage<Hmx, false>(cfg, statuses + 2U * workers, status);
+
+  const PointerArray<11> compute = {
+      11, 0,
+      {p[0], p[1], p[2], p[3], p[4], p[5], p[6], indices, offsets, p[9], p[10]}};
+  if (status == JIT_DEV_STATUS_SUCCESS) {
+    if constexpr (Hmx) {
+      status = unquantized_fused_moe_hmx::route_compute_hmx_kernel_main(
+          cfg, compute.get());
+    } else {
+      status = route_compute_kernel_main(cfg, compute.get());
+    }
+  }
+  status = finish_stage<Hmx, true>(cfg, statuses + 3U * workers, status);
+  if (status != JIT_DEV_STATUS_SUCCESS) {
+    return status;
+  }
+
+  const PointerArray<3> reduce = {3, 0, {p[6], p[13], p[10]}};
+  return hvx_worker
+             ? reduce_kernel_main(&hvx_cfg, reduce.get())
+             : JIT_DEV_STATUS_SUCCESS;
+}
+
+uint32_t fused_hmx_kernel_main(
+    const AicJitEntryPointConfig* cfg, const AicJitPointerArray* ptrs) {
+  return fused_kernel_main<true>(cfg, ptrs);
+}
+
 }  // namespace unquantized_fused_moe_hvx
 
-QAIC_KERNEL_API int32_t
-multinsp_multithreaded_unquantized_fused_moe_route_group_count(
+QAIC_KERNEL_API int32_t multinsp_multithreaded_unquantized_fused_moe(
     const AicJitEntryPointConfig* entryConfig,
     const AicJitPointerArray* pointerArray) {
-  return unquantized_fused_moe_hvx::route_group_count_kernel_main(entryConfig,
-                                                                  pointerArray);
-}
-
-QAIC_KERNEL_API int32_t
-multinsp_multithreaded_unquantized_fused_moe_route_group_prefix(
-    const AicJitEntryPointConfig* entryConfig,
-    const AicJitPointerArray* pointerArray) {
-  return unquantized_fused_moe_hvx::route_group_prefix_kernel_main(
-      entryConfig, pointerArray);
-}
-
-QAIC_KERNEL_API int32_t
-multinsp_multithreaded_unquantized_fused_moe_route_group_fill(
-    const AicJitEntryPointConfig* entryConfig,
-    const AicJitPointerArray* pointerArray) {
-  return unquantized_fused_moe_hvx::route_group_fill_kernel_main(entryConfig,
-                                                                 pointerArray);
-}
-
-QAIC_KERNEL_API int32_t
-multinsp_multithreaded_unquantized_fused_moe_route_compute(
-    const AicJitEntryPointConfig* entryConfig,
-    const AicJitPointerArray* pointerArray) {
-  return unquantized_fused_moe_hvx::route_compute_kernel_main(entryConfig,
-                                                              pointerArray);
-}
-
-QAIC_KERNEL_API int32_t
-multinsp_multithreaded_unquantized_fused_moe_route_reduce(
-    const AicJitEntryPointConfig* entryConfig,
-    const AicJitPointerArray* pointerArray) {
-  return unquantized_fused_moe_hvx::reduce_kernel_main(entryConfig,
-                                                       pointerArray);
+  return unquantized_fused_moe_hvx::fused_kernel_main<false>(entryConfig,
+                                                          pointerArray);
 }
