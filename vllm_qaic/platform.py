@@ -33,6 +33,15 @@ try:
 except ImportError:
     qaic = PlaceholderModule("qaic")
 
+try:
+    from qaicrt import Util as qaic_util
+except ImportError:
+    import platform
+    import sys
+
+    sys.path.append(f"/opt/qti-aic/dev/lib/{platform.machine()}")
+    from qaicrt import Util as qaic_util
+
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
 else:
@@ -175,8 +184,13 @@ class QaicPlatform(Platform):
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
-        # check_and_update_config restricts native BF16 to AI200 configurations.
-        return [torch.float16, torch.float32, torch.bfloat16]
+        # Only AI200 (hwVersion 0x30200) has native BF16; elsewhere
+        # dtype="auto" falls back to fp16.
+        util = qaic_util()
+        info = util.getDeviceInfo(util.getDeviceIds()[1][0])[1]
+        if info.devData.hwVersion == 0x30200:
+            return [torch.float16, torch.float32, torch.bfloat16]
+        return [torch.float16, torch.float32]
 
     @classmethod
     def is_aot_inference(cls) -> bool:
