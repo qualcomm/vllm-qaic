@@ -47,7 +47,7 @@ class QAicRMSNorm(RMSNorm):
 
         # No residual: plain normalization only. Like upstream, a norm built
         # with has_weight=False gets weight=None (no per-channel multiply).
-        weight = self.weight.data if self.pass_weight else None
+        weight = self.weight if self.pass_weight else None
         if triton_en:
             from vllm.model_executor.determinism.batch_invariant import (
                 rms_norm_batch_invariant,
