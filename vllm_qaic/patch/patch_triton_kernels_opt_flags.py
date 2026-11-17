@@ -12,11 +12,15 @@ intercepts that dispatch and supplies conservative CUDA-like tiling values for
 functional bring-up.  They are deliberately not performance tuned.
 """
 
+import sys
+
 import triton
 
 from triton_kernels.matmul_ogs_details import opt_flags
 
-QAIC_TRITON_BACKEND_KEY = "qcom_hexagon_backend"
+# HexagonDriver reports "qaic" as the target backend; the plugin registry
+# separately uses "qcom_hexagon_backend" as its key.
+QAIC_TRITON_TARGET_BACKEND = "qaic"
 
 _upstream_make_opt_flags = opt_flags.make_opt_flags
 
@@ -137,7 +141,7 @@ def _qaic_make_opt_flags(
     epilogue_effective_itemsize,
 ):
     backend = triton.runtime.driver.active.get_current_target().backend
-    if backend != QAIC_TRITON_BACKEND_KEY:
+    if backend != QAIC_TRITON_TARGET_BACKEND:
         return _upstream_make_opt_flags(
             out_dtype,
             lhs_dtype,
@@ -185,3 +189,13 @@ def _qaic_make_opt_flags(
 
 
 opt_flags.make_opt_flags = _qaic_make_opt_flags
+
+# matmul_ogs imports make_opt_flags by value. Refresh an already-loaded
+# consumer so it does not retain upstream's CUDA/HIP-only selector.
+for module_name in (
+    "triton_kernels.matmul_ogs",
+    "vllm.third_party.triton_kernels.matmul_ogs",
+):
+    if module := sys.modules.get(module_name):
+        # ModuleType cannot describe this known upstream module attribute.
+        module.make_opt_flags = _qaic_make_opt_flags  # type: ignore[attr-defined]
