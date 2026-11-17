@@ -90,7 +90,6 @@ def enable_qaic_triton_kernels() -> None:
         )
     _refresh_triton_kernel_availability_consumers()
 
-    import vllm_qaic.patch.patch_triton_kernels_layout  # noqa: F401
     import vllm_qaic.patch.patch_triton_kernels_opt_flags  # noqa: F401
 
 
