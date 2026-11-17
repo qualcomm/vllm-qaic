@@ -87,9 +87,7 @@ _MOE_ACTIVATION_IDS = {
     "relu2_no_mul": 8,
 }
 
-_UNQUANTIZED_FUSED_MOE_HMX_KERNEL = (
-    "multinsp_multithreaded_unquantized_fused_moe_hmx"
-)
+_UNQUANTIZED_FUSED_MOE_HMX_KERNEL = "multinsp_multithreaded_unquantized_fused_moe_hmx"
 
 
 def _kernel(name: str):
@@ -753,10 +751,6 @@ def _paged_attention_op(
     denominator without a value row (gpt-oss). ``window_left`` limits each
     query to keys at most that many positions behind it; -1 disables it.
     """
-    query = query.contiguous()
-    if write_cache:
-        key = key.contiguous()
-        value = value.contiguous()
     if (
         block_table.device != query.device
         or block_table.dtype != torch.int32
@@ -787,8 +781,6 @@ def _paged_attention_op(
         or not seq_lens.is_contiguous()
     ):
         seq_lens = seq_lens.to(device=query.device, dtype=torch.int32).contiguous()
-
-    output = torch.empty_like(query)
 
     has_sinks = sinks is not None
     if sinks is not None:
@@ -845,7 +837,35 @@ def _paged_attention_op(
             f"got head_dim={head_dim}. Set QAIC_PAGED_ATTN_BACKEND=hmx."
         )
 
+    def prepare_input(tensor: Tensor, dma: bool = False) -> Tensor:
+        # HMX reads dense heads directly from QKV projection views. Only
+        # materialize layouts that cannot be addressed by the kernel or UDMA.
+        if tensor.is_contiguous():
+            return tensor
+        strides = tensor.stride()
+        if (
+            not use_hmx
+            or strides[-1] != 1
+            or any(s <= 0 or s > 2**31 - 1 for s in strides[:2])
+            or (dma and strides[0] * tensor.element_size() > 65535)
+        ):
+            return tensor.contiguous()
+        return tensor
+
+    query = prepare_input(query)
+    if write_cache:
+        key = prepare_input(key, dma=not is_decode)
+        value = prepare_input(value, dma=not is_decode)
+    # empty_like can preserve a transposed input's layout. Kernel output uses
+    # packed token/head addressing regardless of the input strides.
+    output = torch.empty(query.shape, dtype=query.dtype, device=query.device)
+
     if use_hmx:
+        input_strides = (
+            *query.stride()[:2],
+            *(key.stride()[:2] if write_cache else (1, 1)),
+            *(value.stride()[:2] if write_cache else (1, 1)),
+        )
         if is_decode:
             attn_kernel = (
                 _paged_attention_hmx_decode_kernel
@@ -899,6 +919,7 @@ def _paged_attention_op(
             float(scale),
             *cache_strides,
             *sink_window_args,
+            *input_strides,
         )
     elif use_hmx:
         attn_kernel[_NSP_COUNT, _HMX_THREAD_COUNT](
@@ -924,6 +945,7 @@ def _paged_attention_op(
             float(scale),
             *cache_strides,
             *sink_window_args,
+            *input_strides,
         )
     else:
         attn_kernel[_NSP_COUNT, _THREAD_COUNT](
