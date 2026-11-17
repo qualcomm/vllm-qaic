@@ -86,7 +86,7 @@ source .venv/bin/activate
 | | AOT (Ahead-of-Time) | PYT (Eager / PyTorch) |
 |---|---|---|
 | Inference engine | QEfficient + QAIC compiler | torch_qaic |
-| torch version | `2.7.0+cpu` | `2.13.0+cpu` |
+| torch version | `2.13.0+cpu` | `2.13.0+cpu` |
 | `torch_qaic` required | No (must **not** be present) | Yes |
 | vllm-qaic wheel tag | `*aot*` | `*pyt*` |
 
@@ -189,14 +189,15 @@ pip install "setuptools>=77.0.3,<80.0.0" setuptools-scm wheel "cmake>=3.26"
 # [Optional] Remove torch_qaic if present — it must not coexist with AOT mode
 pip uninstall -y torch-qaic
 
-# 1. QEfficient — brings torch==2.7.0+cpu as a dependency
+# 1. QEfficient — brings torch==2.13.0+cpu as a dependency
 pip install "qefficient @ git+https://github.com/quic/efficient-transformers.git@main"
 
 # 1 (cont.) Re-pin torch to exact AOT version
 #   (required for uv venvs: uv skips +local labels from remote indexes)
 python -m pip install \
     --index-url https://download.pytorch.org/whl/cpu \
-    "torch==2.7.0+cpu"
+    "torch==2.13.0+cpu" \
+    "torchvision==0.28.0+cpu"
 
 # [Optional] Pin transformers if QEfficient's version conflicts with your model
 # pip install "transformers==<version>"
@@ -294,8 +295,8 @@ All `ARG`s are global (declared before the first `FROM`) and re-declared inside 
 | `VLLM_BRANCH` | *(empty)* | Any target: vLLM branch to clone instead of the pinned `VLLM_VERSION` tag |
 | `VLLM_QAIC_VERSION` | `1.24` | vllm-qaic SDK/version tag (wheel tag/version suffix) |
 | `QEFF_BRANCH` | `main` | QEfficient branch/tag to install |
-| `TORCH_VERSION_AOT` | `2.7.0+cpu` | CPU torch version for AOT |
-| `TORCHVISION_VERSION_AOT` | `0.22.0+cpu` | torchvision version for AOT |
+| `TORCH_VERSION_AOT` | `2.13.0+cpu` | CPU torch version for AOT |
+| `TORCHVISION_VERSION_AOT` | `0.28.0+cpu` | torchvision version for AOT |
 | `TRITON_CPU` | `0` | Set to `1` to build the optional triton-cpu backend (Numba/Triton rejection-sampler parity tests only; not needed for AOT SpD) |
 | `TRITON_CPU_COMMIT` | `e60f448f8f197073b75d6d3e77347414a5db3ee7` | Pinned triton-cpu commit hash |
 | `TRITON_CPU_COMPILE_MAX_JOBS` | `4` | Parallel build jobs for triton-cpu compilation |
@@ -502,7 +503,7 @@ After installation, verify the environment is clean:
 ```bash
 # Check torch is CPU-only (no CUDA suffix)
 python -c "import torch; print(torch.__version__)"
-# AOT expected: 2.7.0+cpu
+# AOT expected: 2.13.0+cpu
 # PYT expected: 2.13.0+cpu
 
 # Verify vllm-qaic loads and registers the QAIC platform plugin
@@ -526,8 +527,8 @@ All version constants are defined in [`scripts/utility.sh`](../scripts/utility.s
 |---|---|---|
 | `VLLM_VERSION` | `0.30.0` | vLLM release tag |
 | `VLLM_QAIC_VERSION` | `1.24` | vllm-qaic SDK/version tag (used in wheel tag and version suffix) |
-| `TORCH_VERSION_AOT` | `2.7.0+cpu` | CPU torch for AOT (matches QEfficient exact pin) |
-| `TORCHVISION_VERSION_AOT` | `0.22.0+cpu` | torchvision for AOT (keep in sync with torch) |
+| `TORCH_VERSION_AOT` | `2.13.0+cpu` | CPU torch for AOT (matches QEfficient exact pin) |
+| `TORCHVISION_VERSION_AOT` | `0.28.0+cpu` | torchvision for AOT (keep in sync with torch) |
 | `TORCH_VERSION_PYT` | `2.13.0+cpu` | CPU torch for PYT |
 | `TORCHVISION_VERSION_PYT` | `0.28.0+cpu` | torchvision for PYT (keep in sync with torch) |
 | `TORCHAUDIO_VERSION_PYT` | `2.11.0+cpu` | torchaudio for PYT (keep in sync with torch) |

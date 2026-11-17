@@ -51,13 +51,14 @@ AOT (Ahead-of-Time) mode uses the QEfficient library to compile models into Qual
 # 0. Build tools
 pip install "setuptools>=77.0.3,<80.0.0" setuptools-scm wheel "cmake>=3.26"
 
-# 1. QEfficient (brings torch==2.7.0+cpu)
+# 1. QEfficient (brings torch==2.13.0+cpu)
 pip install "qefficient @ git+https://github.com/quic/efficient-transformers.git@main"
 
 # Re-pin torch to exact AOT version
 python -m pip install \
     --index-url https://download.pytorch.org/whl/cpu \
-    "torch==2.7.0+cpu"
+    "torch==2.13.0+cpu" \
+    "torchvision==0.28.0+cpu"
 
 # 2. vLLM runtime dependencies
 pip install -r requirements/vllm_dependency_aot.txt
@@ -76,7 +77,7 @@ TORCH_QAIC_INSTALLED=0 pip install --no-build-isolation ./vllm-qaic
 | Component | Version |
 |-----------|---------|
 | vLLM | 0.30.0 |
-| torch | 2.7.0+cpu |
+| torch | 2.13.0+cpu |
 | QEfficient | main branch |
 | QAIC SDK | >= 1.22.0 |
 

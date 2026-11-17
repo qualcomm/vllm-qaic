@@ -30,7 +30,7 @@
 | | AOT (Ahead-of-Time) | PYT (Eager / PyTorch) |
 |---|---|---|
 | Inference engine | QEfficient + QAIC compiler | `torch_qaic` |
-| torch version | `2.7.0+cpu` | `2.13.0+cpu` |
+| torch version | `2.13.0+cpu` | `2.13.0+cpu` |
 | `torch_qaic` required | No — must **not** be present | Yes |
 | Wheel tag | `*aot*` | `*pyt*` |
 | Python support | 3.11 / 3.12 | 3.11 / 3.12 / 3.13 |
@@ -83,7 +83,7 @@ conda activate vllm-qaic-aot
 /opt/qti-aic/integrations/vllm_qaic/scripts/install.sh aot
 ```
 
-This installs QEfficient (which brings `torch 2.7.0+cpu`), re-pins torch to the exact AOT
+This installs QEfficient (which brings `torch 2.13.0+cpu`), re-pins torch to the exact AOT
 version, installs vllm, then the `py3-none-any` AOT wheel.
 
 > [!NOTE]
@@ -152,7 +152,7 @@ python -c "import torch_qaic; print('torch_qaic OK')"
 **AOT only:**
 
 ```bash
-python -c "import torch; print(torch.__version__)"        # expect 2.7.0+cpu
+python -c "import torch; print(torch.__version__)"        # expect 2.13.0+cpu
 pip show torch-qaic                                       # must NOT be installed
 ```
 
