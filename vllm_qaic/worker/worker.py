@@ -825,17 +825,14 @@ class QaicWorkerAoT(QaicWorker):
             if self.cache_config.num_gpu_blocks_override
             else self.scheduler_config.max_num_seqs
         ) + 1
-        # adapted from get_uniform_page_size
-        page_sizes = set(
+        # page_size_bytes is the SUM
+        # across all layers, not one shared
+        # per-layer value, use instead of
+        # page_size * num_layers
+        page_size_bytes = sum(
             layer.page_size_bytes for layer in self.get_kv_cache_spec().values()
         )
-        assert len(page_sizes) == 1
-        page_size = page_sizes.pop()
-        return (
-            num_gpu_blocks
-            * page_size
-            * self.model_config.get_num_layers(self.parallel_config)
-        )
+        return num_gpu_blocks * page_size_bytes
 
     def _init_qaic_worker_distributed_environment(
         self,

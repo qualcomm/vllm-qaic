@@ -2059,7 +2059,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
             buff_map = decode_buff_map
         else:
             buff_map = self.model.session.prefill_buff_map[: len(self.kv_cache_info)]
-        for i, ((name, _), (kv_shape, _kv_type, _kv_size)) in enumerate(
+        for i, ((name, _), (kv_shape, _kv_type, _kv_size, _kv_kind)) in enumerate(
             zip(buff_map, self.kv_cache_info)
         ):
             if name.startswith("past_value"):
