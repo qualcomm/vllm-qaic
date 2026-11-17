@@ -270,6 +270,18 @@ class QAICInferenceSession:
                 kv_size = _binding.size
                 kv_kind = self._classify_kv_binding(name)
                 self.kv_cache_info.append((kv_shape, kv_type, kv_size, kv_kind))
+        # Prefill-only sessions have no plain-named KV input bindings, so
+        # decode_buff_map stays empty even though real hybrid KV output
+        # buffers exist in prefill_buff_map; fall back to those so
+        # is_hybrid_kv/kv_slicing_spec_handle still get set.
+        if not self.decode_buff_map:
+            for name, binding_index in self.prefill_buff_map:
+                _binding = self.bindings[binding_index]
+                kv_shape = tuple(_binding.dims)
+                kv_type = aic_to_np_dtype_mapping[_binding.type]
+                kv_size = _binding.size
+                kv_kind = self._classify_kv_binding(name)
+                self.kv_cache_info.append((kv_shape, kv_type, kv_size, kv_kind))
 
         # Hybrid KV detected if more than one KV shape found
         _num_kv_cache_info = len(set(self.kv_cache_info))
@@ -317,7 +329,7 @@ class QAICInferenceSession:
 
     def _is_kv_cache_name(self, name: str) -> bool:
         if self.use_legacy_slicing_spec:
-            return name.startswith("past_key") or name.startswith("past_value")
+            return name.startswith(("past_key", "past_value", "index_key"))
         return VLLM_KV_CACHE_PREFIX in name
 
     def get_json_for_full_kv_cache_slicing(self):
@@ -598,14 +610,42 @@ class QAICInferenceSession:
         slicing_parameters,
         buff_map: list[tuple[str, int]],
         index=0,
+        slicing_spec_handle=None,
     ):
         return self._set_data_with_slices(
             kv_cache_buffers,
             slicing_parameters,
-            self.kv_slicing_spec_handle,
+            slicing_spec_handle
+            if slicing_spec_handle is not None
+            else self.kv_slicing_spec_handle,
             buff_map,
             index,
         )
+
+    def build_slicing_spec_handle_from_buffers(self, buffers: dict[str, np.ndarray]):
+        """Build a BufferSpecs slicing-spec handle sized to each buffer's own
+        real shape and keyed to its own plain binding name.
+        """
+        buffer_specs = []
+        for name, array in buffers.items():
+            binding = self.bindings[self.binding_index_map[name]]
+            elem_type = aic_to_np_dtype_mapping[binding.type]
+            shape = array.shape
+            dim_specs = [{"start": "batch_index", "size": shape[0]}]
+            for axis_size in shape[1:-1]:
+                dim_specs.append({"start": 0, "size": axis_size})
+            dim_specs.append({"start": 0, "size": shape[-1]})
+            if len(shape) == 4:
+                dim_specs[2]["start"] = "ctx_start"
+            buffer_specs.append(
+                {
+                    "Name": name,
+                    "ElemSize": elem_type.itemsize,
+                    "DimSpecs": dim_specs,
+                }
+            )
+        json_spec = {"BufferSpecs": buffer_specs}
+        return self.get_slicing_spec_handle(buffer_spec_json=json.dumps(json_spec))
 
     def set_data_for_repetition_penalty(
         self, repetition_penalty_buffers, slicing_parameters, index=0
@@ -714,7 +754,7 @@ class QAICInferenceSession:
             self.set_data_for_kv_handoff(
                 kv_cache_buffers,
                 [("batch_index", batch_index % self.full_batch_size), ("ctx_start", 0)],
-                self.prefill_buff_map[:-1],
+                self.prefill_buff_map[: len(self.kv_cache_info)],
                 exec_obj_idx,
             )
 

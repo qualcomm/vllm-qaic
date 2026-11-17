@@ -580,6 +580,9 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         batch_indices: list[int],
         kv_caches: list[list[np.ndarray]],
     ):
+        from .m3_kv_layout import INDEX_BLOCK_SIZE, attention_cp1_to_cpn, index_cp1_to_cpn
+
+        buff_names = [name for name, _ in self.session.decode_buff_map]
         for _, bidx in enumerate(batch_indices):
             if kv_caches[bidx] is not None and len(kv_caches[bidx]) > 0:
                 assert len(self.kv_cache_info) == len(kv_caches[bidx]), (
@@ -589,9 +592,48 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 )
                 for buff_idx in range(len(kv_caches[bidx])):
                     buf = kv_caches[bidx][buff_idx]
+                    name = buff_names[buff_idx]
                     target_heads = self.kv_cache_info[buff_idx][0][1]
-                    # broadcast MLA buffers across num heads (zero-copy)
-                    if buf.size > 0 and target_heads != buf.shape[1]:
+                    if buf.size == 0 or target_heads == buf.shape[1]:
+                        continue
+                    if name.startswith(("past_key", "past_value", "index_key")):
+                        # reshard the CP=1 prefill KV into the
+                        # decode QPC's CP=cp layout (cp derived from the
+                        # head-axis ratio).
+                        assert os.getenv("VLLM_QAIC_USE_FULL_KV_TRANSFER", "0") != "1", (
+                            f"{name}: CP resharding assumes buf.shape[2] is the "
+                            f"real prompt length, which does not hold when "
+                            f"VLLM_QAIC_USE_FULL_KV_TRANSFER=1 (buffer padded to "
+                            f"max context instead of trimmed to real length)"
+                        )
+                        assert target_heads % buf.shape[1] == 0, (
+                            f"{name}: target_heads {target_heads} is not a "
+                            f"multiple of received heads {buf.shape[1]}"
+                        )
+                        cp = target_heads // buf.shape[1]
+                        real_len = buf.shape[2]
+                        head_dim = buf.shape[-1]
+                        if name.startswith("index_key"):
+                            granularity = cp * INDEX_BLOCK_SIZE
+                            assert real_len % granularity == 0, (
+                                f"{name}: real_len {real_len} must be a multiple "
+                                f"of {granularity} (cp={cp}, "
+                                f"INDEX_BLOCK_SIZE={INDEX_BLOCK_SIZE})"
+                            )
+                            kv_caches[bidx][buff_idx] = index_cp1_to_cpn(
+                                buf, cp, INDEX_BLOCK_SIZE, real_len, head_dim
+                            )
+                        else:
+                            assert real_len % cp == 0, (
+                                f"{name}: real_len {real_len} must be a "
+                                f"multiple of cp={cp}"
+                            )
+                            kv_heads = buf.shape[1]
+                            kv_caches[bidx][buff_idx] = attention_cp1_to_cpn(
+                                buf, cp, kv_heads, real_len // cp, head_dim
+                            )
+                    else:
+                        # broadcast MLA buffers across num heads (zero-copy)
                         assert buf.shape[1] == 1, (
                             f"MLA KV head expansion expects num_heads=1 in received "
                             f"buffer, got {buf.shape[1]} (shape={buf.shape})"
@@ -601,11 +643,19 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                         )
 
                 # Update kv cache setDataWith
+                slicing_spec_handle = None
+                if self.session.is_hybrid_kv:
+                    # build a spec from each buffer's own real post-handoff shape/name
+                    buf_dict = dict(zip(buff_names, kv_caches[bidx], strict=True))
+                    slicing_spec_handle = self.session.build_slicing_spec_handle_from_buffers(
+                        buf_dict
+                    )
                 _ = self.session.set_data_for_kv_handoff(
                     kv_caches[bidx],
                     [("batch_index", bidx), ("ctx_start", 0)],
                     self.session.decode_buff_map,
                     self.decode_execObj_idx or 0,
+                    slicing_spec_handle=slicing_spec_handle,
                 )
         return
 
