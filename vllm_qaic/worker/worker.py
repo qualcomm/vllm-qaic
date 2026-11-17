@@ -350,8 +350,7 @@ class QaicWorkerPyt(QaicWorker):
         # buffers through vLLM's process-local WorkspaceManager. CUDA and XPU
         # workers initialize it during init_device(); do the same for QAIC
         # eager execution before constructing the model runner.
-        num_ubatches = 2 if self.vllm_config.parallel_config.enable_dbo else 1
-        init_workspace_manager(self.device, num_ubatches)
+        init_workspace_manager(self.device)
 
         # Construct the model runner
         self.model_runner: QaicModelRunnerPyt = QaicModelRunnerPyt(
