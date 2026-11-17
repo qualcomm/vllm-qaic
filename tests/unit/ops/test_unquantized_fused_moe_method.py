@@ -166,6 +166,4 @@ def test_fused_kernel_repeated_routes_on_device(monkeypatch, kernel):
         pending.append((actual, expected))
 
     for actual, expected in pending:
-        torch.testing.assert_close(
-            actual.cpu().float(), expected, atol=2e-2, rtol=2e-2
-        )
+        torch.testing.assert_close(actual.cpu().float(), expected, atol=2e-2, rtol=2e-2)
