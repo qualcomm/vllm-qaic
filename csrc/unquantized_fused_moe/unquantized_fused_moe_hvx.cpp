@@ -15,13 +15,15 @@
 #include "jit_dev_status_codes.h"
 #include "jit_qshim_api.h"
 
+#pragma GCC visibility push(hidden)
+
 // Internal device helper defined in the HMX translation unit.
-namespace unquantized_fused_moe_hmx __attribute__((visibility("hidden"))) {
-uint32_t route_compute_hmx_kernel_main(
-    const AicJitEntryPointConfig*, const AicJitPointerArray*);
+namespace unquantized_fused_moe_hmx {
+uint32_t route_compute_hmx_kernel_main(const AicJitEntryPointConfig*,
+                                       const AicJitPointerArray*);
 }
 
-namespace unquantized_fused_moe_hvx __attribute__((visibility("hidden"))) {
+namespace unquantized_fused_moe_hvx {
 
 enum ActivationId : int32_t {
   kSilu = 0,
@@ -1131,9 +1133,8 @@ inline uint32_t finish_stage(const AicJitEntryPointConfig* cfg,
   statuses[worker] = status;
   sync_threads<Hmx>(cfg->threadID, cfg->numThreads);
   if (Global && cfg->threadID == 0 && cfg->numCores > 1) {
-    const uint32_t nsp_mask = cfg->numCores == 32
-                                  ? UINT32_MAX
-                                  : (1U << cfg->numCores) - 1U;
+    const uint32_t nsp_mask =
+        cfg->numCores == 32 ? UINT32_MAX : (1U << cfg->numCores) - 1U;
     const uint32_t sync_status = qshimSyncNSPs(nsp_mask);
     if (sync_status != JIT_DEV_STATUS_SUCCESS) {
       statuses[worker] = sync_status;
@@ -1143,8 +1144,8 @@ inline uint32_t finish_stage(const AicJitEntryPointConfig* cfg,
     sync_threads<Hmx>(cfg->threadID, cfg->numThreads);
   }
   const uint32_t first = Global ? 0U : cfg->coreID * cfg->numThreads;
-  const uint32_t end = Global ? cfg->numCores * cfg->numThreads
-                              : first + cfg->numThreads;
+  const uint32_t end =
+      Global ? cfg->numCores * cfg->numThreads : first + cfg->numThreads;
   for (uint32_t i = first; i < end; ++i) {
     if (statuses[i] != JIT_DEV_STATUS_SUCCESS) {
       return statuses[i];
@@ -1181,9 +1182,8 @@ uint32_t fused_kernel_main(const AicJitEntryPointConfig* cfg,
     }
     hvx_worker = cfg->threadID != (uint32_t)hmx_thread;
     hvx_cfg.numThreads = (uint32_t)hvx_threads;
-    hvx_cfg.threadID = cfg->threadID > (uint32_t)hmx_thread
-                           ? cfg->threadID - 1U
-                           : cfg->threadID;
+    hvx_cfg.threadID = cfg->threadID > (uint32_t)hmx_thread ? cfg->threadID - 1U
+                                                            : cfg->threadID;
   }
 
   const AicJitPtr* p = ptrs->pointers;
@@ -1198,9 +1198,9 @@ uint32_t fused_kernel_main(const AicJitEntryPointConfig* cfg,
   if (params == nullptr) {
     return JIT_DEV_ERROR_INVALID_PARAMETER;
   }
-  const int32_t num_tokens = (int32_t)params[0];
-  const int32_t num_experts = (int32_t)params[4];
-  const int32_t topk = (int32_t)params[5];
+  const int32_t num_tokens = param_i32(params, 0);
+  const int32_t num_experts = param_i32(params, 4);
+  const int32_t topk = param_i32(params, 5);
   if (num_tokens < 0 || num_experts <= 0 || topk <= 0) {
     return JIT_DEV_ERROR_INVALID_PARAMETER;
   }
@@ -1222,29 +1222,29 @@ uint32_t fused_kernel_main(const AicJitEntryPointConfig* cfg,
   group_cfg.numCores = 1;
 
   const PointerArray<4> count = {4, 0, {p[2], p[9], counts, p[10]}};
-  uint32_t status =
-      hvx_worker
-          ? route_group_count_kernel_main(&group_cfg, count.get())
-          : JIT_DEV_STATUS_SUCCESS;
+  uint32_t status = hvx_worker
+                        ? route_group_count_kernel_main(&group_cfg, count.get())
+                        : JIT_DEV_STATUS_SUCCESS;
   status = finish_stage<Hmx, false>(cfg, statuses, status);
 
-  const PointerArray<4> prefix = {4, 0, {counts, worker_offsets, offsets, p[10]}};
-  status =
-      hvx_worker && status == JIT_DEV_STATUS_SUCCESS
-          ? route_group_prefix_kernel_main(&group_cfg, prefix.get())
-          : status;
+  const PointerArray<4> prefix = {
+      4, 0, {counts, worker_offsets, offsets, p[10]}};
+  status = hvx_worker && status == JIT_DEV_STATUS_SUCCESS
+               ? route_group_prefix_kernel_main(&group_cfg, prefix.get())
+               : status;
   status = finish_stage<Hmx, false>(cfg, statuses + workers, status);
 
-  const PointerArray<5> fill = {5, 0, {p[2], p[9], worker_offsets, indices, p[10]}};
-  status =
-      hvx_worker && status == JIT_DEV_STATUS_SUCCESS
-          ? route_group_fill_kernel_main(&group_cfg, fill.get())
-          : status;
+  const PointerArray<5> fill = {
+      5, 0, {p[2], p[9], worker_offsets, indices, p[10]}};
+  status = hvx_worker && status == JIT_DEV_STATUS_SUCCESS
+               ? route_group_fill_kernel_main(&group_cfg, fill.get())
+               : status;
   status = finish_stage<Hmx, false>(cfg, statuses + 2U * workers, status);
 
-  const PointerArray<11> compute = {
-      11, 0,
-      {p[0], p[1], p[2], p[3], p[4], p[5], p[6], indices, offsets, p[9], p[10]}};
+  const PointerArray<11> compute = {11,
+                                    0,
+                                    {p[0], p[1], p[2], p[3], p[4], p[5], p[6],
+                                     indices, offsets, p[9], p[10]}};
   if (status == JIT_DEV_STATUS_SUCCESS) {
     if constexpr (Hmx) {
       status = unquantized_fused_moe_hmx::route_compute_hmx_kernel_main(
@@ -1259,21 +1259,22 @@ uint32_t fused_kernel_main(const AicJitEntryPointConfig* cfg,
   }
 
   const PointerArray<3> reduce = {3, 0, {p[6], p[13], p[10]}};
-  return hvx_worker
-             ? reduce_kernel_main(&hvx_cfg, reduce.get())
-             : JIT_DEV_STATUS_SUCCESS;
+  return hvx_worker ? reduce_kernel_main(&hvx_cfg, reduce.get())
+                    : JIT_DEV_STATUS_SUCCESS;
 }
 
-uint32_t fused_hmx_kernel_main(
-    const AicJitEntryPointConfig* cfg, const AicJitPointerArray* ptrs) {
+uint32_t fused_hmx_kernel_main(const AicJitEntryPointConfig* cfg,
+                               const AicJitPointerArray* ptrs) {
   return fused_kernel_main<true>(cfg, ptrs);
 }
 
 }  // namespace unquantized_fused_moe_hvx
 
+#pragma GCC visibility pop
+
 QAIC_KERNEL_API int32_t multinsp_multithreaded_unquantized_fused_moe(
     const AicJitEntryPointConfig* entryConfig,
     const AicJitPointerArray* pointerArray) {
   return unquantized_fused_moe_hvx::fused_kernel_main<false>(entryConfig,
-                                                          pointerArray);
+                                                             pointerArray);
 }

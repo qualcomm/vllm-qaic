@@ -16,13 +16,15 @@
 #include "jit_dev_status_codes.h"
 #include "jit_qshim_api.h"
 
+#pragma GCC visibility push(hidden)
+
 // Shared grouping, synchronization, and reduction live in the HVX file.
-namespace unquantized_fused_moe_hvx __attribute__((visibility("hidden"))) {
-uint32_t fused_hmx_kernel_main(
-    const AicJitEntryPointConfig*, const AicJitPointerArray*);
+namespace unquantized_fused_moe_hvx {
+uint32_t fused_hmx_kernel_main(const AicJitEntryPointConfig*,
+                               const AicJitPointerArray*);
 }
 
-namespace unquantized_fused_moe_hmx __attribute__((visibility("hidden"))) {
+namespace unquantized_fused_moe_hmx {
 
 enum ActivationId : int32_t {
   kSilu = 0,
@@ -923,8 +925,8 @@ inline __attribute__((always_inline)) uint32_t process_expert_routes_hmx(
   return JIT_DEV_STATUS_SUCCESS;
 }
 
-uint32_t route_compute_hmx_kernel_main(
-    const AicJitEntryPointConfig* cfg, const AicJitPointerArray* ptrs) {
+uint32_t route_compute_hmx_kernel_main(const AicJitEntryPointConfig* cfg,
+                                       const AicJitPointerArray* ptrs) {
   if (!valid_jit_args(cfg, ptrs, 11)) {
     return JIT_DEV_ERROR_INVALID_PARAMETER;
   }
@@ -1091,9 +1093,11 @@ uint32_t route_compute_hmx_kernel_main(
 
 }  // namespace unquantized_fused_moe_hmx
 
+#pragma GCC visibility pop
+
 QAIC_KERNEL_API int32_t multinsp_multithreaded_unquantized_fused_moe_hmx(
     const AicJitEntryPointConfig* entryConfig,
     const AicJitPointerArray* pointerArray) {
   return unquantized_fused_moe_hvx::fused_hmx_kernel_main(entryConfig,
-                                                       pointerArray);
+                                                          pointerArray);
 }
