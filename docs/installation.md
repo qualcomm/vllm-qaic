@@ -57,25 +57,6 @@ This guide covers installing `vllm-qaic` in both **AOT** (Ahead-of-Time compiled
 > resolved upstream when QEfficient supports 3.13 and relaxes the
 > `sentencepiece==0.2.0` pin.
 
-> [!WARNING]
-> **AOT mode does not work on Python 3.13.** AOT depends on `QEfficient`, whose own
-> `pyproject.toml` declares `requires-python = ">=3.10,<3.13"` and hard-pins
-> `sentencepiece==0.2.0`. `sentencepiece` publishes cp313 wheels only from 0.2.1
-> onward, so under Python 3.13 that pin forces a source build of 0.2.0, which fails:
->
-> ```text
-> Building sentencepiece==0.2.0
-> /bin/sh: 1: pkg-config: not found
-> CMake Error at CMakeLists.txt:15 (cmake_minimum_required):
->   Compatibility with CMake < 3.5 has been removed from CMake.
-> hint: `sentencepiece` (v0.2.0) was included because `qefficient` (v1.23.0.dev0)
->       depends on `sentencepiece`
-> ```
->
-> **Workaround:** use Python 3.11 or 3.12 for AOT environments. This will be
-> resolved upstream when QEfficient supports 3.13 and relaxes the
-> `sentencepiece==0.2.0` pin.
-
 Install the QAIC SDK before proceeding:
 
 - [SDK installation guide](https://quic.github.io/cloud-ai-sdk-pages/latest/Getting-Started/Installation/index.html)

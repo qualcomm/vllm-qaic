@@ -8,7 +8,7 @@
 - [Pick your mode](#pick-your-mode)
 - [PYT mode install](#pyt-mode-install)
 - [AOT mode install](#aot-mode-install)
-- [AOT with triton-cpu (Speculative Decoding)](#aot-with-triton-cpu-speculative-decoding)
+- [AOT using triton-cpu kernels (Optional for Speculative Decoding)](#aot-using-triton-cpu-kernels-optional-for-speculative-decoding)
 - [Verifying the install](#verifying-the-install)
 - [Environment variable reference](#environment-variable-reference)
 - [Troubleshooting](#troubleshooting)
@@ -91,6 +91,7 @@ version, installs vllm, then the `py3-none-any` AOT wheel.
 > `TRANSFORMERS_VERSION_AOT=5.5.4 ./install.sh aot`.
 
 ---
+
 ## AOT using triton-cpu kernels (Optional for Speculative Decoding)
 
 Speculative Decoding can use triton based rejection sample if it is enabled by installing triton-cpu

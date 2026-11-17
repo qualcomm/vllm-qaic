@@ -52,6 +52,7 @@ Please use the following recommended versions to get started quickly:
 | v0.15.0.dev0 | v0.15.0 | >= 1.22.0 | [main](https://github.com/qualcomm/vllm-qaic/tree/main)  [v0.15.0](https://github.com/qualcomm/vllm-qaic/tree/release/v0.15.0)| Pre-release | See [QuickStart](#installation) and [Installation Guide](docs/installation.md) for more details |
 | v0.23.0.dev0 | v0.23.0 | >= 1.23.0 | [v0.23.0](https://github.com/qualcomm/vllm-qaic/tree/release/v0.23.0) | Release branch | |
 | v0.23.0.dev1 | v0.23.0 | >= 1.23.4 | [v0.23.0](https://github.com/qualcomm/vllm-qaic/tree/release/r1.23.4) | Release branch | |
+
 ## Branches
 
 **[main](https://github.com/qualcomm/vllm-qaic/tree/main)**: Primary development branch. Contributors should develop submissions based on this branch, and submit pull requests to this branch.
