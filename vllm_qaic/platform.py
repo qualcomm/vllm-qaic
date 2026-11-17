@@ -118,6 +118,7 @@ class QaicPlatform(Platform):
         from vllm_qaic import patch  # noqa: F401
 
         if not cls.is_aot:
+            import vllm_qaic.patch.patch_empty_cache  # noqa: F401
             import vllm_qaic.patch.patch_qaic_triton_import  # noqa
 
         # gpt_oss_mxfp4 is only supported in eager mode: AOT compilation has
