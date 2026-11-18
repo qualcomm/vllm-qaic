@@ -137,14 +137,16 @@ class QaicTritonGptOssMxfp4MoEMethod(GptOssMxfp4MoEMethod):
 
     def __init__(self, moe: FusedMoEConfig):
         # Platform startup already imports and patches optional triton_kernels.
-        # Require the package before constructing the GPT-OSS Triton experts.
+        # Require the package before patching the GPT-OSS Triton experts.
         from vllm_qaic.patch.patch_qaic_triton_import import (
             enable_qaic_triton_kernels,
         )
 
         enable_qaic_triton_kernels()
-        from vllm_qaic.quantization.qaic_oai_triton_experts import (
-            QaicOAITritonExperts,
+        import vllm_qaic.patch.patch_oai_triton_experts  # noqa: F401
+
+        from vllm.model_executor.layers.fused_moe.experts import (
+            gpt_oss_triton_kernels_moe as oai_triton_experts,
         )
 
         # GptOssMxfp4MoEMethod.__init__ invokes the upstream backend oracle
@@ -156,7 +158,7 @@ class QaicTritonGptOssMxfp4MoEMethod(GptOssMxfp4MoEMethod):
         original_selector = upstream_mxfp4.select_mxfp4_moe_backend
         upstream_mxfp4.select_mxfp4_moe_backend = lambda _moe: (
             Mxfp4MoeBackend.TRITON,
-            QaicOAITritonExperts,
+            oai_triton_experts.OAITritonExperts,
         )
         try:
             super().__init__(moe)

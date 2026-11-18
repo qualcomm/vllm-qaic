@@ -287,6 +287,22 @@
 #    Note:
 #       Imported by QaicPlatform.pre_register_and_update only in PYT mode.
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#
+# ** 16. File: patch_oai_triton_experts.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. vllm.model_executor.layers.fused_moe.experts.
+#        gpt_oss_triton_kernels_moe.OAITritonExperts._make_routing_data / apply
+#    Why:
+#       The upstream wrappers require BF16 activations and allocate int16
+#       routing IDs and int64 remapping output, which are unsuitable for QAIC.
+#    How:
+#       Replace both methods with QAIC wrappers using the model's activation
+#       dtype and int32 indices. Reuse upstream's matmul_ogs kernels, fused
+#       SwiGLU, workspace storage and routing-weight reduction.
+#    Note:
+#       Imported by QaicTritonGptOssMxfp4MoEMethod after triton_kernels is
+#       validated, when VLLM_QAIC_TRITON_FUSED_MOE selects GPT-OSS Triton.
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # =================
 
 # NOTE: patch_topk_topp_sampler must stay first; it rebinds a module-level
