@@ -28,8 +28,6 @@ its actual availability, without waiting for GPT-OSS model construction.
 #       `from vllm.triton_utils import ...`, since that binds triton/tl/
 #       HAS_TRITON into the importing module's own namespace at that
 #       moment.
-import sys
-
 from vllm import triton_utils
 from vllm.utils import import_utils
 
@@ -41,18 +39,21 @@ def _qaic_has_triton_kernels() -> bool:
 
     ``import_triton_kernels`` also aliases vLLM's vendored package as the
     top-level ``triton_kernels`` module, which is how the GPT-OSS kernels
-    import it.
+    import it. Check both names because the installed-package lookup can
+    remain cached as unavailable after the vendored fallback is aliased.
     """
 
     import_utils.import_triton_kernels()
-    return "triton_kernels" in sys.modules
+    return import_utils._has_module("triton_kernels") or import_utils._has_module(
+        "vllm.third_party.triton_kernels"
+    )
 
 
 def enable_qaic_triton_kernels() -> None:
     """Require Triton kernels already initialized during QAIC startup."""
     if not _qaic_has_triton_kernels():
         raise ImportError(
-            "QAIC GPT-OSS requires a compatible triton_kernels package, but "
+            "QAIC Triton MoE requires a compatible triton_kernels package, but "
             "the package could not be imported."
         )
 
@@ -61,22 +62,16 @@ try:
     import triton
     import triton.language as tl
     import triton.language.extra.libdevice as tldevice
-
+except Exception:
+    triton_utils.HAS_TRITON = False
+else:
     if QAIC_TRITON_BACKEND_KEY in triton.backends.backends:
         triton_utils.HAS_TRITON = True
         triton_utils.triton = triton
         triton_utils.tl = tl
         triton_utils.tldevice = tldevice
-except Exception:
-    triton_utils.HAS_TRITON = False
 
-# Import Triton kernels if the QAIC Triton backend is available.
-# Set opt flags if triton_kernels is present.
-if triton_utils.HAS_TRITON and QAIC_TRITON_BACKEND_KEY in triton.backends.backends:
-    # Retry imports cached before QAIC's Triton bindings were restored. Load
-    # the package now, independently of which model will be constructed.
-    import_utils._has_module.cache_clear()
-    import_utils.import_triton_kernels.cache_clear()
-    import_utils.has_triton_kernels = _qaic_has_triton_kernels
-    if _qaic_has_triton_kernels():
-        import vllm_qaic.patch.patch_triton_kernels_opt_flags  # noqa: F401
+        # Load the package now, independently of the model being constructed.
+        import_utils.has_triton_kernels = _qaic_has_triton_kernels
+        if _qaic_has_triton_kernels():
+            import vllm_qaic.patch.patch_triton_kernels_opt_flags  # noqa: F401
