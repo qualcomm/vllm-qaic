@@ -1877,21 +1877,17 @@ def get_hf_model(
     }
     if override_qaic_config and override_qaic_config.get("pretrained_extra_args", None):
         pretrained_extra_args = override_qaic_config["pretrained_extra_args"]
-        if (
-            model_config.dtype == torch.bfloat16
-            and "torch_dtype" in pretrained_extra_args
-            and pretrained_extra_args["torch_dtype"] != torch.bfloat16
-        ):
-            raise ValueError(
-                "pretrained_extra_args.torch_dtype must match model_config.dtype "
-                "for native BF16 inference."
-            )
         args.update(pretrained_extra_args)
         override_qaic_config.pop("pretrained_extra_args")
 
-    # Match QEfficient's native-BF16 inference path explicitly. vLLM's resolved
-    # model dtype is authoritative over optional pretrained extra arguments.
-    if model_config.dtype == torch.bfloat16:
+    # Match QEfficient's native-BF16 inference path explicitly, but only on a
+    # part that has native BF16: the AOT compiler rejects BF16 HMX ops on
+    # AI100. On AI100 — and when the part cannot be determined — leave
+    # torch_dtype as supplied by pretrained_extra_args.
+    if (
+        model_config.dtype == torch.bfloat16
+        and current_platform.is_ai100_device() is False
+    ):
         args["torch_dtype"] = torch.bfloat16
 
     model_type = "lora" if lora_config else "default"

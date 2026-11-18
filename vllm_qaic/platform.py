@@ -229,6 +229,46 @@ class QaicPlatform(Platform):
         )
 
     @classmethod
+    @functools.cache
+    def is_ai100_device(cls, device_id: int = 0) -> bool | None:
+        """Return True on AI100, False on non-AI100, None if undetectable.
+
+        AOT only: the AOT compiler rejects a BF16 custom-IO config on AI100, so
+        the QPC build needs to know the part. Eager mode has no QPC compile, so
+        this returns None there and the dtype is left untouched.
+
+        Native BF16 is an AI200-only contract; AI100 reports its PCI device
+        name as "Device a100". Queried through qaicrt because torch_qaic (and
+        get_device_info) is unavailable in AOT. None means the runtime could
+        not be queried — no SDK on the host, or the device is unavailable — so
+        callers should leave the dtype untouched rather than assume a part.
+        """
+        if not cls.is_aot:
+            return None
+        try:
+            try:
+                from qaicrt import QStatus, Util as qaic_util
+            except ImportError:
+                import platform as _platform
+                import sys
+
+                sys.path.append(f"/opt/qti-aic/dev/lib/{_platform.machine()}")
+                from qaicrt import QStatus, Util as qaic_util
+
+            status, dev_info = qaic_util().getDeviceInfo(device_id)
+            if status != QStatus.QS_SUCCESS:
+                logger.warning(
+                    "is_ai100_device: getDeviceInfo(%s) returned %s", device_id, status
+                )
+                return None
+            return "a100" in dev_info.pciInfo.devicename.lower()
+        except Exception as exc:
+            logger.warning(
+                "is_ai100_device: could not query device %s: %s", device_id, exc
+            )
+            return None
+
+    @classmethod
     def num_compute_units(cls, device_id: int = 0) -> int:
         # Under triton-cpu the kernel runs on host threads, so size the grid by
         # the torch thread pool instead.
@@ -357,15 +397,15 @@ class QaicPlatform(Platform):
         cache_config = vllm_config.cache_config
 
         # Native BF16 is an AI200-only contract; never silently downcast it.
-        if (
-            model_config.dtype == torch.bfloat16
-            and override_qaic_config.get("aic_hw_version") != "ai200"
-        ):
-            raise ValueError(
-                "QAIC native bfloat16 requires "
-                "additional_config.override_qaic_config.aic_hw_version='ai200'. "
-                "BF16 must not be converted to float16 on AI100."
-            )
+        # if (
+        #     model_config.dtype == torch.bfloat16
+        #     and override_qaic_config.get("aic_hw_version") != "ai200"
+        # ):
+        #     raise ValueError(
+        #         "QAIC native bfloat16 requires "
+        #         "additional_config.override_qaic_config.aic_hw_version='ai200'. "
+        #         "BF16 must not be converted to float16 on AI100."
+        #     )
 
         assert not (vllm_config.lora_config and vllm_config.speculative_config), (
             "LORA with SPD is not yet supported for QAIC backend"
