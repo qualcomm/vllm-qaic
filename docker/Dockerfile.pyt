@@ -254,7 +254,7 @@ RUN --mount=type=cache,sharing=locked,target=/var/cache/apt \
         git && \
     uv python install ${PYTHON_VERSION} && \
     uv venv ${VENV} --python ${PYTHON_VERSION} --seed && \
-    PATH="${VENV}/bin:${PATH}" uv pip install -r /src/vllm-qaic/requirements/build.txt
+    PATH="${VENV}/bin:${PATH}" VIRTUAL_ENV="${VENV}" uv pip install -r /src/vllm-qaic/requirements/build.txt
 
 ENV PATH="${VENV}/bin:${PATH}" \
     VIRTUAL_ENV="${VENV}"
