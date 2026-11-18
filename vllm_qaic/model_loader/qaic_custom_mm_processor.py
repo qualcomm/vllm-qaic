@@ -8,12 +8,13 @@
 
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
+from contextlib import contextmanager
 from typing import Any, Protocol, cast
 
 import torch
 from packaging.version import Version as _Version
 from qwen_vl_utils import smart_resize
-from transformers import BatchFeature, Qwen2VLImageProcessorFast, TensorType
+from transformers import BatchFeature, TensorType
 from transformers import __version__ as _transformers_version
 from transformers.image_processing_utils import select_best_resolution
 from transformers.image_transforms import group_images_by_shape, reorder_images
@@ -90,9 +91,15 @@ from vllm.multimodal.processing.processor import (
 )
 
 logger = init_logger(__name__)
+try:
+    from transformers import Qwen2VLImageProcessorFast
+except ImportError:
+    # Transformers >=5.15 removed the Fast suffix class export.
+    from transformers import Qwen2VLImageProcessor as Qwen2VLImageProcessorFast
+
 # transformers v5.5.4 replaced image_processor.min_pixels / .max_pixels class
 # attributes with a size dict keyed by 'shortest_edge' / 'longest_edge'.
-_TRANSFORMERS_NEW_IMAGE_PROCESSOR = _Version(_transformers_version) == _Version("5.5.4")
+_TRANSFORMERS_NEW_IMAGE_PROCESSOR = _Version(_transformers_version) >= _Version("5.5.4")
 _gemma4_get_placeholder_str = Gemma4ForConditionalGeneration.get_placeholder_str
 # Gemma4 with vllm v0.23 wabts image modality instead of image_embeds
 Gemma4ForConditionalGeneration.get_placeholder_str = classmethod(
@@ -100,6 +107,52 @@ Gemma4ForConditionalGeneration.get_placeholder_str = classmethod(
         "image" if modality == "image_embeds" else modality, i
     )
 )
+
+
+@contextmanager
+def _gemma4_qaic_encoder_chunking():
+    original_get_memory_info = torch.accelerator.get_memory_info
+
+    def get_memory_info_qaic(device=None):
+        try:
+            return original_get_memory_info(device)
+        except RuntimeError as e:
+            if "Allocator for qaic is not a DeviceAllocator" not in str(e):
+                raise
+            return (0, 0)
+
+    torch.accelerator.get_memory_info = get_memory_info_qaic
+    try:
+        yield
+    finally:
+        torch.accelerator.get_memory_info = original_get_memory_info
+
+
+if not getattr(
+    Gemma4ForConditionalGeneration, "_qaic_memory_info_patch_installed", False
+):
+    _gemma4_process_image_input = Gemma4ForConditionalGeneration._process_image_input
+    _gemma4_process_video_input = Gemma4ForConditionalGeneration._process_video_input
+
+    def _qaic_gemma4_process_image_input(self, image_input):
+        # Upstream Gemma4 uses torch.accelerator.get_memory_info() only to choose
+        # the encoder chunk size. That API asserts on QAIC because QAIC does not
+        # use PyTorch's DeviceAllocator, so report a zero budget and let
+        # _encoder_chunk conservatively choose chunk size 1.
+        with _gemma4_qaic_encoder_chunking():
+            return _gemma4_process_image_input(self, image_input)
+
+    def _qaic_gemma4_process_video_input(self, video_input):
+        with _gemma4_qaic_encoder_chunking():
+            return _gemma4_process_video_input(self, video_input)
+
+    Gemma4ForConditionalGeneration._process_image_input = (
+        _qaic_gemma4_process_image_input
+    )
+    Gemma4ForConditionalGeneration._process_video_input = (
+        _qaic_gemma4_process_video_input
+    )
+    Gemma4ForConditionalGeneration._qaic_memory_info_patch_installed = True
 
 
 class QaicGemma3MultiModalProcessor(Gemma3MultiModalProcessor):
@@ -400,10 +453,13 @@ class QaicQwen2VLImageProcessorFast(Qwen2VLImageProcessorFast):
                     resized_height, resized_width = select_best_resolution(
                         (resized_height, resized_width), self.resolutions
                     )
-                stacked_images = self.resize(
+                # Call the backend resize directly: transformers >=5.15
+                # Qwen2VLImageProcessor.resize() re-runs smart_resize and would
+                # discard the QPC-compiled resolution selected above.
+                stacked_images = super(Qwen2VLImageProcessorFast, self).resize(
                     image=stacked_images,
                     size=SizeDict(height=resized_height, width=resized_width),
-                    interpolation=interpolation,
+                    resample=interpolation,
                 )
             resized_images_grouped[shape] = stacked_images
         resized_images = reorder_images(resized_images_grouped, grouped_images_index)

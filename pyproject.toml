@@ -168,12 +168,12 @@ override-dependencies = [
 ]
 
 [tool.uv.sources]
-vllm = { git = "https://github.com/vllm-project/vllm", rev = "v0.23.0" }
+vllm = { git = "https://github.com/vllm-project/vllm", rev = "v0.30.0" }
 
 [tool.pytest.ini_options]
 markers = [
-    "qaic_test_config(**kwargs): per-test/module QAIC run configuration overrides",
-    "qaic_aot_mode: test requires QAIC AOT (ahead-of-time compiled) mode to be installed",
+    "qaic_test_config(**kwargs): per-test/module QAIC run configuration overrides. Pass a single positional dict with 'aot'/'eager' keys for per-mode overrides.",
+    "qaic_aot_mode(reason=None): test requires QAIC AOT (ahead-of-time compiled) mode; an optional reason customizes the PYT skip message",
     "qaic_disagg_installed: test requires the qaic_disagg package to be installed",
     "arctic_inference_installed: test requires the arctic_inference package to be installed",
     "triton_parity: differential Numba-vs-upstream-triton-cpu rejection-sampler test (skipped without triton-cpu)",

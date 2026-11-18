@@ -102,6 +102,7 @@ def _topk_softmax_torch(
     gating_output: torch.Tensor,
     renormalize: bool = False,
     e_score_correction_bias: torch.Tensor | None = None,
+    is_padding: torch.Tensor | None = None,
 ) -> None:
     _topk_torch(
         topk_weights,
@@ -121,6 +122,7 @@ def _topk_sigmoid_torch(
     gating_output: torch.Tensor,
     renormalize: bool = False,
     e_score_correction_bias: torch.Tensor | None = None,
+    is_padding: torch.Tensor | None = None,
 ) -> None:
     _topk_torch(
         topk_weights,

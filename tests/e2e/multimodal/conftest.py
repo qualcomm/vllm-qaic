@@ -12,7 +12,6 @@ import requests
 import torch
 from datasets import load_dataset
 from PIL import Image
-from QEfficient import QEFFAutoModelForCausalLM, QEFFAutoModelForImageTextToText
 from transformers import AutoConfig, AutoProcessor
 
 from vllm.model_executor.models.internvl import InternVLProcessor
@@ -68,6 +67,8 @@ def create_qeff_model_and_processor(
     override_cfg: dict,
     tokenizer_obj,
 ):
+    from QEfficient import QEFFAutoModelForCausalLM, QEFFAutoModelForImageTextToText
+
     compile_args = dict(
         num_devices=len(device_group),
         num_cores=NUM_CORES,

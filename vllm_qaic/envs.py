@@ -22,6 +22,41 @@ if TYPE_CHECKING:
     VLLM_QAIC_NUM_CORES: int | None = None
     VLLM_QAIC_QPC_PATH: str | None = None
     VLLM_TORCH_QAIC_PROFILER_DIR: str | None = None
+    # Route the decoder paged-attention backend to vLLM's in-tree Triton
+    # attention (unified_attention + triton_reshape_and_cache_flash)
+    VLLM_QAIC_ENABLE_TRITON_ATTN: bool = False
+    # Master switch: default for every per-operator VLLM_QAIC_TRITON_<OP> flag
+    # below. An explicitly set per-op flag always overrides it.
+    VLLM_QAIC_TRITON_ALL_OPS_EN: bool = False
+    # Per-operator opt-in flags: dispatch the CustomOp forward_oot to the
+    # corresponding vLLM Triton kernel
+    VLLM_QAIC_TRITON_RMS_NORM: bool = False
+    VLLM_QAIC_TRITON_MM_ENCODER_ATTENTION: bool = False
+    VLLM_QAIC_TRITON_MROTARY_EMBEDDING: bool = False
+    # Repurpose vLLM's SWIGLUSTEP Triton kernel (swiglustep_and_mul_triton) as
+    # plain SiluAndMul (limit=+inf); routes the SwiGLU MLP activation to Triton.
+    VLLM_QAIC_TRITON_SILU_AND_MUL: bool = False
+    # Route the unquantized fused-MoE forward to vLLM's hand-written Triton
+    # fused-MoE kernel (fused_experts -> fused_moe_kernel)
+    VLLM_QAIC_TRITON_FUSED_MOE: bool = False
+    # Route the unquantized linear/GEMM family (QKV/Column/Row/MergedColumn
+    # ParallelLinear, ParallelLMHead, LogitsProcessor matmul) to vLLM's
+    # batch-invariant Triton GEMM (linear_batch_invariant) via patch_linear.
+    VLLM_QAIC_TRITON_LINEAR: bool = False
+    # Route the sampler's top-k/top-p logits masking to vLLM's Triton kernel
+    # (apply_top_k_top_p_triton) via patch_topk_topp_sampler; when unset the
+    # PyTorch sort implementation is used regardless of batch size.
+    VLLM_QAIC_TRITON_TOPK_TOPP: bool = False
+    # Route Gemma 4's MoE routing function (top-k + softmax + renorm + per-expert
+    # scale) to vLLM's Triton kernel (gemma4_fused_routing_kernel_triton) via
+    # ops/gemma4_router.py; when unset the QAIC NSP gemma4_topk kernel (or the
+    # PyTorch routing function, for inputs it does not support) is used.
+    VLLM_QAIC_TRITON_GEMMA4_ROUTER: bool = False
+    # Route the fused-MoE top-k reduction (vllm._custom_ops.moe_sum) to vLLM's
+    # Triton kernel (masked_moe_sum) via patch_fused_moe_sum; when unset the
+    # PyTorch implementation of the same semantics is used.
+    VLLM_QAIC_TRITON_MOE_SUM: bool = False
+
 
 # --8<-- [start:env-vars-definition]
 qaic_environment_variables: dict[str, Callable[[], Any]] = {
@@ -38,7 +73,59 @@ qaic_environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TORCH_QAIC_PROFILER_DIR": lambda: os.getenv(
         "VLLM_TORCH_QAIC_PROFILER_DIR", None
     ),
+    "VLLM_QAIC_ENABLE_TRITON_ATTN": lambda: os.getenv(
+        "VLLM_QAIC_ENABLE_TRITON_ATTN", "0"
+    )
+    == "1",
+    "VLLM_QAIC_TRITON_ALL_OPS_EN": lambda: os.getenv("VLLM_QAIC_TRITON_ALL_OPS_EN", "0")
+    == "1",
 }
+
+# Per-op Triton flags default to VLLM_QAIC_TRITON_ALL_OPS_EN (read once, when
+# this module is imported); an explicitly set per-op variable overrides it.
+_triton_all_ops_en = qaic_environment_variables["VLLM_QAIC_TRITON_ALL_OPS_EN"]()
+qaic_environment_variables.update(
+    {
+        "VLLM_QAIC_TRITON_RMS_NORM": lambda: os.getenv(
+            "VLLM_QAIC_TRITON_RMS_NORM", "1" if _triton_all_ops_en else "0"
+        )
+        == "1",
+        "VLLM_QAIC_TRITON_MM_ENCODER_ATTENTION": lambda: os.getenv(
+            "VLLM_QAIC_TRITON_MM_ENCODER_ATTENTION",
+            "1" if _triton_all_ops_en else "0",
+        )
+        == "1",
+        "VLLM_QAIC_TRITON_MROTARY_EMBEDDING": lambda: os.getenv(
+            "VLLM_QAIC_TRITON_MROTARY_EMBEDDING",
+            "1" if _triton_all_ops_en else "0",
+        )
+        == "1",
+        "VLLM_QAIC_TRITON_SILU_AND_MUL": lambda: os.getenv(
+            "VLLM_QAIC_TRITON_SILU_AND_MUL", "1" if _triton_all_ops_en else "0"
+        )
+        == "1",
+        "VLLM_QAIC_TRITON_FUSED_MOE": lambda: os.getenv(
+            "VLLM_QAIC_TRITON_FUSED_MOE", "1" if _triton_all_ops_en else "0"
+        )
+        == "1",
+        "VLLM_QAIC_TRITON_LINEAR": lambda: os.getenv(
+            "VLLM_QAIC_TRITON_LINEAR", "1" if _triton_all_ops_en else "0"
+        )
+        == "1",
+        "VLLM_QAIC_TRITON_TOPK_TOPP": lambda: os.getenv(
+            "VLLM_QAIC_TRITON_TOPK_TOPP", "1" if _triton_all_ops_en else "0"
+        )
+        == "1",
+        "VLLM_QAIC_TRITON_GEMMA4_ROUTER": lambda: os.getenv(
+            "VLLM_QAIC_TRITON_GEMMA4_ROUTER", "1" if _triton_all_ops_en else "0"
+        )
+        == "1",
+        "VLLM_QAIC_TRITON_MOE_SUM": lambda: os.getenv(
+            "VLLM_QAIC_TRITON_MOE_SUM", "1" if _triton_all_ops_en else "0"
+        )
+        == "1",
+    }
+)
 environment_variables.update(qaic_environment_variables)
 # --8<-- [end:env-vars-definition]
 

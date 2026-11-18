@@ -40,15 +40,16 @@ def main():
     # Create a LLM.
     llm = LLM(
         model="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+        dtype="float16",
         max_num_seqs=decode_bsz,  # determines decode batch size
         max_model_len=ctx_len,  # ctx_len (does not account for padding,
         # but does account for prompt and generated tokens)
         enable_prefix_caching=False,
         gpu_memory_utilization=0.9,
-        enforce_eager=True,
         async_scheduling=False,
         max_num_batched_tokens=seq_len,  # max tokens scheduled per step
         tensor_parallel_size=1,
+        pipeline_parallel_size=1,
         # buffers
     )
     # Generate texts from the prompts. The output is a list of RequestOutput

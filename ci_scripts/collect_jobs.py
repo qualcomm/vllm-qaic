@@ -8,6 +8,7 @@ xdist-loadscope-equivalent scope group, mirroring `_item_scope` in
 """
 
 import argparse
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -17,10 +18,24 @@ import pytest
 _MARKER = "qaic_test_config"
 
 
+def _is_aot_mode() -> bool:
+    return importlib.util.find_spec("torch_qaic") is None
+
+
+def _marker_kwargs(marker):
+    if marker is None:
+        return {}
+    if marker.args:
+        mode = "aot" if _is_aot_mode() else "eager"
+        return marker.args[0].get(mode, {})
+    return marker.kwargs
+
+
 def _resolve(item, config, key, default=None):
     marker = item.get_closest_marker(_MARKER)
-    if marker is not None and key in marker.kwargs:
-        return marker.kwargs[key]
+    kwargs = _marker_kwargs(marker)
+    if key in kwargs:
+        return kwargs[key]
     cli_value = config.getoption(key, default=None)
     return cli_value if cli_value is not None else default
 

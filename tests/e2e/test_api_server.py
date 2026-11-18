@@ -81,10 +81,18 @@ def _stream_and_cancel(base_url: str, model_name: str, max_tokens: int) -> None:
 
 
 @pytest.mark.qaic_test_config(
-    model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-    ctx_len=512,
-    dtype="mxfp6",
-    kv_dtype="mxint8",
+    {
+        "aot": dict(
+            model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+            ctx_len=512,
+            dtype="mxfp6",
+            kv_dtype="mxint8",
+        ),
+        "eager": dict(
+            model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+            ctx_len=512,
+        ),
+    }
 )
 def test_api_server(api_server, model_name, ctx_len):
     """

@@ -15,12 +15,6 @@ QAIC-specific optimization in the rejection-sampling forward pass:
      clone before apply_logits_processors is unnecessary because the raw
      logits are never read again.  Skipping the clone avoids a memory
      allocation on the hot path.
-
-Everything else mirrors upstream ``RejectionSampler.forward`` (vLLM v0.23.0).
-In particular, ``rejection_sample`` receives the post-constraint *logits*
-(it applies softmax itself, and already skips it when all requests are
-greedy), plus the ``synthetic_mode``/``synthetic_conditional_rates``/
-``use_fp64_gumbel`` options configured on the sampler.
 """
 
 from dataclasses import replace
@@ -43,7 +37,7 @@ def _qaic_forward(
     logits,
     sampling_metadata,
 ) -> SamplerOutput:
-    """Upstream forward with the QAIC greedy-path skip-clone optimization."""
+    """Forward pass with QAIC greedy-path skip-clone optimization."""
     assert metadata.max_spec_len <= MAX_SPEC_LEN
 
     bonus_logits_indices = metadata.bonus_logits_indices

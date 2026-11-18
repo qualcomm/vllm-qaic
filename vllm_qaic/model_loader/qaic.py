@@ -153,7 +153,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             prefill_seq_len = override_qaic_config["prefill_seq_len"]
             self.prefill_seq_len = cast(
                 int,
-                prefill_seq_len
+                max(prefill_seq_len)
                 if isinstance(prefill_seq_len, (list, tuple))
                 else int(prefill_seq_len),
             )
@@ -384,6 +384,10 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         except Exception:
             pass
         return list(self.decode_ks)
+
+    def to_host_array(self, binding_name: str, buffer: np.ndarray) -> np.ndarray:
+        """Expose QPC output conversion without leaking the session to runners."""
+        return self.session.to_host_array(binding_name, buffer)
 
     @staticmethod
     def _warn_on_decode_k_mismatch(
@@ -1067,6 +1071,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         output = self.encode_num_logits_buffer
         assert output is not None, "encode buffer not initialized"
         output_array = output[output_key][: len(prefill_cum_sum)]
+        # Decode the raw BF16 carrier before vLLM consumes BF16 outputs.
+        output_array = self.session.to_host_array(output_key, output_array)
         output_tensor = torch.tensor(output_array)
 
         if not self.is_qaic_pooler and output_key != "logits":
@@ -1109,8 +1115,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
     def run_encode(
         self,
         qpc_inputs: dict,
-        output_key: str | None = None,
-        encode_num_logits_buffer: dict | None = None,
+        output_key: str,
+        encode_num_logits_buffer: dict,
     ) -> dict:
         """Run encode (embedding) inference on the QPC.
 
@@ -1860,6 +1866,7 @@ def get_hf_model(
         "continuous_batching": (override_qaic_config or {}).get(
             "continuous_batching", True
         ),
+        "weight_free": (override_qaic_config or {}).get("weight_free", False),
         "qaic_config": qaic_config,
         "trust_remote_code": model_config.trust_remote_code,
         "revision": model_config.revision,
@@ -1868,10 +1875,20 @@ def get_hf_model(
         "config": hf_config,
         "kv_offload": kv_offload,
     }
-
     if override_qaic_config and override_qaic_config.get("pretrained_extra_args", None):
-        args.update(override_qaic_config["pretrained_extra_args"])
+        pretrained_extra_args = override_qaic_config["pretrained_extra_args"]
+        args.update(pretrained_extra_args)
         override_qaic_config.pop("pretrained_extra_args")
+
+    # Match QEfficient's native-BF16 inference path explicitly, but only on a
+    # part that has native BF16: the AOT compiler rejects BF16 HMX ops on
+    # AI100. On AI100 — and when the part cannot be determined — leave
+    # torch_dtype as supplied by pretrained_extra_args.
+    if (
+        model_config.dtype == torch.bfloat16
+        and current_platform.is_ai100_device() is False
+    ):
+        args["torch_dtype"] = torch.bfloat16
 
     model_type = "lora" if lora_config else "default"
     if model_config.is_multimodal_model:
@@ -1904,6 +1921,15 @@ def get_hf_model(
             and _task not in ("score", "classify")
         ):
             args["pooling"] = override_qaic_config["pooling_method"]
+    if args["weight_free"] and model_type not in ("default", "encode", "imagetext"):
+        raise ValueError(
+            "weight_free=True is only supported for causal LM, embedding, "
+            "and image-text-to-text models on the QAIC backend "
+            "(QEFFAutoModelForCausalLM / QEffAutoModel / "
+            f"QEFFAutoModelForImageTextToText); not supported for "
+            f"model_type={model_type!r} (LoRA, speech, and "
+            "sequence-classification models)."
+        )
     max_retries = 8
     retry_count = 0
     import requests
@@ -2043,6 +2069,9 @@ def _get_qaic_compile_config(
         "compile_only": False,
     }
     cfg.update(_clean_config(override_qaic_config, vllm_config))
+    # weight_free is from_pretrained()-only; strip so it doesn't leak into
+    # compile()'s **compiler_options. use_onnx_subfunctions must be passed explicitly.
+    cfg.pop("weight_free", None)
     # update through environment variable
     cfg.update(_clean_config(QAIC_DEVICE_CONFIG[speculative_model_type]))
     if speculative_model_type == "draft":

@@ -69,9 +69,11 @@ Common questions and solutions for vLLM QAIC.
     export VLLM_QAIC_QPC_PATH=/path/to/precompiled/qpc/
     ```
 
-??? question "`enforce_eager` has no effect"
-    `enforce_eager=True` is only meaningful in **PYT mode**. In AOT mode, execution is
-    always through pre-compiled QPCs — the flag is a no-op.
+??? question "What does `enforce_eager` do?"
+    In **PYT mode**, `enforce_eager=True` runs the model in pure eager mode; otherwise it is
+    run with `torch.compile` (inductor backend). In **AOT mode**, execution is always through
+    pre-compiled QPCs, so the platform forces it to `False` (overriding an explicit
+    `enforce_eager=True` logs a warning).
 
 ---
 

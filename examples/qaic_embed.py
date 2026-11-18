@@ -40,7 +40,6 @@ def main():
     model = LLM(
         model="intfloat/multilingual-e5-large",
         runner="pooling",
-        enforce_eager=True,
         max_num_seqs=4,
         max_model_len=256,
         pooler_config=PoolerConfig(task="embed"),
@@ -62,7 +61,6 @@ def main():
     model = LLM(
         model="intfloat/multilingual-e5-large",
         runner="pooling",
-        enforce_eager=True,
         max_num_seqs=4,
         max_model_len=256,
         pooler_config=PoolerConfig(task="embed"),

@@ -8,6 +8,9 @@
 import torch
 from vllm.model_executor.layers.rotary_embedding.base import RotaryEmbedding
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
+from vllm.model_executor.layers.rotary_embedding.llama3_rope import (
+    Llama3RotaryEmbedding,
+)
 from vllm_qaic.logger import init_logger
 
 logger = init_logger(__name__)
@@ -186,6 +189,48 @@ class QAicRotaryEmbedding(RotaryEmbedding):
 
         cos_sin_cache = self._match_cos_sin_cache_dtype(query)
         return self.forward_static(
+            positions,
+            query,
+            key,
+            self.head_size,
+            self.rotary_dim,
+            cos_sin_cache,
+            self.is_neox_style,
+        )
+
+
+class QAicLlama3RotaryEmbedding(Llama3RotaryEmbedding):
+    """
+    QAIC-specific Llama3RotaryEmbedding implementation.
+
+    Llama3RotaryEmbedding uses the same rotation math as RotaryEmbedding;
+    only the cos/sin cache computation differs (llama3-style frequency
+    scaling). This class reuses QAicRotaryEmbedding's forward implementation
+    so that the NSP rotary_embedding kernel is invoked for Llama3 models too.
+    """
+
+    @staticmethod
+    def forward_static(
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        head_size: int,
+        rotary_dim: int,
+        cos_sin_cache: torch.Tensor,
+        is_neox_style: bool,
+    ):
+        return QAicRotaryEmbedding.forward_static(
+            positions, query, key, head_size, rotary_dim, cos_sin_cache, is_neox_style
+        )
+
+    def forward_oot(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        cos_sin_cache = self._match_cos_sin_cache_dtype(query)
+        return QAicRotaryEmbedding.forward_static(
             positions,
             query,
             key,

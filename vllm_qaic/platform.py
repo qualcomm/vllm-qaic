@@ -3,18 +3,110 @@
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 # ------------------------------------------------------------------
 
+import ast
+import functools
+import importlib
+import importlib.util
+import json
+import os
+from typing import TYPE_CHECKING
+
+import torch
+
 from vllm_qaic.logger import init_logger
-from .platform_base import QaicPlatform as QaicPlatformBase
+from vllm.platforms import Platform, PlatformEnum
+from vllm.utils.import_utils import PlaceholderModule
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+from vllm_qaic.ops._triton_flags import triton_op_enabled
 
 from .utils import (
+    QAIC_GPT_OSS_MXFP4_METHOD,
     QAIC_KV_CACHE_DTYPE,
+    QAIC_QUANTIZATION_LIST,
     QAIC_QUANTIZATION_METHOD,
 )
 
+try:
+    import torch_qaic
+    import torch_qaic.qaic as qaic
+except ImportError:
+    qaic = PlaceholderModule("qaic")
+
+if TYPE_CHECKING:
+    from vllm.config import ModelConfig, VllmConfig
+else:
+    ModelConfig = None
+    VllmConfig = None
+
 logger = init_logger(__name__)
 
+DYNAMIC_RESOLUTION_MODELS = [
+    "qwen2_5_vl",
+    "qwen3_vl",
+    "qwen3_vl_moe",
+    "qwen3_5",
+    "qwen3_5_moe",
+]
 
-class QaicPlatform(QaicPlatformBase):
+
+# Checked locally rather than via vllm.triton_utils.HAS_TRITON: importing
+# vllm.triton_utils resolves vllm.platforms.current_platform, which is still
+# being initialized (it is what imports this module).
+_HAS_TRITON: bool = importlib.util.find_spec("triton") is not None
+
+
+@functools.cache
+def _triton_backend() -> str | None:
+    """Return the installed Triton backend: "qcom_hexagon_backend", "cpu" or None.
+
+    The Qualcomm Hexagon build ships triton.backends.qcom_hexagon_backend; triton-cpu
+    ships triton.backends.cpu. Hexagon wins if both are present.
+    """
+    if not _HAS_TRITON:
+        return None
+    for backend in ("qcom_hexagon_backend", "cpu"):
+        if importlib.util.find_spec(f"triton.backends.{backend}") is not None:
+            return backend
+    return None
+
+
+class QaicPlatform(Platform):
+    _enum = PlatformEnum.OOT
+    primary_attn_backend_cls = (
+        "vllm_qaic.attention.backends.qaic_attn.QAicTorchAttentionBackend"
+    )
+    if os.environ.get("VLLM_QAIC_ENABLE_TRITON_ATTN") == "1":
+        if _HAS_TRITON:
+            primary_attn_backend_cls = (
+                "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"
+            )
+        else:
+            logger.warning(
+                "VLLM_QAIC_ENABLE_TRITON_ATTN=1 but Triton is not installed; "
+                "keeping the QAIC attention backend %s",
+                primary_attn_backend_cls,
+            )
+    device_name: str = "qaic"
+    # Set device type to cpu if it's AOT.
+    # This is a workaround for online serving's AsyncEngineArgs.
+    # The device type will be restored to qaic during pre_register_and_update.
+    device_type: str = "cpu" if isinstance(qaic, PlaceholderModule) else "qaic"
+    device_control_env_var: str = "QAIC_VISIBLE_DEVICES"
+    supported_quantization: list[str] = QAIC_QUANTIZATION_LIST
+    triton_mm_encoder_attn_en: bool = triton_op_enabled("MM_ENCODER_ATTENTION")
+    # for eager mode
+    simple_compile_backend: str = "eager"
+
+    _torch_qaic_installed: bool = importlib.util.find_spec("torch_qaic") is not None
+    is_aot = not _torch_qaic_installed
+    dispatch_key: str = "PrivateUse1"
+    dist_backend: str = "qccl"
+    worker_cls_name = "QaicWorkerAoT" if is_aot else "QaicWorkerPyt"
+    worker_cls_pkg_root = "vllm_qaic.worker.worker"
+    worker_cls = worker_cls_pkg_root + "." + worker_cls_name
+    device_communicator_cls = "vllm_qaic.distributed.communicator.QAicCommunicator"
+
     @classmethod
     def get_punica_wrapper(cls) -> str:
         return "vllm.lora.punica_wrapper.punica_cpu.PunicaWrapperCPU"
@@ -24,6 +116,17 @@ class QaicPlatform(QaicPlatformBase):
         cls.device_type = "qaic"
         # Adapt the patch here.
         from vllm_qaic import patch  # noqa: F401
+
+        if not cls.is_aot:
+            import vllm_qaic.patch.patch_qaic_triton_import  # noqa
+
+        # gpt_oss_mxfp4 is only supported in eager mode: AOT compilation has
+        # no path to dequantize/run the packed MXFP4 MoE weights.
+        if (
+            not cls.is_aot
+            and QAIC_GPT_OSS_MXFP4_METHOD not in cls.supported_quantization
+        ):
+            cls.supported_quantization.append(QAIC_GPT_OSS_MXFP4_METHOD)
 
         if parser is not None:  # For synchronous vLLM engine
             # disable prefix caching as QAIC backend plugin does not support it
@@ -51,3 +154,778 @@ class QaicPlatform(QaicPlatformBase):
         from vllm_qaic.quantization.quant_config import (  # noqa: F401
             QaicQuantConfig,
         )
+
+        if not cls.is_aot:
+            from vllm_qaic.quantization.qaic_gpt_oss_mxfp4_config import (  # noqa: F401
+                QaicGptOssMxfp4Config,
+            )
+
+    @classmethod
+    def import_kernels(cls) -> None:
+        # QAIC has no CUDA kernels. Skip all kernel imports — importing vllm._C
+        # on non-CUDA hardware triggers a C++ bad_alloc/terminate (SIGABRT), which
+        # Python's except ImportError cannot catch. vllm._moe_C is also skipped
+        # since QAIC uses its own on-chip operators, not CUDA MoE kernels.
+        # TODO: import Hexagon/QAIC-specific .so here when available.
+        pass
+
+    @classmethod
+    def get_supported_quantization(cls):
+        return cls.supported_quantization
+
+    @property
+    def supported_dtypes(self) -> list[torch.dtype]:
+        # check_and_update_config restricts native BF16 to AI200 configurations.
+        return [torch.float16, torch.float32, torch.bfloat16]
+
+    @classmethod
+    def is_aot_inference(cls) -> bool:
+        return cls.is_aot
+
+    @classmethod
+    def get_device_name(cls, device_id: int = 0) -> str:
+        return "qaic"
+
+    @classmethod
+    def get_device_uuid(cls, device_id: int = 0) -> str:
+        # Not Implemented for aot
+        if isinstance(qaic, PlaceholderModule):
+            raise NotImplementedError
+        # for eager mode single SoC
+        return qaic.get_device_info(device_id).pci_bus_id
+
+    @classmethod
+    def get_device_total_memory(cls, device_id: int = 0) -> int:
+        # Not Implemented for aot
+        if isinstance(qaic, PlaceholderModule):
+            raise NotImplementedError
+        # for eager mode single SoC
+        return qaic.get_device_info(device_id).total_ddr_size_kb * 1024
+
+    @classmethod
+    def get_device_communicator_cls(cls) -> str:
+        return cls.device_communicator_cls
+
+    @classmethod
+    def is_async_output_supported(cls, enforce_eager: bool | None) -> bool:
+        return False
+
+    @classmethod
+    @functools.cache
+    def get_num_cores(cls, device_id: int = 0) -> int:
+        if not cls.is_aot:
+            return torch_qaic.qaic.get_device_info(device_id).num_cores
+        raise NotImplementedError(
+            "get_num_cores is only supported in eager (non-AOT) mode"
+        )
+
+    @classmethod
+    @functools.cache
+    def get_num_hvx_threads(cls, device_id: int = 0) -> int:
+        if not cls.is_aot:
+            return torch_qaic.qaic.get_device_info(device_id).per_core_hvx_thread_count
+        raise NotImplementedError(
+            "get_num_hvx_threads is only supported in eager (non-AOT) mode"
+        )
+
+    @classmethod
+    @functools.cache
+    def is_ai100_device(cls, device_id: int = 0) -> bool | None:
+        """Return True on AI100, False on non-AI100, None if undetectable.
+
+        AOT only: the AOT compiler rejects a BF16 custom-IO config on AI100, so
+        the QPC build needs to know the part. Eager mode has no QPC compile, so
+        this returns None there and the dtype is left untouched.
+
+        Native BF16 is an AI200-only contract; AI100 reports its PCI device
+        name as "Device a100". Queried through qaicrt because torch_qaic (and
+        get_device_info) is unavailable in AOT. None means the runtime could
+        not be queried — no SDK on the host, or the device is unavailable — so
+        callers should leave the dtype untouched rather than assume a part.
+        """
+        if not cls.is_aot:
+            return None
+        try:
+            try:
+                from qaicrt import QStatus, Util as qaic_util
+            except ImportError:
+                import platform as _platform
+                import sys
+
+                sys.path.append(f"/opt/qti-aic/dev/lib/{_platform.machine()}")
+                from qaicrt import QStatus, Util as qaic_util
+
+            status, dev_info = qaic_util().getDeviceInfo(device_id)
+            if status != QStatus.QS_SUCCESS:
+                logger.warning(
+                    "is_ai100_device: getDeviceInfo(%s) returned %s", device_id, status
+                )
+                return None
+            return "a100" in dev_info.pciInfo.devicename.lower()
+        except Exception as exc:
+            logger.warning(
+                "is_ai100_device: could not query device %s: %s", device_id, exc
+            )
+            return None
+
+    @classmethod
+    def num_compute_units(cls, device_id: int = 0) -> int:
+        # Under triton-cpu the kernel runs on host threads, so size the grid by
+        # the torch thread pool instead.
+        if _triton_backend() == "cpu":
+            return torch.get_num_threads()
+        return cls.get_num_cores(device_id)
+
+    @classmethod
+    def check_if_supports_dtype(cls, dtype: torch.dtype):
+        # Keep worker-side validation consistent with the plugin dtype contract.
+        if dtype not in [torch.bfloat16, torch.float16, torch.float32]:
+            raise ValueError(f"QAIC does not support model dtype {dtype}.")
+
+    @classmethod
+    def inference_mode(cls):
+        return torch.inference_mode()
+
+    @classmethod
+    def set_device(cls, device: torch.device):
+        # Not Implemented for aot
+        if isinstance(qaic, PlaceholderModule):
+            raise NotImplementedError
+        # for eager mode
+        qaic.set_device(device)
+
+    @classmethod
+    def get_current_memory_usage(
+        cls, device: torch.types.Device | None = None
+    ) -> float:
+        # for eager mode
+        free, total = qaic.mem_get_info(device)
+        return total - free
+
+    @classmethod
+    def get_worker_cls(cls):
+        return cls.worker_cls
+
+    @classmethod
+    def manual_seed_all(cls, seed: int) -> None:
+        pass
+
+    @classmethod
+    def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        additional_config = vllm_config.additional_config
+        device_config = vllm_config.device_config
+        if additional_config:
+            cfg = additional_config
+            if not isinstance(cfg, (dict, str)):
+                raise TypeError(
+                    f"additional_config must be a dict or JSON/Python literal string, "
+                    f"got {type(cfg).__name__!r}"
+                )
+            if isinstance(cfg, str):
+                try:
+                    cfg = json.loads(cfg)
+                except json.JSONDecodeError:
+                    try:
+                        cfg = ast.literal_eval(cfg)
+                    except (ValueError, SyntaxError) as e:
+                        raise ValueError(
+                            f"Failed to parse additional_config string "
+                            f"{additional_config!r}. "
+                            "Expected a valid JSON object or Python literal dict."
+                        ) from e
+                if not isinstance(cfg, dict):
+                    raise TypeError(
+                        f"additional_config must parse to a dict, "
+                        f"got {type(cfg).__name__!r}"
+                    )
+                vllm_config.additional_config = cfg
+
+        if cls.is_aot:
+            if vllm_config.model_config.enforce_eager:
+                logger.warning_once(
+                    "setting inference mode to Ahead-of-Time since "
+                    "torch_qaic is not installed"
+                )
+            vllm_config.model_config.enforce_eager = False
+            device_config.device = torch.device("cpu")
+        else:
+            # PyT mode: `enforce_eager=True` keeps pure eager execution,
+            # otherwise the model is run through torch.compile (see
+            # _configure_pyt_compilation below).
+            device_config.device = torch.device("qaic")
+            # set QAIC_VISIBLE_DEVICES from device_group
+            # if not already set
+            if (
+                os.environ.get(cls.device_control_env_var) is None
+                and "device_group" in additional_config
+            ):
+                os.environ[cls.device_control_env_var] = ",".join(
+                    str(d) for d in additional_config["device_group"]
+                )
+
+        # Shorthand used throughout this method
+        override_qaic_config = additional_config.get("override_qaic_config", {})
+        # Normalise types in override_qaic_config (e.g. strings from CLI parser)
+        # before any downstream code reads from it, mirroring what
+        # _get_qaic_compile_config previously did via its local _clean_config.
+        if override_qaic_config:
+            from vllm_qaic.utils.qaic_utils import _clean_config
+
+            cleaned = _clean_config(override_qaic_config, vllm_config)
+            override_qaic_config.update(cleaned)
+            if additional_config and "override_qaic_config" in additional_config:
+                additional_config["override_qaic_config"].update(cleaned)
+        else:
+            override_qaic_config = {}
+            additional_config["override_qaic_config"] = override_qaic_config
+        # a hack for online serving's Async EngineArgs
+        if vllm_config.device_config.device_type != cls.device_type:
+            vllm_config.device_config.device_type = cls.device_type
+
+        parallel_config = vllm_config.parallel_config
+        if parallel_config.worker_cls == "auto":
+            parallel_config.worker_cls = cls.get_worker_cls()
+
+        if parallel_config.world_size > 1:
+            parallel_config.distributed_executor_backend = "uni"
+            if not cls.is_aot:
+                # uni backend sets qualnet ip while mp backend sets localhost ip
+                parallel_config.distributed_executor_backend = "mp"
+
+        model_config = vllm_config.model_config
+        scheduler_config = vllm_config.scheduler_config
+        cache_config = vllm_config.cache_config
+
+        # Native BF16 is an AI200-only contract; never silently downcast it.
+        # if (
+        #     model_config.dtype == torch.bfloat16
+        #     and override_qaic_config.get("aic_hw_version") != "ai200"
+        # ):
+        #     raise ValueError(
+        #         "QAIC native bfloat16 requires "
+        #         "additional_config.override_qaic_config.aic_hw_version='ai200'. "
+        #         "BF16 must not be converted to float16 on AI100."
+        #     )
+
+        assert not (vllm_config.lora_config and vllm_config.speculative_config), (
+            "LORA with SPD is not yet supported for QAIC backend"
+        )
+        assert not (vllm_config.lora_config and model_config.is_multimodal_model), (
+            "LORA with Multi-modality is not yet supported for QAIC backend"
+        )
+        assert not (
+            vllm_config.speculative_config and model_config.is_multimodal_model
+        ), "SPD with Multi-modality is not yet supported for QAIC backend"
+
+        if (
+            cls.is_aot
+            and model_config.runner_type == "pooling"
+            and not model_config.is_multimodal_model
+        ):
+            # QAIC pooling QPCs are compiled with seq_len == max_model_len.
+            # Disable chunked prefill and pin prefill_seq_len to max_model_len via
+            # override_qaic_config (the single source of truth for prefill chunking).
+            scheduler_config.enable_chunked_prefill = False
+            if additional_config is None:
+                additional_config = vllm_config.additional_config = {}
+            additional_config.setdefault("override_qaic_config", {})
+            additional_config["override_qaic_config"]["prefill_seq_len"] = (
+                model_config.max_model_len
+            )
+
+        if not cls.is_aot:
+            # TODO: Re-enable JIT warmup once QAIC JIT support is fully onboarded.
+            vllm_config.kernel_config.enable_jit_warmup = False
+            assert vllm_config.kv_transfer_config is None, (
+                "QAIC eager mode does not support disaggregated serving"
+            )
+            if vllm_config.speculative_config:
+                raise ValueError(
+                    "Speculative decoding (SpD) is not supported in eager "
+                    "mode on QAIC. SpD requires AOT (non-eager) compilation."
+                )
+            if scheduler_config.async_scheduling:
+                logger.warning_once(
+                    "QAIC eager mode does not support async scheduling; "
+                    "Falling back to non-async scheduling."
+                )
+                scheduler_config.async_scheduling = False
+
+        cache_config = vllm_config.cache_config
+        if cache_config:
+            if not cls.is_aot:
+                cache_config.block_size = 16
+                # FIXME remove below hard-coding once PagedAttention is enabled
+                cache_config.enable_prefix_caching = False
+            else:
+                if cache_config.enable_prefix_caching:
+                    cache_config.enable_prefix_caching = False
+                    cache_config.mamba_block_size = (
+                        model_config.max_model_len
+                    )  # reset to "no-op" default
+                    cache_config.mamba_cache_mode = "none"  # reset to disabled
+                    logger.warning_once(
+                        "Prefix caching is not yet supported on v1 Engine. "
+                        "Will automatically disable it."
+                    )
+                cache_config.block_size = model_config.max_model_len  # ctx_len
+
+        if cls.is_aot:
+            if model_config.hf_config.model_type == "whisper":
+                # Whisper is an encoder-decoder model: vLLM disables chunked prefill
+                # and sets long_prefill_token_threshold to 0, so the formula above
+                # would give 0. Use max_source_positions (the encoder input length)
+                # as the budget instead, matching the pattern in qaic_whisper.py.
+                scheduler_config.max_num_batched_tokens = getattr(
+                    model_config.hf_config, "max_source_positions", 1500
+                )
+            else:
+                # Prefill chunk length comes solely from
+                # override_qaic_config["prefill_seq_len"]; when unset, default to
+                # min(128, max_model_len). The prior long_prefill_token_threshold
+                # input has been removed.
+                __prefill_seq_len = override_qaic_config.get("prefill_seq_len", 0)
+                if not __prefill_seq_len:
+                    __prefill_seq_len = min(128, model_config.max_model_len)
+                # Vision encoder disables chunked prefill itself; skip it here.
+                if not scheduler_config.enable_chunked_prefill and not (
+                    model_config.runner_type == "pooling"
+                    and "skip_vision" not in override_qaic_config
+                ):
+                    assert not model_config.is_multimodal_model, (
+                        "QAIC multimodal models require chunked prefill."
+                    )
+                if "override_qaic_config" not in additional_config:
+                    additional_config["override_qaic_config"] = {}
+                additional_config["override_qaic_config"].update(
+                    {"prefill_seq_len": __prefill_seq_len}
+                )
+                # max_num_batched_tokens.  QAIC's _prepare_qaic_inputs expands each
+                # decode request's token count from 1 → (1 + num_spec_tokens), but the
+                # scheduler counts decode requests as 1 token each when enforcing the
+                # budget.  Setting max_num_batched_tokens to this value simultaneously
+                # gives the scheduler the correct per-step budget AND sizes the buffers
+                # large enough to never overflow after decode expansion.
+                scheduler_config.max_num_batched_tokens = min(
+                    scheduler_config.max_num_seqs
+                    * (
+                        max(__prefill_seq_len)
+                        if isinstance(__prefill_seq_len, (list, tuple))
+                        else __prefill_seq_len
+                    ),
+                    scheduler_config.max_num_batched_tokens,
+                )
+                # Without chunked prefill a prompt is scheduled whole, so the
+                # budget must fit max_model_len; QAIC still chunks on device.
+                if not scheduler_config.enable_chunked_prefill:
+                    scheduler_config.max_num_batched_tokens = max(
+                        scheduler_config.max_num_batched_tokens,
+                        model_config.max_model_len,
+                    )
+            # Reset max_num_scheduled_tokens so that
+            # _set_max_num_scheduled_tokens() recalculates it from the
+            # (now-overridden) max_num_batched_tokens when __post_init__
+            # re-runs in the EngineCore subprocess (core.py:1038).
+            scheduler_config.max_num_scheduled_tokens = None
+
+        if cls.is_aot:
+            # libiomp5.so (Intel's OpenMP runtime) OMP barrier/blocktime tuning —
+            # only activate when the user has already preloaded it via LD_PRELOAD.
+            # Despite the library's name, this tuning benefits both Intel and AMD
+            # CPUs (KMP_TPAUSE is a documented no-op on non-Intel silicon; the other
+            # KMP_* vars measurably speed up CPU-bound speculative-decoding proposers
+            # on AMD EPYC as well).
+            # KMP_*_BARRIER_PATTERN=dist,dist is deliberately not set: under dist
+            # barriers, OpenMP teams forked from non-main threads (e.g. the host
+            # rejection sampler) busy-spin between regions and starve the
+            # engine threads (see docs/qaic for the measured SpD slowdown).
+            # Set VLLM_DISABLE_LD_PRELOAD_OPT=1 to skip this optimization.
+            ld_preload_str = os.getenv("LD_PRELOAD", "")
+            disable_opt = os.getenv("VLLM_DISABLE_LD_PRELOAD_OPT", "0") == "1"
+            if not disable_opt and "libiomp5.so" in ld_preload_str:
+                import platform
+
+                cpu_info = platform.processor() or "unknown"
+                print(f"Updating KMP_BLOCKTIME, KMP_TPAUSE for {cpu_info}")
+                os.environ["KMP_BLOCKTIME"] = "1"
+                os.environ["KMP_TPAUSE"] = "0"
+
+        from vllm.config import CompilationMode
+
+        compilation_config = vllm_config.compilation_config
+        if cls.is_aot:
+            # AoT executes pre-compiled QPCs, torch.compile is not applicable.
+            if compilation_config.mode != CompilationMode.NONE:
+                logger.warning_once(
+                    "vllm qaic platform doesn't support compilation mode = %s "
+                    "in AoT, disabling...",
+                    compilation_config.mode,
+                )
+                compilation_config.mode = CompilationMode.NONE
+        else:
+            cls._configure_pyt_compilation(vllm_config)
+
+        on_device_sampling_en = override_qaic_config.get("aic_include_sampler", False)
+        if isinstance(on_device_sampling_en, str):
+            on_device_sampling_en = on_device_sampling_en.lower() in [
+                "true",
+                "1",
+            ]
+
+        assert not (on_device_sampling_en and vllm_config.speculative_config), (
+            "SPD with On-device sampling is not yet supported for QAIC backend"
+        )
+
+        # Disaggregated prefill/decode is supported standalone for now
+        if vllm_config.kv_transfer_config:
+            assert not vllm_config.lora_config, (
+                "LORA with Disaggregated serving not yet supported for QAIC backend"
+            )
+            assert (
+                not vllm_config.speculative_config
+                or vllm_config.speculative_config.method
+                in ["ngram", "draft_model", "suffix"]
+            ), (
+                "Only ngram, suffix, and draft_model based SPD types are "
+                "supported with Disaggregated serving for QAIC backend"
+            )
+            assert not (
+                vllm_config.kv_transfer_config.kv_role != "kv_producer"
+                and vllm_config.cache_config.enable_prefix_caching
+            ), (
+                "Prefix caching with KV-role 'kv_consumer' or 'kv_both' not "
+                "yet supported for QAIC backend"
+            )
+            if (
+                on_device_sampling_en
+                and vllm_config.kv_transfer_config.kv_role == "kv_producer"
+            ):
+                logger.warning_once(
+                    "On-device sampling with Disaggregated serving is only "
+                    "supported in Decode cluster with no support for "
+                    "repetition penalty"
+                )
+
+            if vllm_config.kv_transfer_config.kv_role == "kv_producer":
+                stages = int(override_qaic_config.get("stages"))
+                assert not scheduler_config.async_scheduling or (
+                    stages is None
+                    or int(stages) <= 1
+                    or vllm_config.scheduler_config.max_num_seqs <= int(stages)
+                ), (
+                    f"max_num_seqs ({vllm_config.scheduler_config.max_num_seqs})"
+                    f" must be less than or equal to prefill_pipeline_parallel_size"
+                    f" ({stages}) when prefill streaming is enabled"
+                )
+
+        if not cls.is_aot and model_config.hf_config.model_type == "gemma4":
+            # Load the existing Gemma4 encoder memory guard in eager mode too.
+            import vllm_qaic.model_loader.qaic_custom_mm_processor  # noqa: F401
+
+        if cls.is_aot:
+            model_type = model_config.hf_config.model_type
+            if model_config.is_multimodal_model and model_type != "whisper":
+                cls._configure_multimodal_model(
+                    vllm_config, model_config, scheduler_config, model_type
+                )
+
+    @classmethod
+    def _configure_pyt_compilation(cls, vllm_config: VllmConfig) -> None:
+        """Configure torch.compile for PyT mode.
+
+        vLLM's default VLLM_COMPILE mode (piecewise VllmBackend) hijacks
+        inductor's `inner_compile`, bypassing the QAIC lowerings installed by
+        torch_qaic's patched `compile_fx`. Like the vLLM CPU platform, fall
+        back to DYNAMO_TRACE_ONCE so the full graph is handed to the
+        "inductor" backend, which torch_qaic routes according to
+        QAIC_INDUCTOR_LEVEL (must be exported before launch).
+        """
+        from vllm.config import CompilationMode, CUDAGraphMode
+
+        compilation_config = vllm_config.compilation_config
+        if compilation_config.mode == CompilationMode.VLLM_COMPILE:
+            logger.info_once(
+                "vllm qaic platform doesn't support compilation mode = %s, "
+                "using %s with backend=%s instead.",
+                compilation_config.mode,
+                CompilationMode.DYNAMO_TRACE_ONCE,
+                compilation_config.backend,
+            )
+            compilation_config.mode = CompilationMode.DYNAMO_TRACE_ONCE
+            compilation_config.ir_enable_torch_wrap = False
+
+        if (
+            vllm_config.lora_config is not None
+            and compilation_config.mode != CompilationMode.NONE
+        ):
+            logger.warning_once(
+                "torch.compile is not yet supported with LoRA on QAIC, "
+                "disabling and running in eager mode..."
+            )
+            compilation_config.mode = CompilationMode.NONE
+
+        # No static graph capture on QAIC.
+        compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+
+        if compilation_config.mode == CompilationMode.NONE:
+            return
+
+        # vLLM enables AOT compile caching by default on newer torch, but the
+        # torch_qaic backends don't produce serializable artifacts and
+        # QAIC_INDUCTOR_LEVEL is not part of vLLM's compile cache key.
+        os.environ.setdefault("VLLM_USE_AOT_COMPILE", "0")
+        # Disable torch async compiling which won't work with daemonic processes
+        os.environ.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "1")
+        # vLLM turns on combo kernels for all non-CPU platforms. Benchmarking
+        # them reads launcher.n_spills, which the Hexagon Triton backend
+        # doesn't report, so turn them off (as vLLM does for CPU).
+        inductor_config = compilation_config.inductor_compile_config
+        inductor_config["combo_kernels"] = False
+        inductor_config["benchmark_combo_kernel"] = False
+
+    @classmethod
+    def apply_config_platform_defaults(cls, vllm_config: VllmConfig) -> None:
+        if cls.is_aot:
+            return
+        # vLLM defaults custom_ops to "none" with the inductor backend, which
+        # would replace the QAIC kernels (traceable via torch_qaic fake impls)
+        # with their native torch implementations.
+        custom_ops = vllm_config.compilation_config.custom_ops
+        if all(s not in custom_ops for s in ("all", "none")):
+            custom_ops.append("all")
+
+    @classmethod
+    def get_compile_backend(cls) -> str:
+        # Default backend for model compilation (CompilationConfig.backend).
+        # simple_compile_backend stays "eager" for the standalone
+        # @torch.compile helpers which are compiled even in eager mode.
+        return cls.simple_compile_backend if cls.is_aot else "inductor"
+
+    @classmethod
+    def opaque_attention_op(cls) -> bool:
+        # QAIC attention keeps per-request KV state in python, hide it from
+        # dynamo behind vLLM's unified attention custom op when compiling.
+        if cls.is_aot:
+            return False
+        from vllm.config import CompilationMode, get_current_vllm_config_or_none
+
+        vllm_config = get_current_vllm_config_or_none()
+        return (
+            vllm_config is not None
+            and vllm_config.compilation_config.mode != CompilationMode.NONE
+        )
+
+    @classmethod
+    def is_pin_memory_available(cls) -> bool:
+        logger.warning("Pin memory is not supported on Qaic.")
+        return False
+
+    def __getattr__(self, key: str):
+        if key == "Event":
+            return True
+        device = getattr(torch, self.device_name, None)
+        if device is not None and hasattr(device, key):
+            return getattr(device, key)
+        else:
+            logger.warning(
+                "Current platform %s does not have '%s' attribute.",
+                self.device_name,
+                key,
+            )
+            return None
+
+    @classmethod
+    def get_attn_backend_cls(
+        cls,
+        selected_backend: AttentionBackendEnum,
+        attn_selector_config,
+        num_heads: int | None = None,
+    ) -> str:
+        # for eager mode
+        if attn_selector_config.use_mla:
+            raise NotImplementedError("QAic doesn't support MLA attention")
+        if attn_selector_config.use_sparse:
+            raise NotImplementedError("QAic doesn't support sparse attention")
+
+        return cls.primary_attn_backend_cls
+
+    @classmethod
+    def get_supported_vit_attn_backends(cls) -> list[AttentionBackendEnum]:
+        backends = [AttentionBackendEnum.TORCH_SDPA]
+        if _HAS_TRITON:
+            backends.append(AttentionBackendEnum.TRITON_ATTN)
+        return backends
+
+    @classmethod
+    def get_vit_attn_backend(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        backend: AttentionBackendEnum | None = None,
+    ) -> AttentionBackendEnum:
+        """Select the ViT (multimodal encoder) attention backend for QAIC.
+
+        ``QAicMMEncoderAttention.forward_oot`` dispatches to vLLM's Triton ViT
+        prefill kernel when ``VLLM_QAIC_TRITON_MM_ENCODER_ATTENTION=1``.
+        Reporting TRITON_ATTN here keeps the metadata consistent with the kernel
+        actually being invoked.
+        """
+        if backend is None and cls.triton_mm_encoder_attn_en:
+            logger.info_once(
+                "VLLM_QAIC_TRITON_MM_ENCODER_ATTENTION=1: using %s for vit attention",
+                AttentionBackendEnum.TRITON_ATTN,
+            )
+            return AttentionBackendEnum.TRITON_ATTN
+
+        return super().get_vit_attn_backend(head_size, dtype, backend=backend)
+
+    @classmethod
+    def _configure_multimodal_model(
+        cls,
+        vllm_config: VllmConfig,
+        model_config: ModelConfig,
+        scheduler_config,
+        model_type: str,
+    ) -> None:
+        additional_config = vllm_config.additional_config
+        override_qaic_config = (additional_config or {}).get(
+            "override_qaic_config"
+        ) or {}
+
+        # The QAIC backend historically disabled the multimodal processor
+        # cache (not yet built), which forces input processing onto the
+        # request-id/modality/index UUID path (see V1 input_processor).
+        # That request-scoped UUID is NOT content-stable across instances,
+        # so the EC connector (encoder vs prefill/decode) would derive
+        # mismatched mm_hashes. When EC transfer is enabled we therefore
+        # keep the processor cache on (>0) so input processing uses the
+        # content-hash path (MultiModalHasher), giving a stable mm_hash that
+        # matches across the encoder and PD instances.
+        ec_transfer_config = vllm_config.ec_transfer_config
+        ec_enabled = (
+            ec_transfer_config is not None
+            and ec_transfer_config.is_ec_transfer_instance
+        )
+        if model_config.multimodal_config is not None and not ec_enabled:
+            model_config.multimodal_config.mm_processor_cache_gb = 0
+
+        is_vision_encoder = (
+            model_config.runner_type == "pooling"
+            and "skip_vision" not in override_qaic_config
+        )
+        if is_vision_encoder and cls.is_aot:
+            if scheduler_config.async_scheduling:
+                logger.warning(
+                    "QAIC currently does not support async scheduling "
+                    "for vision encoder; Falling back to non-async scheduling."
+                )
+                scheduler_config.async_scheduling = False
+            scheduler_config.enable_chunked_prefill = False
+            scheduler_config.long_prefill_token_threshold = model_config.max_model_len
+            # max_num_batched_tokens was set earlier as
+            # max_num_seqs * long_prefill_token_threshold (with the original
+            # seq_len value). Now that we have raised long_prefill_token_threshold
+            # to max_model_len for the encoder runner, recompute the budget so
+            # the scheduler allows prompts longer than the original seq_len.
+            scheduler_config.max_num_batched_tokens = (
+                scheduler_config.max_num_seqs
+                * scheduler_config.long_prefill_token_threshold
+            )
+            # Pin encoder cache/compute budget so all vision frames encode in one step.
+            scheduler_config.max_num_encoder_input_tokens = (
+                scheduler_config.max_num_batched_tokens
+            )
+            scheduler_config.encoder_cache_size = (
+                scheduler_config.max_num_batched_tokens
+            )
+            if "override_qaic_config" not in vllm_config.additional_config:
+                additional_config["override_qaic_config"] = {}
+            additional_config["override_qaic_config"].update(
+                {"prefill_seq_len": model_config.max_model_len}
+            )
+
+        if model_type in DYNAMIC_RESOLUTION_MODELS:
+            if vllm_config.additional_config is None:
+                vllm_config.additional_config = {}
+            override_qaic_config = vllm_config.additional_config.setdefault(
+                "override_qaic_config", {}
+            )
+            cls._apply_dynamic_resolution_config(model_config, override_qaic_config)
+
+        from vllm_qaic.model_loader.qaic_custom_mm_processor import (
+            register_qaic_custom_mm_processor,
+        )
+
+        register_qaic_custom_mm_processor(model_type)
+
+    @classmethod
+    def _apply_dynamic_resolution_config(
+        cls, model_config: ModelConfig, override_qaic_config: dict
+    ) -> None:
+        """
+        Configure multimodal processor settings for models with
+        dynamic resolution support. Some vision-language models
+        (e.g. Qwen2.5VL, Qwen3VL) can handle dynamic image resolutions by
+        mapping them to a variable number of visual tokens. On QAIC hardware,
+        the vision encoder requires fixed-size inputs, so this method registers
+        a set of supported ``(height, width)``
+        resolutions that a custom processor will snap images to at runtime.
+
+        Currently only Qwen2.5VL and Qwen3VL are supported.
+        """
+        # For Qwen2.5VL/Qwen3VL on QAIC, min_pixels and max_pixels must match
+        # QEfficient values.
+        vision_config = getattr(model_config.hf_config, "vision_config", None)
+        patch_size = getattr(
+            vision_config,
+            "patch_size",
+            getattr(vision_config, "spatial_patch_size", 14),
+        )
+        merge_size = getattr(vision_config, "spatial_merge_size", 2)
+        factor = patch_size * merge_size
+        default_min_pixels = 4 * factor * factor
+        default_max_pixels = 16384 * factor * factor
+
+        multimodal_config = model_config.get_multimodal_config()
+        if multimodal_config.mm_processor_kwargs is None:
+            multimodal_config.mm_processor_kwargs = {}
+        mm_kwargs = multimodal_config.mm_processor_kwargs
+        override_mm_kwargs = override_qaic_config.get("mm_processor_kwargs") or {}
+        mm_kwargs["max_pixels"] = override_mm_kwargs.get(
+            "max_pixels", mm_kwargs.get("max_pixels", default_max_pixels)
+        )
+        mm_kwargs["min_pixels"] = override_mm_kwargs.get(
+            "min_pixels", mm_kwargs.get("min_pixels", default_min_pixels)
+        )
+        override_qaic_config["mm_processor_kwargs"] = {
+            k: mm_kwargs[k] for k in ("max_pixels", "min_pixels")
+        }
+
+        if "height" in override_qaic_config or "width" in override_qaic_config:
+            assert (
+                "height" in override_qaic_config and "width" in override_qaic_config
+            ), (
+                "Both 'height' and 'width' must be provided together in "
+                "'override_qaic_config'."
+            )
+            heights = override_qaic_config["height"]
+            widths = override_qaic_config["width"]
+            if isinstance(heights, int):
+                heights = [heights]
+            if isinstance(widths, int):
+                widths = [widths]
+            assert len(heights) == len(widths), (
+                f"The number of provided heights ({len(heights)}) and "
+                f"widths ({len(widths)}) must match."
+            )
+            override_qaic_config["height"] = heights
+            override_qaic_config["width"] = widths
+
+            from vllm_qaic.model_loader.qaic_custom_mm_processor import (
+                _qwenvl_processor_config,
+            )
+
+            _qwenvl_processor_config[id(model_config)] = {
+                "height": heights,
+                "width": widths,
+            }

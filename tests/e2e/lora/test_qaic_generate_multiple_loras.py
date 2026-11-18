@@ -6,6 +6,7 @@ import pytest
 from huggingface_hub import snapshot_download
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
 
+from vllm.exceptions import VLLMValidationError
 from vllm.lora.request import LoRARequest
 
 MODEL_NAME = "PY007/TinyLlama-1.1B-Chat-v0.3"
@@ -21,14 +22,26 @@ LORA_NAME = "jashing/tinyllama-colorist-lora"
 
 
 @pytest.mark.qaic_test_config(
-    model_name=MODEL_NAME,
-    seq_len=32,
-    ctx_len=64,
-    decode_bsz=4,
-    dtype="mxfp6",
-    kv_dtype="mxint8",
-    num_device_groups=1,
-    device_group_size=1,
+    {
+        "aot": dict(
+            model_name=MODEL_NAME,
+            seq_len=32,
+            ctx_len=64,
+            decode_bsz=4,
+            dtype="mxfp6",
+            kv_dtype="mxint8",
+            num_device_groups=1,
+            device_group_size=1,
+        ),
+        "eager": dict(
+            model_name=MODEL_NAME,
+            seq_len=32,
+            ctx_len=64,
+            decode_bsz=4,
+            num_device_groups=1,
+            device_group_size=1,
+        ),
+    }
 )
 def test_multiple_lora_requests(device_group, make_runner):
     lora_modules = [
@@ -60,8 +73,8 @@ def test_multiple_lora_requests(device_group, make_runner):
         outputs = llm.generate(PROMPTS, lora_request=lora_request)
         assert len(PROMPTS) == len(outputs)
 
-        # Exception raised, if the size of params does not match the size of prompts
-        with pytest.raises(ValueError):
+        # Exception raised, if the size of lora_request does not match prompts
+        with pytest.raises(VLLMValidationError):
             outputs = llm.generate(PROMPTS, lora_request=lora_request[:1])
 
         # Single LoRARequest should be applied to every prompt

@@ -48,7 +48,6 @@ export QAIC_VISIBLE_DEVICES=0
         max_num_seqs=4,
         max_model_len=2048,
         gpu_memory_utilization=0.9,
-        enforce_eager=True,
         async_scheduling=False,
     )
 

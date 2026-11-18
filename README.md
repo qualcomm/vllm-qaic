@@ -6,9 +6,9 @@ vLLM Qualcomm Cloud AI (QAIC) Plugin
 | <a href="https://www.qualcomm.com/artificial-intelligence/data-center"><b>Qualcomm Data Center AI</b></a> | <a href="https://qualcomm.github.io/vllm-qaic/"><b>Documentation</b></a> | <a href="https://quic.github.io/cloud-ai-sdk-pages/"><b>User Guide</b></a> | <a href="docs/installation.md"><b>Installation Guide</b></a> |
 </p>
 
-> **This branch is under active development — plugin rebase to vLLM v0.23.0.**
+> **This branch is under active development — plugin rebase to vLLM v0.30.0.**
 > This is not a stable release.
-> For production use, please switch to the `main` branch or `release/v0.15.0`.
+> For production use, please switch to `release/v0.15.0` or `release/v1.23.4` or `release/v0.30.0` branch.
 
 ---
 
@@ -40,8 +40,8 @@ For more information about Qualcomm Cloud AI 100, check out:
 - **OS**: Linux (Ubuntu 22.04+ recommended)
 - **Software**:
     - Python 3.12
-    - [Qualcomm Cloud AI SDK](https://www.qualcomm.com/artificial-intelligence/data-center/cloud-ai-100-ultra#Software) >= 1.22.0
-    - vLLM v0.23.0
+    - [Qualcomm Cloud AI SDK](https://www.qualcomm.com/artificial-intelligence/data-center/cloud-ai-100-ultra#Software) >= 1.23.0
+    - vLLM v0.30.0
 
 ## Getting Started
 
@@ -50,13 +50,12 @@ Please use the following recommended versions to get started quickly:
 | vllm-qaic version | vLLM version | Apps SDK version | Branch | Release type | Doc |
 |---|---|---|---|---|---|
 | v0.15.0.dev0 | v0.15.0 | >= 1.22.0 | [main](https://github.com/qualcomm/vllm-qaic/tree/main)  [v0.15.0](https://github.com/qualcomm/vllm-qaic/tree/release/v0.15.0)| Pre-release | See [QuickStart](#installation) and [Installation Guide](docs/installation.md) for more details |
-| v0.23.0.dev0 | v0.23.0 | >= 1.22.0 | [v0.23.0](https://github.com/qualcomm/vllm-qaic/tree/v0.23.0) | Active Development | SpD and LoRaX not yet ported |
+| v0.23.0.dev0 | v0.23.0 | >= 1.23.0 | [v0.23.0](https://github.com/qualcomm/vllm-qaic/tree/release/v0.23.0) | Release branch | |
+| v0.23.0.dev1 | v0.23.0 | >= 1.23.4 | [v0.23.0](https://github.com/qualcomm/vllm-qaic/tree/release/r1.23.4) | Release branch | |
 
 ## Branches
 
 **[main](https://github.com/qualcomm/vllm-qaic/tree/main)**: Primary development branch. Contributors should develop submissions based on this branch, and submit pull requests to this branch.
-
-**[v0.23.0](https://github.com/qualcomm/vllm-qaic/tree/v0.23.0)**: Active development branch for plugin rebase to vLLM v0.23.0. Some features (SpD, LoRaX) are not yet ported. For production use, stay on `main`.
 
 ### Installation
 
@@ -101,7 +100,6 @@ llm = LLM(
     enable_prefix_caching=False,
     gpu_memory_utilization=0.9,
     tensor_parallel_size=1,
-    enforce_eager=True,
     async_scheduling=False,
 )
 

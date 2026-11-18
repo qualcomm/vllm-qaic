@@ -15,7 +15,7 @@ from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import copy, deepcopy
 from dataclasses import dataclass
 from queue import Queue
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, NamedTuple, cast
 
 import numpy as np
 import torch
@@ -65,6 +65,7 @@ except ImportError:
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+    from vllm_qaic.model_loader.qaic import QaicCausalLM
     from vllm.v1.spec_decode.qaic_draft_model import QaicDraftModelProposer
 
     from vllm_qaic.spec_decode.dflash_draft_model import QaicDFlashProposer
@@ -263,6 +264,7 @@ class QaicAsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         # 3. Book keep to update input batch
         (
             num_nans_in_logits,
+            _num_nans_device,
             logprobs_lists,
             valid_sampled_token_ids,
             prompt_logprobs_dict,
@@ -340,6 +342,9 @@ class QaicModelRunnerPyt(GPUModelRunner):
         device: torch.device,
     ):
         self.profiling_iter = 0
+        # Finished requests not yet reported to the attention backends; steps
+        # without scheduled tokens skip _prepare_inputs, so carry them over.
+        self._pending_finished_req_ids: set[str] = set()
         with _torch_qaic_wrapper():
             super().__init__(vllm_config, device)
 
@@ -354,12 +359,17 @@ class QaicModelRunnerPyt(GPUModelRunner):
     ):
         # Propagate updated req_ids (post-reorder) to attention metadata
         # builders that support per-sequence KV caching.
+        # Finished req_ids tell the attention impls which per-request KV
+        # caches can be freed; a request missing from this batch (e.g. still
+        # in flight in another PP micro-batch) must keep its cache.
         req_ids = list(self.input_batch.req_ids)
+        finished_req_ids = self._pending_finished_req_ids
+        self._pending_finished_req_ids = set()
         for kv_cache_gid_groups in self.attn_groups:
             for attn_group in kv_cache_gid_groups:
                 builder = attn_group.get_metadata_builder()
                 if hasattr(builder, "update_req_ids"):
-                    builder.update_req_ids(req_ids)
+                    builder.update_req_ids(req_ids, finished_req_ids)
         return super()._prepare_inputs(scheduler_output, num_scheduled_tokens)
 
     def _sync_device(self) -> None:
@@ -372,11 +382,12 @@ class QaicModelRunnerPyt(GPUModelRunner):
         scheduler_output: SchedulerOutput,
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
+        self._pending_finished_req_ids |= scheduler_output.finished_req_ids
         with optional_qaic_profiling(
             profiling_dir=envs.VLLM_TORCH_QAIC_PROFILER_DIR,
             profiling_wrapper=qaic_profile.ProfileForwardWithSampling,
             model=self.model,  # type: ignore[has-type]
-            n_samples=10,
+            n_samples=1,
             skip_first_n=0,
             device_name=str(self.device),
             profiling_iter=self.profiling_iter,
@@ -428,6 +439,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
 
         self.use_cuda_graph = False
         self.cascade_attn_enabled = False
+        self.pin_memory = False
 
         assert device == torch.device("cpu")
         # --- Disaggregated serving flags (must precede drafter gating) ---
@@ -1016,6 +1028,16 @@ class QaicModelRunnerAoT(GPUModelRunner):
         num_decodes,
         spec_decode_metadata=None,
     ):
+        # Decode a raw BF16 storage view only when the QPC logits binding is BF16.
+        qaic_model = cast("QaicCausalLM", self.model)
+        if hidden_states_decode is not None:
+            hidden_states_decode = qaic_model.to_host_array(
+                "logits", hidden_states_decode
+            )
+        if hidden_states_prefill is not None:
+            hidden_states_prefill = qaic_model.to_host_array(
+                "logits", hidden_states_prefill
+            )
         if (
             hidden_states_decode is not None
             and self.max_decode_tokens > 1
@@ -1553,6 +1575,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
 
         (
             num_nans_in_logits,
+            _num_nans_device,
             logprobs_lists,
             valid_sampled_token_ids,
             prompt_logprobs_dict,
@@ -2109,13 +2132,16 @@ def _torch_cuda_wrapper():
             pass
 
     cuda_event = torch.Event
+    cuda_cuda_event = torch.cuda.Event
     cuda_stream = torch.cuda.Stream
     try:
         torch.Event = _EventPlaceholder
+        torch.cuda.Event = _EventPlaceholder
         torch.cuda.Stream = _StreamPlaceholder
         yield
     finally:
         torch.Event = cuda_event
+        torch.cuda.Event = cuda_cuda_event
         torch.cuda.Stream = cuda_stream
 
 

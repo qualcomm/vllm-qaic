@@ -8,6 +8,7 @@
 - [Pick your mode](#pick-your-mode)
 - [PYT mode install](#pyt-mode-install)
 - [AOT mode install](#aot-mode-install)
+- [AOT using triton-cpu kernels (Optional for Speculative Decoding)](#aot-using-triton-cpu-kernels-optional-for-speculative-decoding)
 - [Verifying the install](#verifying-the-install)
 - [Environment variable reference](#environment-variable-reference)
 - [Troubleshooting](#troubleshooting)
@@ -29,10 +30,10 @@
 | | AOT (Ahead-of-Time) | PYT (Eager / PyTorch) |
 |---|---|---|
 | Inference engine | QEfficient + QAIC compiler | `torch_qaic` |
-| torch version | `2.7.0+cpu` | `2.13.0+cpu` |
+| torch version | `2.13.0+cpu` | `2.13.0+cpu` |
 | `torch_qaic` required | No — must **not** be present | Yes |
 | Wheel tag | `*aot*` | `*pyt*` |
-| Python support | 3.10 / 3.11 / 3.12 | 3.10 / 3.11 / 3.12 |
+| Python support | 3.11 / 3.12 | 3.11 / 3.12 / 3.13 |
 
 ---
 
@@ -43,12 +44,12 @@ PYT also needs the `torch_qaic` wheel, which the Apps SDK installs separately un
 
 ```bash
 ls /opt/qti-aic/integrations/torch_qaic/
-# expect: py310  py311  py312
+# expect: py311  py312  py313
 ```
 
 If your version is missing, re-run the Apps SDK installer with `--install-torch-qaic`.
 
-**1. Create and activate a clean environment** (3.10, 3.11 or 3.12):
+**1. Create and activate a clean environment** (3.11, 3.12 or 3.13):
 
 ```bash
 conda create -y -n vllm-qaic-pyt python=3.12
@@ -62,14 +63,14 @@ source ~/venvs/vllm-qaic-pyt/bin/activate
 **2. Run the installer:**
 
 ```bash
-/opt/qti-aic/integrations/vllm-qaic/scripts/install.sh pyt
+/opt/qti-aic/integrations/vllm_qaic/scripts/install.sh pyt
 ```
 
 ---
 
 ## AOT mode install
 
-**1. Create and activate a clean environment** — Python 3.10, 3.11 or 3.12:
+**1. Create and activate a clean environment** — Python 3.11 or 3.12, **not 3.13**:
 
 ```bash
 conda create -y -n vllm-qaic-aot python=3.12
@@ -79,10 +80,10 @@ conda activate vllm-qaic-aot
 **2. Run the installer:**
 
 ```bash
-/opt/qti-aic/integrations/vllm-qaic/scripts/install.sh aot
+/opt/qti-aic/integrations/vllm_qaic/scripts/install.sh aot
 ```
 
-This installs QEfficient (which brings `torch 2.7.0+cpu`), re-pins torch to the exact AOT
+This installs QEfficient (which brings `torch 2.13.0+cpu`), re-pins torch to the exact AOT
 version, installs vllm, then the `py3-none-any` AOT wheel.
 
 > [!NOTE]
@@ -90,6 +91,27 @@ version, installs vllm, then the `py3-none-any` AOT wheel.
 > `TRANSFORMERS_VERSION_AOT=5.5.4 ./install.sh aot`.
 
 ---
+
+## AOT using triton-cpu kernels (Optional for Speculative Decoding)
+
+Speculative Decoding can use triton based rejection sample if it is enabled by installing triton-cpu
+Triton kernels can run on CPU. It is **opt-in** via `TRITON_CPU=1`, because it is a large C++
+build (5–10 GB, tens of minutes).
+
+> [!IMPORTANT]
+> **Set `TRITON_CPU_SRC` to a path with enough free space.**
+
+```bash
+conda activate vllm-qaic-aot   # Python 3.11 or 3.12
+
+export TRITON_CPU=1
+export TRITON_CPU_SRC=/path/with/enough/space/triton-cpu   # >= 10 GB free, writable by you
+
+/opt/qti-aic/integrations/vllm_qaic/scripts/install.sh aot
+```
+
+When running SpD tests afterwards, set `TRITON_CPU_BACKEND=1`.
+
 ---
 
 ## Verifying the install
@@ -130,8 +152,19 @@ python -c "import torch_qaic; print('torch_qaic OK')"
 **AOT only:**
 
 ```bash
-python -c "import torch; print(torch.__version__)"        # expect 2.7.0+cpu
+python -c "import torch; print(torch.__version__)"        # expect 2.13.0+cpu
 pip show torch-qaic                                       # must NOT be installed
+```
+
+**triton-cpu, if installed:** (Optional)
+
+```bash
+python -c "
+import os; os.environ['TRITON_CPU_BACKEND'] = '1'
+from triton.backends import backends
+print([k for k, v in backends.items() if v.driver and v.driver.is_active()])
+"
+# expect 'cpu' in the list
 ```
 
 ---
@@ -142,9 +175,13 @@ All of these are read by `install.sh` / `utility.sh`; set them before invoking t
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `VLLM_QAIC_SDK_PATH` | `/opt/qti-aic/integrations/vllm-qaic` | Where to find the wheels. Override to install from a staged or custom SDK copy. |
+| `VLLM_QAIC_SDK_PATH` | `/opt/qti-aic/integrations/vllm_qaic` | Where to find the wheels. Override to install from a staged or custom SDK copy. |
 | `VLLM_QAIC_INSTALL_SOURCE` | *(auto)* | Set to `wheel` to force wheel mode. Normally auto-detected from the absence of `setup.py`. |
 | `TORCH_QAIC_BASE_PATH` | `/opt/qti-aic/integrations/torch_qaic` | PYT only — where the `torch_qaic` wheels live. |
+| `TRITON_CPU` | `0` | AOT only — set to `1` to build and install the triton-cpu backend. |
+| `TRITON_CPU_SRC` | `${SCRIPT_DIR}/../.build/triton-cpu` | **Set this explicitly.** Clone + build location; needs >= 10 GB. The default lands under `/opt` when run from the SDK. |
+| `TRITON_CPU_COMPILE_MAX_JOBS` | `4` | Parallel build jobs for the triton-cpu C++ build. |
+| `TRITON_CPU_SKIP_DISK_CHECK` | `0` | Set to `1` to skip the 10 GB pre-flight check. |
 | `TRANSFORMERS_VERSION_AOT` | *(unset)* | Pin `transformers` after the QEfficient step. |
 | `TRANSFORMERS_VERSION_PYT` | *(unset)* | Pin `transformers` after the `torch_qaic` step. |
 | `VLLM_BUILD_RUST` | `0` | Build vllm's experimental Rust OpenAI frontend from source. Requires `cargo` on `PATH`. |
@@ -168,8 +205,14 @@ missing from the SDK, or `install.sh` is not in a `scripts/` subdirectory. The i
 `${SCRIPT_DIR}/../requirements/`.
 
 **`zsh: no matches found: .../py312/vllm_qaic-*pyt*.whl`** — no PYT wheel for your Python
-version. Check `ls /opt/qti-aic/integrations/vllm-qaic/` for the available `py3XX/`
+version. Check `ls /opt/qti-aic/integrations/vllm_qaic/` for the available `py3XX/`
 directories and use a matching interpreter.
+
+**AOT install fails building `sentencepiece==0.2.0`** — you are on Python 3.13. AOT does not
+support 3.13; rebuild your environment on 3.11 or 3.12.
+
+**triton-cpu build fails with `Disk quota exceeded` or `No space left on device`** — point
+`TRITON_CPU_SRC` at a filesystem with space and no per-user quota, then re-run.
 
 **`import torch_qaic` prints `QAIC_WARNING: Pre-init checks for QID: 0 failed`** — a device
 state warning on a shared host where another process holds NSPs, not an install problem. The
