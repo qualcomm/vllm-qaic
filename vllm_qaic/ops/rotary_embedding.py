@@ -11,6 +11,9 @@ from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.model_executor.layers.rotary_embedding.llama3_rope import (
     Llama3RotaryEmbedding,
 )
+from vllm.model_executor.layers.rotary_embedding.yarn_scaling_rope import (
+    YaRNScalingRotaryEmbedding,
+)
 from vllm_qaic.logger import init_logger
 
 logger = init_logger(__name__)
@@ -27,11 +30,9 @@ class QAicApplyRotaryEmb(ApplyRotaryEmb):
     dtypes or non-contiguous inputs the custom op falls back to a CPU-side
     rotary_embedding decomposition.
 
-    the staticmethod ensures that any calls to the static method of ApplyRotaryEmb
-    are patched to QAicApplyRotaryEmb
-
-    the forward_oot ensures that the regular forward calls on ApplyRotaryEmb
-    instances are dispatched to the OOT implementation
+    ``forward_static`` provides the shared QAIC rotation implementation used by
+    the registered rotary subclasses. ``forward_oot`` routes regular forward
+    calls on registered ApplyRotaryEmb instances to that implementation.
 
     The op rotates each pair of channels of ``x`` by the angle encoded in
     ``cos``/``sin``. With ``d = x.shape[-1] // 2``, Neox style pairs channel ``i``
@@ -68,12 +69,15 @@ class QAicApplyRotaryEmb(ApplyRotaryEmb):
         Returns:
             Output tensor of shape same as input x
         """
+        origin_dtype = x.dtype
         if enable_fp32_compute:
             x = x.to(torch.float32)
             cos = cos.to(torch.float32)
             sin = sin.to(torch.float32)
         out = torch.ops.qaic.rotary_embedding(x, cos, sin, is_neox_style)
 
+        if enable_fp32_compute:
+            out = out.to(origin_dtype)
         return out
 
     def forward_oot(self, x, cos, sin, is_neox_style=True, enable_fp32_compute=False):
@@ -241,4 +245,41 @@ class QAicLlama3RotaryEmbedding(Llama3RotaryEmbedding):
         )
 
 
-ApplyRotaryEmb.forward_static = staticmethod(QAicApplyRotaryEmb.forward_static)
+class QAicYaRNScalingRotaryEmbedding(YaRNScalingRotaryEmbedding):
+    """Keep upstream YaRN cache scaling and apply rotation with the QAIC op.
+
+    CustomOp overrides use concrete class names, so the RotaryEmbedding
+    registration does not cover YaRNScalingRotaryEmbedding. Override the static
+    entry point as well so inherited forward_native uses the QAIC rotation.
+    """
+
+    @staticmethod
+    def forward_static(
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        head_size: int,
+        rotary_dim: int,
+        cos_sin_cache: torch.Tensor,
+        is_neox_style: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        return QAicRotaryEmbedding.forward_static(
+            positions, query, key, head_size, rotary_dim, cos_sin_cache, is_neox_style
+        )
+
+    def forward_oot(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        cos_sin_cache = self._match_cos_sin_cache_dtype(query)
+        return self.forward_static(
+            positions,
+            query,
+            key,
+            self.head_size,
+            self.rotary_dim,
+            cos_sin_cache,
+            self.is_neox_style,
+        )

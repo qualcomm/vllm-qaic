@@ -3,17 +3,27 @@
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 # ------------------------------------------------------------------
 
-"""QAIC routing dtype overrides for the OAI Triton GPT-OSS experts."""
+"""QAIC activation and routing dtypes for the OAI Triton GPT-OSS experts."""
 
 import torch
 import triton
 
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.experts.gpt_oss_triton_kernels_moe import (
     OAITritonExperts,
+    _remap_topk_to_local_kernel,
     pack_bitmatrix,
     use_legacy_triton_kernels,
 )
-from triton_kernels.matmul_ogs import GatherIndx, RoutingData, ScatterIndx
+from triton_kernels.matmul_ogs import (
+    FnSpecs,
+    FusedActivation,
+    GatherIndx,
+    RoutingData,
+    ScatterIndx,
+    matmul_ogs,
+)
+from triton_kernels.swiglu import swiglu_fn
 from triton_kernels.tensor import BIT, Bitmatrix, wrap_torch_tensor
 
 # vLLM's pinned v3.5.1 package predates SparseMatrix and ragged metadata.
@@ -115,7 +125,7 @@ def make_routing_data_qaic(
 
 
 class QaicOAITritonExperts(OAITritonExperts):
-    """OAI Triton experts using QAIC-compatible routing tensor dtypes."""
+    """Reuse OAI Triton kernels with QAIC activation and routing dtypes."""
 
     def _make_routing_data(
         self,
@@ -128,4 +138,99 @@ class QaicOAITritonExperts(OAITritonExperts):
             topk_weights,
             num_local_experts,
             self.moe_config.in_dtype,
+        )
+
+    def apply(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1,
+        w2,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+        expert_tokens_meta,
+        apply_router_weight_on_input: bool,
+    ) -> None:
+        """Launch upstream matmul kernels without the wrapper's BF16 restriction.
+
+        The gate/up matmul fuses SwiGLU, and the down matmul applies routing
+        weights and scatter reduction. Reuse the upstream workspace and kernels
+        while retaining the model's activation dtype and int32 routing storage.
+        """
+        assert activation == MoEActivation.SWIGLUOAI
+        assert hidden_states.dtype in (torch.float16, torch.bfloat16, torch.float32)
+        quant_config = self.quant_config
+        assert quant_config is not None
+        assert (
+            quant_config.w1_bias is None or quant_config.w1_bias.dtype == torch.float32
+        )
+        assert (
+            quant_config.w2_bias is None or quant_config.w2_bias.dtype == torch.float32
+        )
+        assert hidden_states.shape[-1] == w1.shape[-2]
+        assert w2.shape[-1] == w1.shape[1]
+
+        if expert_map is not None:
+            # Upstream's remapping wrapper allocates int64 output. The same
+            # kernel can store the local expert IDs in QAIC-supported int32.
+            local_ids = torch.empty_like(topk_ids, dtype=torch.int32)
+            n = topk_ids.numel()
+            _remap_topk_to_local_kernel[(triton.cdiv(n, 1024),)](
+                topk_ids, expert_map, local_ids, n, BLOCK=1024
+            )
+            topk_ids = local_ids
+
+        local_num_experts, m, n, k, topk = self.moe_problem_size(
+            hidden_states, w1, w2, topk_ids
+        )
+        routing_data, gather_indx, scatter_indx = self._make_routing_data(
+            topk_ids, topk_weights, local_num_experts
+        )
+
+        intermediate_size = m * topk * (n // 2)
+        intermediate = workspace2.view(-1)[:intermediate_size].view(1, m * topk, n // 2)
+        output_view = output.view(1, m, k)
+        alpha = quant_config.gemm1_alpha
+        limit = quant_config.gemm1_clamp_limit
+        activation_args = (
+            1.702 if alpha is None else alpha,
+            7.0 if limit is None else limit,
+        )
+        if use_legacy_triton_kernels:
+            fused_activation = FusedActivation(
+                FnSpecs("swiglu", swiglu_fn, ("alpha", "limit")), activation_args, 2
+            )
+        else:
+            fused_activation = FusedActivation(
+                FnSpecs("swiglu", swiglu_fn, ("alpha", "limit"), reduction_n=2),
+                activation_args,
+            )
+
+        # Match OAITritonExperts: apply router weights after the down matmul.
+        matmul_ogs(
+            hidden_states,
+            w1,
+            quant_config.w1_bias,
+            routing_data,
+            gather_indx=gather_indx,
+            precision_config=quant_config.w1_precision,
+            fused_activation=fused_activation,
+            y=intermediate,
+        )
+        matmul_ogs(
+            intermediate.view(m * topk, n // 2),
+            w2,
+            quant_config.w2_bias,
+            routing_data,
+            scatter_indx=scatter_indx,
+            precision_config=quant_config.w2_precision,
+            gammas=routing_data.gate_scal,
+            y=output_view,
         )
