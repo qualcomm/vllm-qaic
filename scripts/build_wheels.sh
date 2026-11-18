@@ -19,6 +19,11 @@
 #                              [--base-image <image:tag>]
 #                              [--rust-image <image:tag>]
 #                              [--wheel-name <name.whl>] [--dry-run]
+#
+# Environment:
+#   BUILD_NOFILE_LIMIT   Open-file limit for every BuildKit RUN step, passed
+#                        as `docker buildx build --ulimit nofile=<n>:<n>`.
+#                        Default 1048576. Set to 0 to use BuildKit's default.
 
 set -euo pipefail
 
@@ -59,6 +64,14 @@ aot|pyt|both   Wheel(s) to build (default: both).
                apply to two wheels). Default: uv build's own name,
                vllm_qaic-<version>-<py>-<abi>-<platform>.whl.
 --dry-run      Print the docker buildx commands without running them.
+
+Environment:
+BUILD_NOFILE_LIMIT  Open-file limit for every BuildKit RUN step (default:
+                    1048576; set to 0 to use BuildKit's default). BuildKit's
+                    default soft limit is 1024, and on many-core hosts
+                    `uv venv --seed` fails with "No file descriptors
+                    available (os error 24)" while bytecode-compiling the
+                    Python standard library.
 EOM
 }
 
@@ -75,6 +88,7 @@ BASE_IMAGE=""
 RUST_IMAGE=""
 WHEEL_NAME=""
 DRY_RUN="OFF"
+BUILD_NOFILE_LIMIT="${BUILD_NOFILE_LIMIT:-1048576}"
 
 if [[ $# -gt 0 && "$1" != --* ]]; then
     BUILD_TARGET="$1"
@@ -154,6 +168,11 @@ if [[ -n "${WHEEL_NAME}" ]]; then
     fi
 fi
 
+if [[ ! "${BUILD_NOFILE_LIMIT}" =~ ^(0|[1-9][0-9]*)$ ]]; then
+    echo "ERROR: BUILD_NOFILE_LIMIT must be a non-negative integer (got '${BUILD_NOFILE_LIMIT}')" >&2
+    exit 1
+fi
+
 PYVER_TAG="py${PYTHON_VERSION//./}"
 
 run_echo() {
@@ -174,6 +193,11 @@ echo "BASE_IMAGE     : ${BASE_IMAGE:-<Dockerfile default>}"
 echo "RUST_IMAGE     : ${RUST_IMAGE:-<Dockerfile default>}"
 echo "WHEEL_NAME     : ${WHEEL_NAME:-<uv build default>}"
 echo "OUT_DIR        : ${OUT_DIR}"
+if [ "${BUILD_NOFILE_LIMIT}" == "0" ]; then
+    echo "NOFILE_LIMIT   : <BuildKit default>"
+else
+    echo "NOFILE_LIMIT   : ${BUILD_NOFILE_LIMIT}"
+fi
 echo "================================================================"
 
 BASE_IMAGE_ARGS=()
@@ -194,6 +218,13 @@ if [ -n "${WHEEL_NAME}" ]; then
     WHEEL_NAME_ARGS=(--build-arg "WHEEL_NAME=${WHEEL_NAME}")
 fi
 
+# BuildKit's default nofile limit (1024) is too low for `uv venv --seed` on
+# many-core hosts (os error 24).
+ULIMIT_ARGS=()
+if [ "${BUILD_NOFILE_LIMIT}" != "0" ]; then
+    ULIMIT_ARGS=(--ulimit "nofile=${BUILD_NOFILE_LIMIT}:${BUILD_NOFILE_LIMIT}")
+fi
+
 build_aot_wheel() {
     echo ""
     echo "=== Building AOT wheel (pure Python, py3-none-any — pyver-independent) ==="
@@ -203,6 +234,7 @@ build_aot_wheel() {
         "${BASE_IMAGE_ARGS[@]}" \
         "${RUST_IMAGE_ARGS[@]}" \
         "${WHEEL_NAME_ARGS[@]}" \
+        "${ULIMIT_ARGS[@]}" \
         --output "type=local,dest=${OUT_DIR}/aot" \
         "${REPO_ROOT}"
 }
@@ -216,6 +248,7 @@ build_pyt_wheel() {
         "${BASE_IMAGE_ARGS[@]}" \
         "${RUST_IMAGE_ARGS[@]}" \
         "${WHEEL_NAME_ARGS[@]}" \
+        "${ULIMIT_ARGS[@]}" \
         --output "type=local,dest=${OUT_DIR}/pyt/${PYVER_TAG}" \
         "${REPO_ROOT}"
 }
