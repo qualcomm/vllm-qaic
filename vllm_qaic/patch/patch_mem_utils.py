@@ -133,11 +133,20 @@ def _qaic_memory_profiling(
     result.non_torch_increase = diff_from_create.non_torch_memory
     result.profile_time = diff_profile.timestamp
 
-    non_torch_memory = result.non_torch_increase
-    peak_activation_memory = result.torch_peak_increase
-    result.non_kv_cache_memory = (
-        non_torch_memory + peak_activation_memory + result.weights_memory
+    # Same formula as upstream vLLM. On QAIC the allocator does not report
+    # reserved memory (always 0), so weights show up as "non-torch" memory;
+    # the old `non_torch + peak + weights` sum therefore counted them twice.
+    # total_consumed comes from mem_get_info and already covers persistent
+    # allocations; only the transient peak headroom is added on top.
+    result.total_consumed = (
+        result.before_create.free_memory - result.after_profile.free_memory
     )
+    # torch_qaic does not implement peak tracking yet (max_memory_allocated is
+    # None, allocated_bytes.all.peak stays 0), so this is currently 0.
+    result.transient_peak_headroom = max(
+        0, result.after_profile.torch_peak - result.after_profile.torch_allocated
+    )
+    result.non_kv_cache_memory = result.total_consumed + result.transient_peak_headroom
 
 
 MemorySnapshot.__post_init__ = _qaic_post_init
