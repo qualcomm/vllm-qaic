@@ -7,9 +7,9 @@
 
 """
 This patch is required for enabling Triton with the QAIC backend.
-It imports vLLM's Triton utilities and re-enables ``HAS_TRITON`` without
-importing the optional ``triton_kernels`` package. GPT-OSS enables and imports
-``triton_kernels`` explicitly through ``enable_qaic_triton_kernels``.
+It imports vLLM's Triton utilities and re-enables ``HAS_TRITON``. It also
+imports the optional ``triton_kernels`` package during QAIC startup and reports
+its actual availability, without waiting for GPT-OSS model construction.
 """
 
 # What's Patched and how it works:
@@ -35,62 +35,26 @@ from vllm.utils import import_utils
 
 QAIC_TRITON_BACKEND_KEY = "qcom_hexagon_backend"
 
-_TRITON_KERNEL_AVAILABILITY_CONSUMERS = (
-    "vllm.model_executor.layers.fused_moe.config",
-    "vllm.model_executor.layers.fused_moe.experts.gpt_oss_triton_kernels_moe",
-    "vllm.model_executor.layers.fused_moe.oracle.mxfp4",
-    "vllm.model_executor.layers.quantization.utils.mxfp4_utils",
-)
-
-
-def _qaic_has_triton_kernels_disabled() -> bool:
-    """Keep optional Triton kernels hidden during non-GPT-OSS startup."""
-    return False
-
 
 def _qaic_has_triton_kernels() -> bool:
-    """Load Triton kernels after the GPT-OSS path explicitly enables them.
+    """Import Triton kernels and report whether the package is available.
 
     ``import_triton_kernels`` also aliases vLLM's vendored package as the
     top-level ``triton_kernels`` module, which is how the GPT-OSS kernels
     import it.
     """
 
-    if "triton_kernels" not in sys.modules:
-        # Retry if vLLM cached an import attempt made before QAIC registered
-        # its Triton backend. import_triton_kernels() calls _has_module(), so
-        # both caches must be cleared before retrying.
-        import_utils._has_module.cache_clear()
-        import_utils.import_triton_kernels.cache_clear()
-        import_utils.import_triton_kernels()
+    import_utils.import_triton_kernels()
     return "triton_kernels" in sys.modules
 
 
-def _refresh_triton_kernel_availability_consumers() -> None:
-    """Refresh modules that imported ``has_triton_kernels`` by value.
-
-    Replacing ``import_utils.has_triton_kernels`` does not update modules that
-    previously used ``from vllm.utils.import_utils import has_triton_kernels``.
-    Only update consumers that have already been imported; importing them here
-    would defeat the lazy GPT-OSS setup and could introduce import cycles.
-    """
-    for module_name in _TRITON_KERNEL_AVAILABILITY_CONSUMERS:
-        if module := sys.modules.get(module_name):
-            # ModuleType cannot describe this known upstream module attribute.
-            module.has_triton_kernels = _qaic_has_triton_kernels  # type: ignore[attr-defined]
-
-
 def enable_qaic_triton_kernels() -> None:
-    """Enable and patch ``triton_kernels`` for the GPT-OSS execution path."""
-    import_utils.has_triton_kernels = _qaic_has_triton_kernels
+    """Require Triton kernels already initialized during QAIC startup."""
     if not _qaic_has_triton_kernels():
         raise ImportError(
             "QAIC GPT-OSS requires a compatible triton_kernels package, but "
             "the package could not be imported."
         )
-    _refresh_triton_kernel_availability_consumers()
-
-    import vllm_qaic.patch.patch_triton_kernels_opt_flags  # noqa: F401
 
 
 try:
@@ -103,6 +67,16 @@ try:
         triton_utils.triton = triton
         triton_utils.tl = tl
         triton_utils.tldevice = tldevice
-        import_utils.has_triton_kernels = _qaic_has_triton_kernels_disabled
 except Exception:
     triton_utils.HAS_TRITON = False
+
+# Import Triton kernels if the QAIC Triton backend is available.
+# Set opt flags if triton_kernels is present.
+if triton_utils.HAS_TRITON and QAIC_TRITON_BACKEND_KEY in triton.backends.backends:
+    # Retry imports cached before QAIC's Triton bindings were restored. Load
+    # the package now, independently of which model will be constructed.
+    import_utils._has_module.cache_clear()
+    import_utils.import_triton_kernels.cache_clear()
+    import_utils.has_triton_kernels = _qaic_has_triton_kernels
+    if _qaic_has_triton_kernels():
+        import vllm_qaic.patch.patch_triton_kernels_opt_flags  # noqa: F401

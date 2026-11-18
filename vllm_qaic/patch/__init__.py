@@ -103,9 +103,9 @@
 #    How:
 #       Re-import triton and check for QAIC Triton Backend in
 #       triton.backends.backends; if found, re-enable HAS_TRITON and rebind
-#       triton/tl/tldevice on vllm.triton_utils to the real modules. Keep
-#       triton_kernels disabled here; the GPT-OSS quantization path enables
-#       and imports it lazily when that model is selected.
+#       triton/tl/tldevice on vllm.triton_utils to the real modules. Import
+#       triton_kernels during QAIC startup and report its actual availability,
+#       independently of which model is selected.
 #    Note:
 #       Must run before any vllm module does
 #       `from vllm.triton_utils import ...`, since that binds triton/tl/
