@@ -239,5 +239,7 @@ def _qaic_apply(
     )
 
 
-OAITritonExperts._make_routing_data = _qaic_make_routing_data
-OAITritonExperts.apply = _qaic_apply
+OAITritonExperts._make_routing_data = (  # type: ignore[method-assign]
+    _qaic_make_routing_data
+)
+OAITritonExperts.apply = _qaic_apply  # type: ignore[method-assign]
