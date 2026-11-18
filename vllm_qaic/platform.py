@@ -33,6 +33,7 @@ except ImportError:
     qaic = PlaceholderModule("qaic")
 
 if TYPE_CHECKING:
+    from qaicrt import QDevInfo
     from vllm.config import ModelConfig, VllmConfig
 else:
     ModelConfig = None
@@ -286,70 +287,48 @@ class QaicPlatform(Platform):
 
     @classmethod
     @functools.cache
-    def _get_device_compute_info(cls, device_id: int = 0) -> tuple[int, int, int]:
-        """Return NSP cores, hardware threads/core, and HVX threads/core."""
-        import ctypes
-        import platform
+    def _get_qaic_device_info(cls, device_id: int = 0) -> "QDevInfo":
+        try:
+            import qaicrt
+        except ModuleNotFoundError as exc:
+            if exc.name != "qaicrt":
+                raise
 
-        class QAicAppsDeviceInfo(ctypes.Structure):
-            # Mirrors QAicAppsDeviceInfo in the installed QAicMLTypes.h.
-            _fields_ = [
-                ("deviceId", ctypes.c_int32),
-                ("deviceQID", ctypes.c_int32),
-                ("numCores", ctypes.c_uint32),
-                ("numThreads", ctypes.c_uint32),
-                ("totalDDRSizeKB", ctypes.c_uint64),
-                ("perCoreVTCMSizeByte", ctypes.c_uint64),
-                ("perCoreHVXThreadCount", ctypes.c_uint32),
-                ("hmxThreadId", ctypes.c_int64),
-                ("nspArchVersion", ctypes.c_int),
-                ("isSimDevice", ctypes.c_bool),
-                ("hasBF16", ctypes.c_bool),
-                ("pciBusID", ctypes.c_char * 13),
-                ("deviceName", ctypes.c_char * 128),
-            ]
+            import platform
+            import sys
 
-        library = ctypes.CDLL(f"/opt/qti-aic/dev/lib/{platform.machine()}/libQAicML.so")
-        get_device_count = library.qaicGetDeviceCount
-        get_device_count.argtypes = [ctypes.POINTER(ctypes.c_uint32)]
-        get_device_count.restype = ctypes.c_uint
-        count = ctypes.c_uint32()
-        status = get_device_count(ctypes.byref(count))
-        if status != 0:
-            raise RuntimeError(
-                f"QAIC device count query failed with SDK status {status}"
-            )
-        if not 0 <= device_id < count.value:
-            raise RuntimeError(
-                f"QAIC device index {device_id} is unavailable; "
-                f"{count.value} device(s) are visible"
-            )
+            qaic_sdk_path = f"/opt/qti-aic/dev/lib/{platform.machine()}"
+            if qaic_sdk_path not in sys.path:
+                sys.path.append(qaic_sdk_path)
+            import qaicrt
 
-        get_device_info = library.qaicAppsGetDeviceInfo
-        get_device_info.argtypes = [
-            ctypes.c_int32,
-            ctypes.POINTER(QAicAppsDeviceInfo),
-        ]
-        get_device_info.restype = ctypes.c_uint
-        info = QAicAppsDeviceInfo()
-        status = get_device_info(device_id, ctypes.byref(info))
-        if status != 0:
+        status, info = qaicrt.Util().getDeviceInfo(device_id)
+        if status != qaicrt.QStatus.QS_SUCCESS:
             raise RuntimeError(
-                f"QAIC device info query failed for device index {device_id}: "
-                f"SDK status {status}"
+                f"QAIC device info query failed for QID {device_id}: {status}"
             )
-        return info.numCores, info.numThreads, info.perCoreHVXThreadCount
+        return info
 
     @classmethod
     def get_num_cores(cls, device_id: int = 0) -> int:
-        num_cores, _, _ = cls._get_device_compute_info(device_id)
-        return num_cores
+        info = cls._get_qaic_device_info(device_id)
+        return info.devData.resourceInfo.nspTotal
 
     @classmethod
     def get_num_hvx_threads(cls, device_id: int = 0) -> int:
-        """Return the number of HVX threads per NSP core."""
-        _, _, num_hvx_threads = cls._get_device_compute_info(device_id)
-        return num_hvx_threads
+        """Return the number of HVX threads per NSP core based on the device.
+
+        AIC version: AI100 : 0x20000 has 4 HVX threads per NSP core
+        AIC version: AI200 : 0x30200 has 8 HVX threads per NSP core
+        """
+        info = cls._get_qaic_device_info(device_id)
+        if info.devData.hwVersion == 0x20000:
+            return 4
+        if info.devData.hwVersion == 0x30200:
+            return 8
+        raise RuntimeError(
+            f"Unsupported AIC version {info.devData.hwVersion} for QID {info.qid}"
+        )
 
     @classmethod
     def num_compute_units(cls, device_id: int = 0) -> int:
