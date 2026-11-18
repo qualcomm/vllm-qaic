@@ -677,6 +677,89 @@ class QaicConnector(KVConnectorBase_V1):
     # Scheduler-side methods
     # ==============================
 
+    def _truncate_last_prompt_token_for_prefill(self, request: "Request") -> None:
+        """P-side only: drop the last prompt token so the stored GDN/recurrent
+        state is h(N-1) — from before the last prompt token — rather than
+        h(N+1) which is contaminated by the first generated reasoning token T1.
+
+        Root cause of the missing-reasoning bug:
+          With max_completion_tokens=1 in the disagg proxy and
+          gdn_full_state_update=True in the prefill QPC config, the prefill
+          server processes the full N-token prompt AND generates one reasoning
+          token T1 (e.g. "\\n"). VLLM_QAIC_USE_FULL_KV_TRANSFER=1 then
+          transfers the ENTIRE KV buffer including GDN state h(N+1) which
+          equals recurrent_update(T1, recurrent_update(<think>, h(N-1))).
+
+          The decode server uses this h(N+1) to re-process <think> (position
+          N-1, because get_num_new_matched_tokens returns N-1). The mismatch
+          between the recurrent state position (after T1 at N) and the token
+          being re-processed (<think> at N-1) causes the model to output
+          </think> as its FIRST generated token, producing empty reasoning
+          and wrong answers in the API response.
+
+        Fix (mirrors NIXL _truncate_mamba_request_for_prefill for Mamba/SSM):
+          By dropping <think> from the prefill prompt, the prefill processes
+          only tokens 0..N-2, storing h(N-1) = state BEFORE <think>.
+          The decode re-processes <think> with correct h(N-1), derives h(N),
+          and generates T1 (first reasoning token) correctly.
+
+        Guarded by '_p_side_truncated' in kv_transfer_params to prevent
+        repeated truncation if the request is preempted and rescheduled.
+        """
+        # Ensure kv_transfer_params exists BEFORE aliasing to params.
+        # Using `params = request.kv_transfer_params or {}` creates a local
+        # dict when kv_transfer_params is None, so writes to params would not
+        # persist to the request and _p_side_dropped_token would be lost.
+        if request.kv_transfer_params is None:
+            request.kv_transfer_params = {}
+        params = request.kv_transfer_params  # same object, writes persist
+        if params.get("_p_side_truncated"):
+            return  # Already truncated; guard against re-truncation on reschedule.
+        if request.num_prompt_tokens <= 1:
+            return  # Safety: cannot truncate a single-token prompt.
+
+        # Save the dropped token BEFORE removing it so build_connector_meta can
+        # reconstruct the original N-token list for a consistent KV-store hash.
+        # Both P (N-1 tokens processed) and D (N tokens) must hash on the same
+        # full N-token prompt; saving the dropped token lets build_connector_meta
+        # append it back when computing the hash without re-running it through
+        # the model.
+        if request.prompt_token_ids is not None:
+            last_token = (
+                request.prompt_token_ids[-1]
+                if hasattr(request.prompt_token_ids, "__getitem__")
+                else list(request.prompt_token_ids)[-1]
+            )
+            params["_p_side_dropped_token"] = last_token
+
+        # Drop the last prompt token (typically <think> in Qwen3.5 thinking mode).
+        if request.prompt_token_ids is not None:
+            if hasattr(request.prompt_token_ids, "pop"):
+                request.prompt_token_ids.pop()
+            else:
+                request.prompt_token_ids = list(request.prompt_token_ids)[:-1]
+
+        # Keep _all_token_ids in sync if the field exists (vLLM internal).
+        if hasattr(request, "_all_token_ids") and request._all_token_ids is not None:
+            if hasattr(request._all_token_ids, "pop"):
+                request._all_token_ids.pop()
+            else:
+                request._all_token_ids = list(request._all_token_ids)[:-1]
+
+        request.num_prompt_tokens -= 1
+
+        # Mark truncated to prevent double-truncation after preemption.
+        # (params already points to request.kv_transfer_params, initialised above)
+        params["_p_side_truncated"] = True
+
+        logger.debug(
+            "P-side GDN truncation applied to request %s; "
+            "new num_prompt_tokens=%d (dropped last token to fix recurrent "
+            "state contamination in QAIC disaggregated serving)",
+            request.request_id,
+            request.num_prompt_tokens,
+        )
+
     def get_num_new_matched_tokens(
         self,
         request: "Request",
@@ -696,11 +779,20 @@ class QaicConnector(KVConnectorBase_V1):
             external KV cache beyond what is already computed.
         """
         # NOTE: We assume KV store will not have tokens required by producer.
-        # This will change is case of KV sharing
         if self.is_producer:
+            # P-side: truncate last prompt token BEFORE the prefill QPC runs.
+            # This ensures the stored GDN recurrent state is h(N-1) — from
+            # BEFORE the last prompt token (<think> in Qwen3.5 thinking mode)
+            # — not h(N+1) contaminated by T1 (first reasoning token).
+            # The dropped token is saved in kv_transfer_params so that
+            # build_connector_meta can reconstruct the original N-token list
+            # for a consistent KV-store hash with D-side.
+            # See _truncate_last_prompt_token_for_prefill for full explanation.
+            self._truncate_last_prompt_token_for_prefill(request)
             return 0, False
 
-        # NOTE: We assume KV store will always have tokens ready in case of consumer.
+        # D-side: N-1 tokens available from KV store (positions 0..N-2).
+        # Decode re-processes position N-1 (<think>) with correct h(N-1).
         return (request.num_prompt_tokens - 1) - num_computed_tokens, False
 
     def update_state_after_alloc(
@@ -751,14 +843,24 @@ class QaicConnector(KVConnectorBase_V1):
                     new_req.prompt_token_ids
                 )
                 block_id = new_req.block_ids[0][0]
+                # On P-side the prompt may have been truncated by one token
+                # (see _truncate_last_prompt_token_for_prefill).  The hash
+                # must use the ORIGINAL N-token list so it matches the hash
+                # computed on D-side (which always has N tokens).  The dropped
+                # token was saved in kv_transfer_params before truncation.
+                tracked_req = self._request_tracker[new_req.req_id].request
+                tracked_params = tracked_req.kv_transfer_params or {}
+                dropped_token = tracked_params.get("_p_side_dropped_token")
+                if dropped_token is not None:
+                    hash_token_ids = list(new_req.prompt_token_ids) + [dropped_token]
+                else:
+                    hash_token_ids = new_req.prompt_token_ids
                 meta.add_request(
-                    token_ids=new_req.prompt_token_ids,
+                    token_ids=hash_token_ids,
                     is_store=self.is_producer and not is_partial_prefill,
                     is_partial_prefill=is_partial_prefill,
                     block_id=block_id,
-                    handoff_id=self._handoff_id(
-                        self._request_tracker[new_req.req_id].request
-                    ),
+                    handoff_id=self._handoff_id(tracked_req),
                 )
                 self._request_tracker[new_req.req_id].block_id = block_id
                 total_need_load += 1
@@ -781,12 +883,21 @@ class QaicConnector(KVConnectorBase_V1):
                 )
                 cached_block_id = self._request_tracker[req_id].block_id
                 assert cached_block_id is not None
+                cached_tracked_req = self._request_tracker[req_id].request
+                cached_params = cached_tracked_req.kv_transfer_params or {}
+                cached_dropped_token = cached_params.get("_p_side_dropped_token")
+                if cached_dropped_token is not None:
+                    cached_hash_token_ids = list(
+                        cached_tracked_req.prompt_token_ids
+                    ) + [cached_dropped_token]
+                else:
+                    cached_hash_token_ids = cached_tracked_req.prompt_token_ids
                 meta.add_request(
-                    token_ids=self._request_tracker[req_id].request.prompt_token_ids,
+                    token_ids=cached_hash_token_ids,
                     is_store=self.is_producer and not is_partial_prefill,
                     is_partial_prefill=is_partial_prefill,
                     block_id=cached_block_id,
-                    handoff_id=self._handoff_id(self._request_tracker[req_id].request),
+                    handoff_id=self._handoff_id(cached_tracked_req),
                 )  # For QAIC one request is mapped to only one block_id
                 total_need_load += 1
 
