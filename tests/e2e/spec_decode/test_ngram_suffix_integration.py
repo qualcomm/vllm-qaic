@@ -7,8 +7,8 @@
 Run with visible subprocess output::
 
     .venv_eager/bin/python -m pytest -s -v \
-        tests/test_qaic/spec_decode/e2e/test_ngram_suffix_integration.py \
-        --test-device-group '[8,9]'
+        tests/e2e/spec_decode/test_ngram_suffix_integration.py \
+        --device-id 8,9
 """
 
 import json
@@ -20,7 +20,7 @@ import tempfile
 
 import pytest
 
-from vllm_qaic.platform_base import QaicPlatform
+from vllm_qaic.platform import QaicPlatform
 
 pytestmark = pytest.mark.skipif(
     QaicPlatform.is_aot,
@@ -55,24 +55,18 @@ def _run_generation(method: str, qid: int) -> list[list[int]]:
         return json.loads(output_path.read_text())
 
 
-@pytest.fixture(scope="session")
-def baseline_token_ids(device_group) -> list[list[int]]:
-    if len(device_group) < 2:
-        pytest.fail(
-            "Eager speculative-decoding E2E requires two ready single-QID devices: "
-            "baseline and speculative decoding."
-        )
-    return _run_generation("baseline", device_group[0])
-
-
 @pytest.mark.parametrize("method", ["ngram", "suffix"])
+@pytest.mark.qaic_test_config(num_device_groups=2, device_group_size=1)
 def test_eager_speculative_decoding_matches_greedy_baseline(
-    baseline_token_ids,
-    device_group,
+    device_groups,
     method: str,
 ):
-    qid = device_group[1]
-    speculative_token_ids = _run_generation(method, qid)
+    """Greedy SpD output must equal the non-speculative baseline.
+
+    Needs two free single-QID devices: one for the baseline, one for SpD.
+    """
+    baseline_token_ids = _run_generation("baseline", device_groups[0][0])
+    speculative_token_ids = _run_generation(method, device_groups[1][0])
 
     assert len(speculative_token_ids) == len(baseline_token_ids)
     for request_index, (speculative, baseline) in enumerate(

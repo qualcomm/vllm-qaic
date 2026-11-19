@@ -224,7 +224,7 @@ execution modes.
 ### Known Issues
 
 - Prefix caching is not yet supported (planned)
-- PYT mode does not support SpD, LoRA, or disaggregated serving
+- PYT mode supports only `ngram` and `suffix` SpD (host-side proposers); it does not support `draft_model`/`eagle`/`mtp`/`dflash` SpD, LoRA, or disaggregated serving
 - `best_of > 1` is not supported
 
 ### Contributors

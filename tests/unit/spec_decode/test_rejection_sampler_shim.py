@@ -7,7 +7,7 @@
 Run with ``pytest -s`` so QAIC runtime diagnostics remain visible::
 
     .venv_eager/bin/python -m pytest -s \
-        tests/test_qaic/spec_decode/test_rejection_sampler_shim.py -v
+        tests/unit/spec_decode/test_rejection_sampler_shim.py -v
 """
 
 import os
