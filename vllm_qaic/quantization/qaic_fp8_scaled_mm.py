@@ -102,7 +102,7 @@ class QaicFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         # Block/group-wise scales require a per-group epilogue; this kernel only
         # folds per-tensor / per-token / per-channel scales into the operands.
         # (Block-quant configs are routed to a separate kernel table anyway,
-        # but guard here so a mis-route fails with a clear reason.)
+        # but guard here so a wrong route fails with a clear reason.)
         if c.activation_quant_key.scale.group_shape.is_per_group():
             return False, "does not support per-group (block) activation scales"
         if c.weight_quant_key.scale.group_shape.is_per_group():

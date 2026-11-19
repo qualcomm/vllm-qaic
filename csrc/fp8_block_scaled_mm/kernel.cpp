@@ -8,12 +8,13 @@
 // Computes, with per-token x per-K-block activation scales and a 2-D
 // [block_n, block_k] weight scale grid:
 //
-//   out[m,n] = sum_kb As[m,kb] * Bs[n/bn,kb] * ( sum_{k in block kb} A[m,k]*B[n,k] )
+//   out[m,n] = sum_kb As[m,kb] * Bs[n/bn,kb] * ( sum_{k in block kb}
+//   A[m,k]*B[n,k] )
 //
 // The scale is constant along K *within* a block, so it hoists out of the inner
-// sum. Each block's raw fp8xfp8 dot product is therefore formed first and scaled
-// once, and the scaled block contributions are accumulated in IEEE fp32. That
-// makes the result exact with respect to the fp8 operands: none of the
+// sum. Each block's raw fp8xfp8 dot product is therefore formed first and
+// scaled once, and the scaled block contributions are accumulated in IEEE fp32.
+// That makes the result exact with respect to the fp8 operands: none of the
 // power-of-two folding / output-correction machinery the fp16-accumulator
 // PyTorch path needs (see vllm_qaic/quantization/qaic_fp8_block_scaled_mm.py)
 // appears here.
@@ -50,7 +51,7 @@
 #include <hexagon_protos.h>
 #include <hexagon_types.h>
 #include <stdint.h>
-#include <string.h> // must precede the memcpy redirect below
+#include <string.h>  // must precede the memcpy redirect below
 
 // The extension is built with -ffreestanding, which in clang implies
 // -fno-builtin: a plain memcpy is emitted as a real libc call and is never
@@ -87,17 +88,17 @@ static inline uint32_t align_up_u32(uint32_t x, uint32_t a) {
   return (x + a - 1) & ~(a - 1);
 }
 
-static inline uint8_t *align_up_ptr(uint8_t *p, uintptr_t a) {
+static inline uint8_t* align_up_ptr(uint8_t* p, uintptr_t a) {
   uintptr_t v = (uintptr_t)p;
   v = (v + a - 1) & ~(a - 1);
-  return (uint8_t *)v;
+  return (uint8_t*)v;
 }
 
 static QShimUDmaHandle qaic_linear_udma_submit(uint32_t threadId, AicJitPtr src,
                                                uint32_t size, AicJitPtr dst,
                                                uint32_t udmaDescAttrsOrder,
                                                bool requireHandle,
-                                               uint32_t *status) {
+                                               uint32_t* status) {
   AicJitUdmaDescCommonAttrs udmaDescAttrs = {};
   udmaDescAttrs.order = udmaDescAttrsOrder;
 
@@ -105,9 +106,9 @@ static QShimUDmaHandle qaic_linear_udma_submit(uint32_t threadId, AicJitPtr src,
                                requireHandle, status);
 }
 
-static inline uint32_t dma_copy_wait(uint32_t threadId, void *dst,
-                                    const void *src, uint32_t bytes,
-                                    uint32_t order = 0) {
+static inline uint32_t dma_copy_wait(uint32_t threadId, void* dst,
+                                     const void* src, uint32_t bytes,
+                                     uint32_t order = 0) {
   uint32_t status = JIT_DEV_STATUS_SUCCESS;
 
   QShimUDmaHandle h = qaic_linear_udma_submit(
@@ -121,17 +122,18 @@ static inline uint32_t dma_copy_wait(uint32_t threadId, void *dst,
   return qshimUDmaWait(h);
 }
 
-static inline QShimUDmaHandle dma_copy_submit(uint32_t threadId, void *dst,
-                                             const void *src, uint32_t bytes,
-                                             uint32_t *status,
-                                             uint32_t order = 0) {
+static inline QShimUDmaHandle dma_copy_submit(uint32_t threadId, void* dst,
+                                              const void* src, uint32_t bytes,
+                                              uint32_t* status,
+                                              uint32_t order = 0) {
   return qaic_linear_udma_submit(threadId, (AicJitPtr)src, bytes,
                                  (AicJitPtr)dst, order, true, status);
 }
 
-// Number of fp8 elements decoded per HVX vector, and the fp16 half-vector width.
-static const int kElemsPerFp8Vec = HVX_VectorSize;              // 128
-static const int kFp16PerVec = HVX_VectorSize / (int)sizeof(__fp16); // 64
+// Number of fp8 elements decoded per HVX vector, and the fp16 half-vector
+// width.
+static const int kElemsPerFp8Vec = HVX_VectorSize;                    // 128
+static const int kFp16PerVec = HVX_VectorSize / (int)sizeof(__fp16);  // 64
 
 // Horizontal sum of the 32 fp32 lanes of an IEEE-fp32 HVX vector.
 // Log-tree over rotates: 16, 8, 4, 2, 1 lanes.
@@ -148,7 +150,8 @@ static inline float hvx_hsum_sf(HVX_Vector v) {
 }
 
 // Decode one HVX vector (128 values) of fp8 to a pair of fp16 vectors.
-template <int DTYPE> static inline HVX_VectorWHF decode_fp8(HVX_Vector v) {
+template <int DTYPE>
+static inline HVX_VectorWHF decode_fp8(HVX_Vector v) {
   if constexpr (DTYPE == QAIC_FP8_DTYPE_E4M3FNUZ) {
     return qaic_convert_fp8_e4m3uz_to_hf(v);
   } else {
@@ -168,10 +171,8 @@ static inline HVX_Vector chunk_partials_sf(HVX_Vector a_lo, HVX_Vector a_hi,
                                            HVX_Vector b_lo, HVX_Vector b_hi) {
   HVX_VectorPair p_lo = Q6_Wqf32_vmpy_VhfVhf(a_lo, b_lo);
   HVX_VectorPair p_hi = Q6_Wqf32_vmpy_VhfVhf(a_hi, b_hi);
-  HVX_Vector s0 =
-      Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(p_lo), Q6_V_hi_W(p_lo));
-  HVX_Vector s1 =
-      Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(p_hi), Q6_V_hi_W(p_hi));
+  HVX_Vector s0 = Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(p_lo), Q6_V_hi_W(p_lo));
+  HVX_Vector s1 = Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(p_hi), Q6_V_hi_W(p_hi));
   return Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vqf32(s0, s1));
 }
 
@@ -181,14 +182,14 @@ static inline HVX_Vector chunk_partials_sf(HVX_Vector a_lo, HVX_Vector a_hi,
 // output column. The decode is exact (every fp8 value is representable in
 // fp16), so no range normalisation is needed.
 template <int DTYPE>
-static void decode_a(const uint8_t *a_fp8, __fp16 *a_hf, int totalChunks,
+static void decode_a(const uint8_t* a_fp8, __fp16* a_hf, int totalChunks,
                      uint32_t localThreadID, uint32_t threadsPerCore) {
   for (int c = (int)localThreadID; c < totalChunks; c += (int)threadsPerCore) {
-    HVX_Vector v = *(const HVX_Vector *)(a_fp8 + (size_t)c * kElemsPerFp8Vec);
+    HVX_Vector v = *(const HVX_Vector*)(a_fp8 + (size_t)c * kElemsPerFp8Vec);
     HVX_VectorWHF hf = decode_fp8<DTYPE>(v);
-    __fp16 *dst = a_hf + (size_t)c * kElemsPerFp8Vec;
-    *(HVX_Vector *)(dst) = Q6_V_lo_W(hf.rawVectorPair);
-    *(HVX_Vector *)(dst + kFp16PerVec) = Q6_V_hi_W(hf.rawVectorPair);
+    __fp16* dst = a_hf + (size_t)c * kElemsPerFp8Vec;
+    *(HVX_Vector*)(dst) = Q6_V_lo_W(hf.rawVectorPair);
+    *(HVX_Vector*)(dst + kFp16PerVec) = Q6_V_hi_W(hf.rawVectorPair);
   }
 }
 
@@ -196,8 +197,8 @@ static void decode_a(const uint8_t *a_fp8, __fp16 *a_hf, int totalChunks,
 // below. A taller tile amortizes the B decode over more m rows, but 4 is the
 // largest height whose accumulators still fit in registers alongside the fp8
 // decoder's temporaries and hoisted constants: at 8 and at 16 the accumulator
-// array is spilled and the multiply loop regains a vector store (verified in the
-// disassembly, `vmem(...) = v` inside the MAC loop, at both heights).
+// array is spilled and the multiply loop regains a vector store (verified in
+// the disassembly, `vmem(...) = v` inside the MAC loop, at both heights).
 //
 // This bound comes from register pressure, not from measured throughput --
 // nothing here has been timed on device, so the height is worth re-tuning once
@@ -213,13 +214,13 @@ static_assert(kMTile >= 1 && (kMTile & (kMTile - 1)) == 0,
 // codegen reason: acc[] is indexed by the innermost loop variable, and only a
 // compile-time trip count lets clang fully unroll that loop and keep the
 // accumulators in HVX registers. With a runtime bound the array is spilled to
-// the stack and every multiply-accumulate pays an extra vector load and store --
-// which is what the first version of this kernel did (a post-incremented
+// the stack and every multiply-accumulate pays an extra vector load and store
+// -- which is what the first version of this kernel did (a post-incremented
 // vmem load/store pair sat in the innermost hardware loop, visible in the
 // disassembly, alongside a ~2.3 KB stack frame).
 template <int DTYPE, int MTILE>
-static void compute_mtile(const uint8_t *b_row, const __fp16 *a_hf,
-                          const float *as, const float *bs_row, float *out_vtcm,
+static void compute_mtile(const uint8_t* b_row, const __fp16* a_hf,
+                          const float* as, const float* bs_row, float* out_vtcm,
                           int m0, int k, int kBlocks, int vecsPerBlock,
                           int outStride, int r) {
   HVX_Vector acc[MTILE];
@@ -232,17 +233,17 @@ static void compute_mtile(const uint8_t *b_row, const __fp16 *a_hf,
     for (int v = 0; v < vecsPerBlock; ++v) {
       const int chunk = kb * vecsPerBlock + v;
       HVX_Vector bvec =
-          *(const HVX_Vector *)(b_row + (size_t)chunk * kElemsPerFp8Vec);
+          *(const HVX_Vector*)(b_row + (size_t)chunk * kElemsPerFp8Vec);
       HVX_VectorWHF bhf = decode_fp8<DTYPE>(bvec);
       // Decoded once per (n, chunk) and reused across the whole m tile.
       const HVX_Vector b_lo = Q6_V_lo_W(bhf.rawVectorPair);
       const HVX_Vector b_hi = Q6_V_hi_W(bhf.rawVectorPair);
 
       for (int j = 0; j < MTILE; ++j) {
-        const __fp16 *arow =
+        const __fp16* arow =
             a_hf + (size_t)(m0 + j) * k + (size_t)chunk * kElemsPerFp8Vec;
-        HVX_Vector a_lo = *(const HVX_Vector *)(arow);
-        HVX_Vector a_hi = *(const HVX_Vector *)(arow + kFp16PerVec);
+        HVX_Vector a_lo = *(const HVX_Vector*)(arow);
+        HVX_Vector a_hi = *(const HVX_Vector*)(arow + kFp16PerVec);
 
         HVX_Vector partials = chunk_partials_sf(a_lo, a_hi, b_lo, b_hi);
         const float s = as[(size_t)(m0 + j) * kBlocks + kb] * sb;
@@ -263,26 +264,27 @@ static void compute_mtile(const uint8_t *b_row, const __fp16 *a_hf,
 // is not a multiple of kMTile still amortizes the B decode over several rows --
 // M=7 costs three passes over B (4+2+1), not seven.
 template <int DTYPE, int MTILE>
-static void compute_ladder(const uint8_t *b_row, const __fp16 *a_hf,
-                           const float *as, const float *bs_row, float *out_vtcm,
-                           int &m0, int m, int k, int kBlocks, int vecsPerBlock,
-                           int outStride, int r) {
+static void compute_ladder(const uint8_t* b_row, const __fp16* a_hf,
+                           const float* as, const float* bs_row,
+                           float* out_vtcm, int& m0, int m, int k, int kBlocks,
+                           int vecsPerBlock, int outStride, int r) {
   while (m - m0 >= MTILE) {
     compute_mtile<DTYPE, MTILE>(b_row, a_hf, as, bs_row, out_vtcm, m0, k,
                                 kBlocks, vecsPerBlock, outStride, r);
     m0 += MTILE;
   }
   if constexpr (MTILE > 1) {
-    compute_ladder<DTYPE, MTILE / 2>(b_row, a_hf, as, bs_row, out_vtcm, m0, m, k,
-                                     kBlocks, vecsPerBlock, outStride, r);
+    compute_ladder<DTYPE, MTILE / 2>(b_row, a_hf, as, bs_row, out_vtcm, m0, m,
+                                     k, kBlocks, vecsPerBlock, outStride, r);
   }
 }
 
 // Compute out_vtcm[m, r] for the current batch of B rows.
-// b_vtcm is [rows, K] fp8; a_hf is [M, K] fp16; out_vtcm is [M, outStride] fp32.
+// b_vtcm is [rows, K] fp8; a_hf is [M, K] fp16; out_vtcm is [M, outStride]
+// fp32.
 template <int DTYPE>
-static void compute_batch(const uint8_t *b_vtcm, const __fp16 *a_hf,
-                          const float *as, const float *bs, float *out_vtcm,
+static void compute_batch(const uint8_t* b_vtcm, const __fp16* a_hf,
+                          const float* as, const float* bs, float* out_vtcm,
                           int m, int k, int kBlocks, int blockK, int blockN,
                           int nStart, int rows, int outStride,
                           uint32_t localThreadID, uint32_t threadsPerCore) {
@@ -302,8 +304,8 @@ static void compute_batch(const uint8_t *b_vtcm, const __fp16 *a_hf,
       ++nsBlock;
       nsLimit += blockN;
     }
-    const float *bs_row = bs + (size_t)nsBlock * kBlocks;
-    const uint8_t *b_row = b_vtcm + (size_t)r * k;
+    const float* bs_row = bs + (size_t)nsBlock * kBlocks;
+    const uint8_t* b_row = b_vtcm + (size_t)r * k;
 
     int m0 = 0;
     compute_ladder<DTYPE, kMTile>(b_row, a_hf, as, bs_row, out_vtcm, m0, m, k,
@@ -314,11 +316,11 @@ static void compute_batch(const uint8_t *b_vtcm, const __fp16 *a_hf,
 // Per-core driver: owns a contiguous stripe of N, streams B row batches through
 // a VTCM ping/pong, and writes fp32 results back per batch.
 template <int DTYPE>
-static uint32_t
-run(const uint8_t *a_ddr, const uint8_t *b_ddr, const float *as_ddr,
-    const float *bs_ddr, float *out_ddr, int m, int n, int k, int blockN,
-    int blockK, uint32_t threadID, uint32_t localThreadID, uint32_t numThreads,
-    uint32_t numCores, uint32_t coreID) {
+static uint32_t run(const uint8_t* a_ddr, const uint8_t* b_ddr,
+                    const float* as_ddr, const float* bs_ddr, float* out_ddr,
+                    int m, int n, int k, int blockN, int blockK,
+                    uint32_t threadID, uint32_t localThreadID,
+                    uint32_t numThreads, uint32_t numCores, uint32_t coreID) {
   const int kBlocks = k / blockK;
   const int nBlocks = (n + blockN - 1) / blockN;
 
@@ -339,8 +341,8 @@ run(const uint8_t *a_ddr, const uint8_t *b_ddr, const float *as_ddr,
   // Resident VTCM: A as fp8 (staging, dead after the decode), A as fp16, and
   // both scale grids (which are tiny: [M, kBlocks] and [nBlocks, kBlocks]).
   const uint32_t aFp8Bytes = align_up_u32((uint32_t)m * (uint32_t)k, kAlign);
-  const uint32_t aHfBytes =
-      align_up_u32((uint32_t)m * (uint32_t)k * (uint32_t)sizeof(__fp16), kAlign);
+  const uint32_t aHfBytes = align_up_u32(
+      (uint32_t)m * (uint32_t)k * (uint32_t)sizeof(__fp16), kAlign);
   const uint32_t asBytes = align_up_u32(
       (uint32_t)m * (uint32_t)kBlocks * (uint32_t)sizeof(float), kAlign);
   const uint32_t bsBytes = align_up_u32(
@@ -353,7 +355,8 @@ run(const uint8_t *a_ddr, const uint8_t *b_ddr, const float *as_ddr,
     return ret;
   }
 
-  // Leave room for the initial alignment plus each buffer's own alignment slack.
+  // Leave room for the initial alignment plus each buffer's own alignment
+  // slack.
   const uint32_t fixedBytes =
       aFp8Bytes + aHfBytes + asBytes + bsBytes + statusBytes + 8 * kAlign;
   if ((uint64_t)fixedBytes >= (uint64_t)vtcmSize) {
@@ -374,43 +377,43 @@ run(const uint8_t *a_ddr, const uint8_t *b_ddr, const float *as_ddr,
     batchRows = nCoreRows;
   }
 
-  const uint32_t bSlotBytes = align_up_u32((uint32_t)batchRows * (uint32_t)k,
-                                           kAlign);
+  const uint32_t bSlotBytes =
+      align_up_u32((uint32_t)batchRows * (uint32_t)k, kAlign);
   const uint32_t outBytes = align_up_u32(
       (uint32_t)m * (uint32_t)batchRows * (uint32_t)sizeof(float), kAlign);
 
-  uint8_t *vtcmPtr = align_up_ptr(qshimGetBaseVtcmAddr(), kAlign);
+  uint8_t* vtcmPtr = align_up_ptr(qshimGetBaseVtcmAddr(), kAlign);
 
-  uint8_t *a_fp8_vtcm = vtcmPtr;
+  uint8_t* a_fp8_vtcm = vtcmPtr;
   vtcmPtr += aFp8Bytes;
-  __fp16 *a_hf_vtcm = (__fp16 *)vtcmPtr;
+  __fp16* a_hf_vtcm = (__fp16*)vtcmPtr;
   vtcmPtr += aHfBytes;
-  float *as_vtcm = (float *)vtcmPtr;
+  float* as_vtcm = (float*)vtcmPtr;
   vtcmPtr += asBytes;
-  float *bs_vtcm = (float *)vtcmPtr;
+  float* bs_vtcm = (float*)vtcmPtr;
   vtcmPtr += bsBytes;
-  uint8_t *b_vtcm[2];
+  uint8_t* b_vtcm[2];
   b_vtcm[0] = vtcmPtr;
   vtcmPtr += bSlotBytes;
   b_vtcm[1] = vtcmPtr;
   vtcmPtr += bSlotBytes;
-  float *out_vtcm = (float *)vtcmPtr;
+  float* out_vtcm = (float*)vtcmPtr;
   vtcmPtr += outBytes;
-  uint32_t *status_vtcm = (uint32_t *)align_up_ptr(vtcmPtr, kAlign);
+  uint32_t* status_vtcm = (uint32_t*)align_up_ptr(vtcmPtr, kAlign);
 
   // Load A and both scale grids, then decode A to fp16 once.
   if (localThreadID == 0) {
-    *status_vtcm = dma_copy_wait(threadID, a_fp8_vtcm, a_ddr,
-                                 (uint32_t)m * (uint32_t)k);
+    *status_vtcm =
+        dma_copy_wait(threadID, a_fp8_vtcm, a_ddr, (uint32_t)m * (uint32_t)k);
     if (*status_vtcm == JIT_DEV_STATUS_SUCCESS) {
-      *status_vtcm = dma_copy_wait(threadID, as_vtcm, as_ddr,
-                                   (uint32_t)m * (uint32_t)kBlocks *
-                                       (uint32_t)sizeof(float));
+      *status_vtcm = dma_copy_wait(
+          threadID, as_vtcm, as_ddr,
+          (uint32_t)m * (uint32_t)kBlocks * (uint32_t)sizeof(float));
     }
     if (*status_vtcm == JIT_DEV_STATUS_SUCCESS) {
-      *status_vtcm = dma_copy_wait(threadID, bs_vtcm, bs_ddr,
-                                   (uint32_t)nBlocks * (uint32_t)kBlocks *
-                                       (uint32_t)sizeof(float));
+      *status_vtcm = dma_copy_wait(
+          threadID, bs_vtcm, bs_ddr,
+          (uint32_t)nBlocks * (uint32_t)kBlocks * (uint32_t)sizeof(float));
     }
   }
   sync_hvx_threads(threadID, numThreads);
@@ -426,11 +429,10 @@ run(const uint8_t *a_ddr, const uint8_t *b_ddr, const float *as_ddr,
 
   // Prime slot 0.
   if (localThreadID == 0) {
-    const int rows0 =
-        (batchRows < nCoreRows) ? batchRows : nCoreRows;
-    *status_vtcm = dma_copy_wait(threadID, b_vtcm[0],
-                                 b_ddr + (size_t)nCoreStart * k,
-                                 (uint32_t)rows0 * (uint32_t)k);
+    const int rows0 = (batchRows < nCoreRows) ? batchRows : nCoreRows;
+    *status_vtcm =
+        dma_copy_wait(threadID, b_vtcm[0], b_ddr + (size_t)nCoreStart * k,
+                      (uint32_t)rows0 * (uint32_t)k);
   }
   sync_hvx_threads(threadID, numThreads);
   if (*status_vtcm != JIT_DEV_STATUS_SUCCESS) {
@@ -494,19 +496,34 @@ run(const uint8_t *a_ddr, const uint8_t *b_ddr, const float *as_ddr,
 }
 
 QAIC_KERNEL_API int32_t multinsp_multithreaded_fp8_block_scaled_mm(
-    const AicJitEntryPointConfig *entryConfig,
-    const AicJitPointerArray *pointerArray) {
-  const uint8_t *a_ddr = (const uint8_t *)pointerArray->pointers[0];
-  const uint8_t *b_ddr = (const uint8_t *)pointerArray->pointers[1];
-  const float *as_ddr = (const float *)pointerArray->pointers[2];
-  const float *bs_ddr = (const float *)pointerArray->pointers[3];
-  float *out_ddr = (float *)pointerArray->pointers[4];
-  const int m = *(const int32_t *)pointerArray->pointers[5];
-  const int n = *(const int32_t *)pointerArray->pointers[6];
-  const int k = *(const int32_t *)pointerArray->pointers[7];
-  const int blockN = *(const int32_t *)pointerArray->pointers[8];
-  const int blockK = *(const int32_t *)pointerArray->pointers[9];
-  const int dtypeId = *(const int32_t *)pointerArray->pointers[10];
+    const AicJitEntryPointConfig* entryConfig,
+    const AicJitPointerArray* pointerArray) {
+  // Validate the argument array before indexing into it: pointers[] is a
+  // flexible array member, so reading past numPointers is an out-of-bounds
+  // read. Slots 0..10 are read below (5 tensors + 6 int32 scalars).
+  constexpr uint32_t kNumPointers = 11;
+  if (entryConfig == nullptr || pointerArray == nullptr ||
+      pointerArray->numPointers < kNumPointers) {
+    return JIT_DEV_ERROR_INVALID_PARAMETER;
+  }
+  // The scalar slots are dereferenced, so they must not be null.
+  for (uint32_t i = 5; i < kNumPointers; ++i) {
+    if (pointerArray->pointers[i] == 0) {
+      return JIT_DEV_ERROR_INVALID_PARAMETER;
+    }
+  }
+
+  const uint8_t* a_ddr = (const uint8_t*)pointerArray->pointers[0];
+  const uint8_t* b_ddr = (const uint8_t*)pointerArray->pointers[1];
+  const float* as_ddr = (const float*)pointerArray->pointers[2];
+  const float* bs_ddr = (const float*)pointerArray->pointers[3];
+  float* out_ddr = (float*)pointerArray->pointers[4];
+  const int m = *(const int32_t*)pointerArray->pointers[5];
+  const int n = *(const int32_t*)pointerArray->pointers[6];
+  const int k = *(const int32_t*)pointerArray->pointers[7];
+  const int blockN = *(const int32_t*)pointerArray->pointers[8];
+  const int blockK = *(const int32_t*)pointerArray->pointers[9];
+  const int dtypeId = *(const int32_t*)pointerArray->pointers[10];
 
   if (m <= 0 || n <= 0 || k <= 0 || blockN <= 0 || blockK <= 0) {
     return JIT_DEV_ERROR_INVALID_PARAMETER;
@@ -523,13 +540,15 @@ QAIC_KERNEL_API int32_t multinsp_multithreaded_fp8_block_scaled_mm(
 
   if (dtypeId == QAIC_FP8_DTYPE_E4M3FNUZ) {
     return (int32_t)run<QAIC_FP8_DTYPE_E4M3FNUZ>(
-        a_ddr, b_ddr, as_ddr, bs_ddr, out_ddr, m, n, k, blockN, blockK, threadID,
-        localThreadID, numThreads, entryConfig->numCores, entryConfig->coreID);
+        a_ddr, b_ddr, as_ddr, bs_ddr, out_ddr, m, n, k, blockN, blockK,
+        threadID, localThreadID, numThreads, entryConfig->numCores,
+        entryConfig->coreID);
   }
   if (dtypeId == QAIC_FP8_DTYPE_E4M3FN) {
     return (int32_t)run<QAIC_FP8_DTYPE_E4M3FN>(
-        a_ddr, b_ddr, as_ddr, bs_ddr, out_ddr, m, n, k, blockN, blockK, threadID,
-        localThreadID, numThreads, entryConfig->numCores, entryConfig->coreID);
+        a_ddr, b_ddr, as_ddr, bs_ddr, out_ddr, m, n, k, blockN, blockK,
+        threadID, localThreadID, numThreads, entryConfig->numCores,
+        entryConfig->coreID);
   }
   return JIT_DEV_ERROR_INVALID_PARAMETER;
 }
