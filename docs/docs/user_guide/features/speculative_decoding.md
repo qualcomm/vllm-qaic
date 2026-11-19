@@ -13,8 +13,8 @@ Speculative decoding (SpD) accelerates token generation by using a fast proposer
 
 !!! note "Eager (PYT) mode"
     In PYT (eager) mode only `ngram` and `suffix` are supported; `draft_model`
-    and `dflash` require AOT mode. The eager rejection sampler uses local
-    Qualcomm-Triton kernels instead of Numba. `suffix` requires
+    and `dflash` require AOT mode. The eager rejection sampler runs upstream's
+    Triton kernels through the Qualcomm Triton backend instead of Numba. `suffix` requires
     `arctic-inference` (`pip install vllm-qaic[spd]`).
 
 ## Methods

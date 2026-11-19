@@ -25,6 +25,7 @@ def _metadata(
         seq_lens=torch.tensor(seq_lens, dtype=torch.int32),
         block_table=torch.empty(0, dtype=torch.int32),
         slot_mapping=torch.empty(0, dtype=torch.int32),
+        slot_mapping_i32=torch.empty(0, dtype=torch.int32),
         max_num_seqs=2,
         max_model_len=16,
         scheduler_metadata=None,
