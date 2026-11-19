@@ -11,6 +11,12 @@ Speculative decoding (SpD) accelerates token generation by using a fast proposer
     is needed for SpD or normal AOT serving. The dedicated parity environment must
     be installed with `TRITON_CPU=1` to run mandatory Tier A Numba/Triton tests.
 
+!!! note "Eager (PYT) mode"
+    In PYT (eager) mode only `ngram` and `suffix` are supported; `draft_model`
+    and `dflash` require AOT mode. The eager rejection sampler uses local
+    Qualcomm-Triton kernels instead of Numba. `suffix` requires
+    `arctic-inference` (`pip install vllm-qaic[spd]`).
+
 ## Methods
 
 Cloud AI supports four speculative decoding methods:
@@ -217,8 +223,8 @@ No additional hardware is required — both models run on the same device.
     | `draft_override_qaic_config.num_cores` | Compute for proposing (draft) | 4-6 for 1B models |
     | `max_num_seqs` | Batch size | Lower batch = higher acceptance rate |
 
-!!! tip "LD_PRELOAD libiomp5 for CPU-bound SpD proposers (AOT mode)"
-    For AOT mode, `ngram`/`suffix` SpD proposers run on host CPU and benefit
+!!! tip "LD_PRELOAD libiomp5 for CPU-bound SpD proposers (AOT and PYT modes)"
+    For AOT and PYT modes, `ngram`/`suffix` SpD proposers run on host CPU and benefit
     from Intel OpenMP (`libiomp5.so`) runtime tuning — on both Intel **and**
     AMD hosts. Benchmarks on an AMD EPYC host showed meaningful throughput
     gains for CPU-bound proposers like `ngram`, with the improvement growing

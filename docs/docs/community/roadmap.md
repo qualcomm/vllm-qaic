@@ -20,7 +20,7 @@ Last updated: June 2026.
 | `torch.compile` support | :clipboard: Planned | Wider model coverage via compiled graphs |
 | Triton kernel support | :clipboard: Planned | Execution of Triton Kernels |
 | Text-only LLM support | :white_check_mark: Ongoing | Extending beyond VLMs |
-| Speculative decoding | :clipboard: Planned | SpD support in eager mode |
+| Speculative decoding | :white_check_mark: Ongoing | `ngram`/`suffix` SpD in eager mode; draft-model SpD remains AOT-only |
 
 ## Status Legend
 

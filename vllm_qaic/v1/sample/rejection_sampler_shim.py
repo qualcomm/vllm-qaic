@@ -13,10 +13,11 @@ greedy rejection, and random rejection.  The legacy
 ``VLLM_QAIC_REJECTION_SAMPLER_IMPL=hybrid`` selector remains a compatibility
 alias for that default.  The former PyTorch fallback has been removed.
 
-vLLM's global Triton detection intentionally remains unchanged: it does not
-recognize the Qualcomm backend and therefore exposes placeholder objects in
-the upstream rejection-sampler module.  The QAIC installer patches only its
-module globals with real, locally defined Qualcomm-Triton kernels.
+``vllm_qaic.patch.patch_qaic_triton_import`` may mark Triton as available when
+the Qualcomm backend is present, but upstream's own ``@triton.jit`` kernels are
+still not launchable on QAIC tensors.  The installer therefore rebinds the
+kernel globals of the upstream rejection-sampler module to real, locally
+defined Qualcomm-Triton kernels.
 
 ``sample_recovered_tokens_kernel`` and ``generate_uniform_probs`` remain
 PyTorch helpers.  QAIC does not support the upstream fp64 uniform path, and

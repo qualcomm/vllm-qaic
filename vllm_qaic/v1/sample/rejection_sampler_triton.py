@@ -9,9 +9,9 @@
 """Qualcomm-Triton kernels used by the QAIC PYT rejection sampler.
 
 This module is intentionally imported only by the QAIC PYT installer.
-vLLM's global Triton detection does not recognize the Qualcomm backend, so the
-normal rejection-sampler module exposes placeholders instead of real JIT
-kernels.  Keeping these definitions local avoids changing that global behavior.
+Upstream's rejection-sampler kernels are not launchable on QAIC tensors, so
+the installer rebinds them to the local kernels defined here instead of relying
+on vLLM's global Triton detection.
 
 The recovered-token and uniform-probability helpers deliberately remain in the
 PyTorch shim.  The recovered-token Triton kernel is not production-safe on the
