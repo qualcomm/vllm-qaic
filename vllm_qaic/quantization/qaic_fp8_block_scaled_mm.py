@@ -227,7 +227,7 @@ class QaicFP8BlockScaledMMLinearKernel(Fp8BlockScaledMMLinearKernel):
                 f"({act_gs.row}, {act_gs.col})"
             )
         # vLLM derives the activation group size from the weight's K block, so
-        # these agree by construction; assert it rather than silently mis-scale.
+        # these agree by construction; assert it rather than silently scale wrongly.
         if act_gs.col != weight_gs.col:
             return False, (
                 f"activation group size {act_gs.col} must match the weight "
