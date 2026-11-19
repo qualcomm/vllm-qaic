@@ -725,6 +725,10 @@ class QaicWorkerPyt(QaicWorker):
 
 class QaicWorkerAoT(QaicWorker):
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
+        self.cache_config.num_cpu_blocks = num_cpu_blocks
+        # disable sliding window
+        self.cache_config.sliding_window = None
+
         assert num_cpu_blocks == 0
         if not self.cache_config.enable_prefix_caching:
             self.cache_config.num_gpu_blocks = num_gpu_blocks
@@ -733,11 +737,6 @@ class QaicWorkerAoT(QaicWorker):
             return
         else:
             raise NotImplementedError("prefix caching is not supported on QAIC in V1")
-
-        self.cache_config.num_cpu_blocks = num_cpu_blocks
-        # disable sliding window
-        self.cache_config.sliding_window = None
-        self.cache_config.num_gpu_blocks = num_gpu_blocks
 
     def init_device(self):
         """Initialize qaic device
