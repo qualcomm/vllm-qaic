@@ -30,13 +30,13 @@ pytestmark = pytest.mark.skipif(
 _RUNNER_SCRIPT = Path(__file__).with_name("_run_ngram_suffix_generation.py")
 
 
-def _run_generation(method: str, qid: int) -> list[list[int]]:
+def _run_generation(method: str, qid: int, mode: str = "greedy") -> list[list[int]]:
     env = os.environ.copy()
     env[QaicPlatform.device_control_env_var] = str(qid)
     with tempfile.TemporaryDirectory() as temp_dir:
         output_path = Path(temp_dir) / "token_ids.json"
         result = subprocess.run(
-            [sys.executable, str(_RUNNER_SCRIPT), method, str(output_path)],
+            [sys.executable, str(_RUNNER_SCRIPT), method, str(output_path), mode],
             capture_output=True,
             text=True,
             env=env,
@@ -78,3 +78,22 @@ def test_eager_speculative_decoding_matches_greedy_baseline(
             f"baseline={baseline}\n"
             f"speculative={speculative}"
         )
+
+
+@pytest.mark.parametrize("method", ["ngram", "suffix"])
+@pytest.mark.qaic_test_config(num_device_groups=1, device_group_size=1)
+def test_eager_speculative_decoding_random_sampling_runs(
+    device_groups,
+    method: str,
+):
+    """Temperature>0 SpD exercises the random-rejection and recovered kernels.
+
+    Sampled output cannot be compared token-for-token with a baseline, so this
+    checks that generation completes and returns well-formed token ids.
+    """
+    token_ids = _run_generation(method, device_groups[0][0], mode="sample")
+
+    assert len(token_ids) == 2
+    for request_index, tokens in enumerate(token_ids):
+        assert tokens, f"{method} request {request_index} produced no tokens"
+        assert all(isinstance(token, int) and token >= 0 for token in tokens)
