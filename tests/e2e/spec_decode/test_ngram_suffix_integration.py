@@ -4,11 +4,11 @@
 # ------------------------------------------------------------------
 """Eager n-gram and suffix speculative-decoding correctness tests.
 
-Run with visible subprocess output::
+Run with::
 
     .venv_eager/bin/python -m pytest -s -v \
         tests/e2e/spec_decode/test_ngram_suffix_integration.py \
-        --device-id 8,9
+        --device-id <qid_a>,<qid_b>
 """
 
 import json
@@ -30,7 +30,7 @@ pytestmark = pytest.mark.skipif(
 _RUNNER_SCRIPT = Path(__file__).with_name("_run_ngram_suffix_generation.py")
 
 
-def _run_generation(method: str, qid: int, mode: str = "greedy") -> list[list[int]]:
+def _run_generation(method: str, qid: int, mode: str = "greedy") -> dict:
     env = os.environ.copy()
     env[QaicPlatform.device_control_env_var] = str(qid)
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -65,8 +65,14 @@ def test_eager_speculative_decoding_matches_greedy_baseline(
 
     Needs two free single-QID devices: one for the baseline, one for SpD.
     """
-    baseline_token_ids = _run_generation("baseline", device_groups[0][0])
-    speculative_token_ids = _run_generation(method, device_groups[1][0])
+    baseline_token_ids = _run_generation("baseline", device_groups[0][0])["token_ids"]
+    spd_result = _run_generation(method, device_groups[1][0])
+    speculative_token_ids = spd_result["token_ids"]
+
+    # Equality alone would also pass if every draft were rejected, which
+    # never exercises the accept/bonus-token and partial-rollback paths.
+    assert spd_result["num_draft_tokens"] > 0, f"{method} proposed no drafts"
+    assert spd_result["num_accepted_tokens"] > 0, f"{method} accepted no drafts"
 
     assert len(speculative_token_ids) == len(baseline_token_ids)
     for request_index, (speculative, baseline) in enumerate(
@@ -91,8 +97,10 @@ def test_eager_speculative_decoding_random_sampling_runs(
     Sampled output cannot be compared token-for-token with a baseline, so this
     checks that generation completes and returns well-formed token ids.
     """
-    token_ids = _run_generation(method, device_groups[0][0], mode="sample")
+    result = _run_generation(method, device_groups[0][0], mode="sample")
+    token_ids = result["token_ids"]
 
+    assert result["num_draft_tokens"] > 0, f"{method} proposed no drafts"
     assert len(token_ids) == 2
     for request_index, tokens in enumerate(token_ids):
         assert tokens, f"{method} request {request_index} produced no tokens"

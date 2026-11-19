@@ -26,7 +26,7 @@ QAIC-specific environment variables that control plugin behavior.
 | `QAIC_DEVICE_LOG_LEVEL` | Device-level log verbosity |
 | `QAIC_DEBUG` | Enable QAIC debug logging (`0` or `1`) |
 | `VLLM_TORCH_PROFILER_DIR` | Output directory for profiling data. Enables `torch_qaic.profile.ProfileForwardWithSampling` device-level latency tracing in the QAIC model runner. |
-| `LD_PRELOAD` | If set to include `libiomp5.so`, triggers automatic OpenMP tuning (`KMP_BLOCKTIME=1`, `KMP_TPAUSE=0`) for CPU-bound SpD proposers in AOT mode — see [Speculative Decoding](../features/speculative_decoding.md) |
+| `LD_PRELOAD` | If set to include `libiomp5.so`, triggers automatic OpenMP tuning (`KMP_BLOCKTIME=1`, `KMP_TPAUSE=0`) for CPU-bound SpD proposers in AOT mode |
 
 ## torch.compile (PYT Mode)
 

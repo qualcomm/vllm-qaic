@@ -2,6 +2,7 @@
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 # ------------------------------------------------------------------
+import pytest
 import torch
 
 from vllm_qaic.attention.backends.qaic_attn import (
@@ -39,7 +40,7 @@ def _run_decode(
     seq_lens: list[int],
     query_lens: list[int],
     key_values: list[float],
-) -> None:
+) -> torch.Tensor:
     num_tokens = sum(query_lens)
     query = torch.zeros(num_tokens, 1, 2)
     key = torch.tensor(key_values, dtype=torch.float32).view(num_tokens, 1, 1)
@@ -53,10 +54,11 @@ def _run_decode(
         _metadata(request_ids, seq_lens, query_lens),
         output,
     )
+    return output
 
 
-def test_speculative_rejection_overwrites_and_truncates_request_kv_cache():
-    attention = QAicAttentionBackendImpl(
+def _attention() -> QAicAttentionBackendImpl:
+    return QAicAttentionBackendImpl(
         num_heads=1,
         head_size=2,
         scale=1.0,
@@ -65,6 +67,10 @@ def test_speculative_rejection_overwrites_and_truncates_request_kv_cache():
         sliding_window=None,
         kv_cache_dtype="auto",
     )
+
+
+def test_speculative_rejection_overwrites_and_truncates_request_kv_cache():
+    attention = _attention()
 
     _run_decode(
         attention,
@@ -80,10 +86,24 @@ def test_speculative_rejection_overwrites_and_truncates_request_kv_cache():
         [3, 3],
         [4, 5, 6, 13, 14, 15],
     )
-    _run_decode(attention, ["request-b", "request-a"], [4, 4], [1, 1], [20, 30])
+    output = _run_decode(
+        attention, ["request-b", "request-a"], [4, 4], [1, 1], [20, 30]
+    )
 
     a_key, _, a_cached = attention._kv_cache["request-a"]
     b_key, _, b_cached = attention._kv_cache["request-b"]
     assert a_cached == b_cached == 4
     assert a_key[:a_cached, 0, 0].tolist() == [1, 2, 3, 30]
     assert b_key[:b_cached, 0, 0].tolist() == [10, 11, 12, 20]
+
+    # With a zero query, attention is the mean of V over the visible prefix
+    # kv[:seq_len]; the rejected tail (4-6 / 13-15) must not contribute.
+    assert output[:, 0, 0].tolist() == pytest.approx([13.25, 9.0])
+
+
+def test_non_contiguous_kv_update_raises():
+    attention = _attention()
+    _run_decode(attention, ["request-a"], [3], [3], [1, 2, 3])
+
+    with pytest.raises(ValueError, match="Non-contiguous KV update"):
+        _run_decode(attention, ["request-a"], [6], [1], [4])

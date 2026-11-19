@@ -6,6 +6,12 @@ import json
 import sys
 
 from vllm import LLM, SamplingParams
+from vllm.v1.metrics.reader import Counter
+
+_SPEC_COUNTERS = {
+    "vllm:spec_decode_num_draft_tokens": "num_draft_tokens",
+    "vllm:spec_decode_num_accepted_tokens": "num_accepted_tokens",
+}
 
 
 def main() -> int:
@@ -26,6 +32,7 @@ def main() -> int:
         async_scheduling=False,
         enable_prefix_caching=False,
         gpu_memory_utilization=0.9,
+        disable_log_stats=False,  # needed for spec-decode acceptance counters
     )
     if method != "baseline":
         kwargs["speculative_config"] = {
@@ -42,9 +49,15 @@ def main() -> int:
             ],
             sampling_params,
         )
-        token_ids = [list(output.outputs[0].token_ids) for output in outputs]
+        result = {
+            "token_ids": [list(output.outputs[0].token_ids) for output in outputs],
+            **dict.fromkeys(_SPEC_COUNTERS.values(), 0),
+        }
+        for metric in llm.get_metrics():
+            if isinstance(metric, Counter) and metric.name in _SPEC_COUNTERS:
+                result[_SPEC_COUNTERS[metric.name]] += metric.value
         with open(output_path, "w") as output_file:
-            json.dump(token_ids, output_file)
+            json.dump(result, output_file)
     finally:
         del llm
     return 0
