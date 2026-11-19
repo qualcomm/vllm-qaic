@@ -88,7 +88,7 @@ class _DualQpcTestBase:
                 runner="pooling",
                 quantization=None,
                 kv_cache_dtype="auto",
-                override_qaic_config=override_cfg,
+                override_qaic_config=dict(override_cfg),
                 trust_remote_code=is_internvl(model_name),
                 enable_mm_embeds=True,
                 limit_mm_per_prompt={"image": 1},
@@ -98,6 +98,7 @@ class _DualQpcTestBase:
                 async_scheduling=False,
                 dg=device_groups[1],
                 max_num_seqs=decode_bsz,
+                enable_chunked_prefill=True,
                 override_qaic_config=override_cfg,
                 trust_remote_code=is_internvl(model_name),
                 enable_mm_embeds=True,
@@ -123,11 +124,17 @@ class _DualQpcTestBase:
             kv_offload=True,
             override_cfg=override_cfg,
             tokenizer_obj=tokenizer,
+            decode_bsz=decode_bsz,
         )
 
         qeff_output = []
         for img, p in updated_input:
             inputs_proc = prepare_qeff_inputs(model_name, processor, img, p, tokenizer)
+            # Repeat the image/prompt to fill the compiled reference batch.
+            inputs_proc = {
+                name: value.repeat(decode_bsz, *([1] * (value.ndim - 1)))
+                for name, value in inputs_proc.items()
+            }
             if is_qwenvl(model_name):
                 inputs_proc = qeff_model.model.prepare_inputs_for_generation(
                     inputs=inputs_proc,
@@ -139,6 +146,8 @@ class _DualQpcTestBase:
                 device_ids=device_groups[1],
                 generation_len=MAX_END_TOKENS,
             )
+            assert output.generated_ids.shape[0] == decode_bsz
+            assert (output.generated_ids == output.generated_ids[:1]).all()
             text = processor.tokenizer.batch_decode(
                 output.generated_ids, skip_special_tokens=True
             )[0]
@@ -153,6 +162,70 @@ class _DualQpcTestBase:
             print(o1)
             print(o2)
             assert o1 == o2
+
+    def test_dual_qpc_on_device_sampling(
+        self,
+        mm_input,
+        model_name,
+        device_groups,
+        make_runner,
+        decode_bsz,
+    ):
+        """Reuse dual-QPC helpers with sampling only on the language QPC.
+
+        The vision encoder produces embeddings, not sampled tokens.
+        """
+        tokenizer = _tokenizer_for(model_name)
+        sampling_params = _sampling_params_for(model_name, tokenizer)
+        updated_input = build_model_input(model_name, mm_input, tokenizer)
+        encoder_override_cfg = update_qaic_config(model_name, None, kv_offload=True)
+        ods_override_cfg = update_qaic_config(
+            model_name,
+            None,
+            aic_include_sampler=True,
+            aic_return_pdfs=False,
+            max_top_k_ids=512,
+            kv_offload=True,
+        )
+        mm_kwargs = _mm_processor_kwargs(model_name)
+        inputs = [
+            {"prompt": prompt, "multi_modal_data": {"image": image}}
+            for image, prompt in updated_input
+        ]
+
+        with (
+            make_runner(
+                async_scheduling=False,
+                dg=device_groups[0],
+                max_num_seqs=1,
+                runner="pooling",
+                quantization=None,
+                kv_cache_dtype="auto",
+                override_qaic_config=encoder_override_cfg,
+                trust_remote_code=is_internvl(model_name),
+                enable_mm_embeds=True,
+                limit_mm_per_prompt={"image": 1},
+                **mm_kwargs,
+            ) as qllm_embed,
+            make_runner(
+                enable_chunked_prefill=True,
+                async_scheduling=False,
+                dg=device_groups[1],
+                max_num_seqs=decode_bsz,
+                override_qaic_config=ods_override_cfg,
+                trust_remote_code=is_internvl(model_name),
+                enable_mm_embeds=True,
+                limit_mm_per_prompt={"image": 1},
+                **mm_kwargs,
+            ) as qllm_gen,
+        ):
+            gen_inputs = encode_if_mm(qllm_embed, inputs, model_name)
+            outputs = qllm_gen.llm.generate(gen_inputs, sampling_params=sampling_params)
+
+        assert len(outputs) == len(inputs)
+        for output in outputs:
+            assert output.outputs[0].token_ids
+            assert output.outputs[0].text.strip()
 
     def test_dual_qpc_single_image_cb(
         self,
@@ -496,7 +569,7 @@ class TestQwen3VL(_DualQpcTestBase):
 
 @pytest.mark.qaic_aot_mode(_DUAL_QPC_AOT_REASON)
 @pytest.mark.qaic_test_config(
-    model_name="Qwen/Qwen2.5-VL-2B-Instruct",
+    model_name="Qwen/Qwen2.5-VL-3B-Instruct",
     ctx_len=4096,
     dtype="mxfp6",
     kv_dtype="mxint8",
