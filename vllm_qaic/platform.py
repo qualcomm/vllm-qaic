@@ -108,6 +108,10 @@ class QaicPlatform(Platform):
     device_communicator_cls = "vllm_qaic.distributed.communicator.QAicCommunicator"
 
     @classmethod
+    def support_hybrid_kv_cache(cls) -> bool:
+        return True
+
+    @classmethod
     def get_punica_wrapper(cls) -> str:
         return "vllm.lora.punica_wrapper.punica_cpu.PunicaWrapperCPU"
 
@@ -158,6 +162,13 @@ class QaicPlatform(Platform):
         if not cls.is_aot:
             from vllm_qaic.quantization.qaic_gpt_oss_mxfp4_config import (  # noqa: F401
                 QaicGptOssMxfp4Config,
+            )
+
+            from vllm.model_executor.models import ModelRegistry
+
+            ModelRegistry.register_model(
+                "Qwen3_5MoeForConditionalGeneration",
+                "vllm_qaic.ops.gdn_qaic:QaicQwen3_5MoeForConditionalGeneration",
             )
 
     @classmethod
