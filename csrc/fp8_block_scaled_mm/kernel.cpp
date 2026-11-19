@@ -495,35 +495,59 @@ static uint32_t run(const uint8_t* a_ddr, const uint8_t* b_ddr,
   return JIT_DEV_STATUS_SUCCESS;
 }
 
+// Bounds-checked read of argument slot `idx`. pointers[] is a flexible array
+// member whose length is numPointers, so every read is validated against it at
+// the access site. Returns false if the slot is missing or null.
+static inline bool get_arg(const AicJitPointerArray* args, uint32_t idx,
+                           AicJitPtr* out) {
+  if (args == nullptr) {
+    return false;
+  }
+  if (idx >= args->numPointers) {
+    return false;
+  }
+  const AicJitPtr value = args->pointers[idx];
+  if (value == 0) {
+    return false;
+  }
+  *out = value;
+  return true;
+}
+
+static inline bool get_i32_arg(const AicJitPointerArray* args, uint32_t idx,
+                               int32_t* out) {
+  AicJitPtr ptr = 0;
+  if (!get_arg(args, idx, &ptr)) {
+    return false;
+  }
+  *out = *(const int32_t*)ptr;
+  return true;
+}
+
 QAIC_KERNEL_API int32_t multinsp_multithreaded_fp8_block_scaled_mm(
     const AicJitEntryPointConfig* entryConfig,
     const AicJitPointerArray* pointerArray) {
-  // Validate the argument array before indexing into it: pointers[] is a
-  // flexible array member, so reading past numPointers is an out-of-bounds
-  // read. Slots 0..10 are read below (5 tensors + 6 int32 scalars).
-  constexpr uint32_t kNumPointers = 11;
-  if (entryConfig == nullptr || pointerArray == nullptr ||
-      pointerArray->numPointers < kNumPointers) {
+  if (entryConfig == nullptr || pointerArray == nullptr) {
     return JIT_DEV_ERROR_INVALID_PARAMETER;
   }
-  // The scalar slots are dereferenced, so they must not be null.
-  for (uint32_t i = 5; i < kNumPointers; ++i) {
-    if (pointerArray->pointers[i] == 0) {
-      return JIT_DEV_ERROR_INVALID_PARAMETER;
-    }
-  }
 
-  const uint8_t* a_ddr = (const uint8_t*)pointerArray->pointers[0];
-  const uint8_t* b_ddr = (const uint8_t*)pointerArray->pointers[1];
-  const float* as_ddr = (const float*)pointerArray->pointers[2];
-  const float* bs_ddr = (const float*)pointerArray->pointers[3];
-  float* out_ddr = (float*)pointerArray->pointers[4];
-  const int m = *(const int32_t*)pointerArray->pointers[5];
-  const int n = *(const int32_t*)pointerArray->pointers[6];
-  const int k = *(const int32_t*)pointerArray->pointers[7];
-  const int blockN = *(const int32_t*)pointerArray->pointers[8];
-  const int blockK = *(const int32_t*)pointerArray->pointers[9];
-  const int dtypeId = *(const int32_t*)pointerArray->pointers[10];
+  // Slots 0..4 are tensors (a, b, as, bs, out); 5..10 are int32 scalars.
+  AicJitPtr aPtr = 0, bPtr = 0, asPtr = 0, bsPtr = 0, outPtr = 0;
+  int32_t m = 0, n = 0, k = 0, blockN = 0, blockK = 0, dtypeId = 0;
+  if (!get_arg(pointerArray, 0, &aPtr) || !get_arg(pointerArray, 1, &bPtr) ||
+      !get_arg(pointerArray, 2, &asPtr) || !get_arg(pointerArray, 3, &bsPtr) ||
+      !get_arg(pointerArray, 4, &outPtr) || !get_i32_arg(pointerArray, 5, &m) ||
+      !get_i32_arg(pointerArray, 6, &n) || !get_i32_arg(pointerArray, 7, &k) ||
+      !get_i32_arg(pointerArray, 8, &blockN) ||
+      !get_i32_arg(pointerArray, 9, &blockK) ||
+      !get_i32_arg(pointerArray, 10, &dtypeId)) {
+    return JIT_DEV_ERROR_INVALID_PARAMETER;
+  }
+  const uint8_t* a_ddr = (const uint8_t*)aPtr;
+  const uint8_t* b_ddr = (const uint8_t*)bPtr;
+  const float* as_ddr = (const float*)asPtr;
+  const float* bs_ddr = (const float*)bsPtr;
+  float* out_ddr = (float*)outPtr;
 
   if (m <= 0 || n <= 0 || k <= 0 || blockN <= 0 || blockK <= 0) {
     return JIT_DEV_ERROR_INVALID_PARAMETER;
