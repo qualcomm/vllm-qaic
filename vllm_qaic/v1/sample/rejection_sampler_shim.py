@@ -19,8 +19,7 @@ to a float32 version.
 
 ``vllm_qaic.patch.patch_qaic_triton_import`` sets ``HAS_TRITON`` when the
 Qualcomm backend is present; the Qualcomm Triton wheel with
-``qcom_hexagon_backend`` must be installed (see
-``docs/qaic/build_hexagon_triton_backend.md``).
+``qcom_hexagon_backend`` must be installed.
 """
 
 from __future__ import annotations
@@ -38,7 +37,12 @@ def generate_uniform_probs(
     generators: dict,
     device: torch.device,
 ) -> torch.Tensor:
-    """Generate fp32 uniform samples because QAIC does not support fp64."""
+    """Generate fp32 uniform samples because QAIC does not support fp64.
+
+    Upstream uses fp64 because fp32 ``torch.rand`` can return exactly 0.0,
+    which would accept a draft token with zero target probability. Clamp to
+    the smallest positive fp32 value instead.
+    """
     uniform_probs = torch.rand(
         (num_tokens,),
         dtype=torch.float32,
@@ -53,7 +57,7 @@ def generate_uniform_probs(
         if generator is not None:
             uniform_probs[start_index:end_index].uniform_(generator=generator)
         start_index = end_index
-    return uniform_probs
+    return uniform_probs.clamp_(min=torch.finfo(torch.float32).tiny)
 
 
 _shim_installed = False
@@ -66,13 +70,12 @@ def _require_qualcomm_triton() -> None:
         raise RuntimeError(
             "QAIC PYT rejection sampling requires Qualcomm Triton with "
             "qcom_hexagon_backend, but triton is not importable. Install the "
-            "QAIC Triton wheel using docs/qaic/build_hexagon_triton_backend.md."
+            "Qualcomm Triton wheel."
         ) from exc
     if "qcom_hexagon_backend" not in backends:
         raise RuntimeError(
             "QAIC PYT rejection sampling requires Qualcomm Triton with "
-            "qcom_hexagon_backend. Install and verify the QAIC Triton wheel "
-            "using docs/qaic/build_hexagon_triton_backend.md."
+            "qcom_hexagon_backend. Install the Qualcomm Triton wheel."
         )
 
 

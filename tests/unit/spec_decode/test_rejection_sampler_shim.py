@@ -10,8 +10,8 @@ kernel is upstream's own ``@triton.jit`` kernel running on QAIC tensors. The
 compare against a PyTorch CPU reference.
 
 Run with ``pytest -s`` so QAIC runtime diagnostics remain visible. The Hexagon
-toolchain env vars from ``docs/qaic/build_hexagon_triton_backend.md`` must be
-exported for the Triton-compiling tests::
+toolchain env vars (``HEXAGON_TOOLS``, ``HEXAGON_SDK_ROOT``) must be exported
+for the Triton-compiling tests::
 
     .venv_eager/bin/python -m pytest -s \
         tests/unit/spec_decode/test_rejection_sampler_shim.py -v
@@ -78,17 +78,40 @@ def test_generate_uniform_probs_uses_float32(device):
 
     assert probabilities.shape == (6,)
     assert probabilities.dtype == torch.float32
-    assert bool(((probabilities.cpu() >= 0) & (probabilities.cpu() <= 1)).all())
+    # Strictly positive: u == 0 would accept zero-probability draft tokens.
+    assert bool(((probabilities.cpu() > 0) & (probabilities.cpu() < 1)).all())
+
+
+def test_generate_uniform_probs_never_returns_zero(monkeypatch):
+    monkeypatch.setattr(torch, "rand", lambda *args, **kwargs: torch.zeros(*args[0]))
+
+    probabilities = generate_uniform_probs(3, [3], {}, torch.device("cpu"))
+
+    assert bool((probabilities > 0).all())
 
 
 def test_generate_uniform_probs_honors_generators():
-    first = torch.Generator(device="cpu").manual_seed(1234)
-    second = torch.Generator(device="cpu").manual_seed(1234)
+    # Generators are keyed by request index; zero-draft rows occupy no slots
+    # and must not consume RNG from any generator.
+    cpu = torch.device("cpu")
+    first = generate_uniform_probs(
+        5,
+        [2, 0, 3],
+        {
+            0: torch.Generator(device="cpu").manual_seed(1),
+            2: torch.Generator(device="cpu").manual_seed(2),
+        },
+        cpu,
+    )
 
-    first_probs = generate_uniform_probs(4, [4], {0: first}, torch.device("cpu"))
-    second_probs = generate_uniform_probs(4, [4], {0: second}, torch.device("cpu"))
-
-    assert torch.equal(first_probs, second_probs)
+    expected_first = torch.empty(2).uniform_(
+        generator=torch.Generator(device="cpu").manual_seed(1)
+    )
+    expected_last = torch.empty(3).uniform_(
+        generator=torch.Generator(device="cpu").manual_seed(2)
+    )
+    assert torch.equal(first[:2], expected_first)
+    assert torch.equal(first[2:], expected_last)
 
 
 def test_native_temperature_matches_cpu_reference(device):
@@ -441,7 +464,7 @@ def test_upstream_random_and_recovered_kernels_on_qaic(
         ), "no row reached the bonus-token path"
 
 
-def test_upstream_generate_uniform_probs_unsupported_on_qaic(qaic_device):
+def test_qaic_rejects_float64_rand(qaic_device):
     """Documents why the shim exists: upstream draws fp64, which QAIC rejects."""
     # Independent of whether install() ran earlier in this process: upstream
     # draws fp64 directly on the device.

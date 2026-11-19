@@ -435,6 +435,8 @@ class QaicPlatform(Platform):
 
         if not cls.is_aot:
             # TODO: Re-enable JIT warmup once QAIC JIT support is fully onboarded.
+            # Note: upstream's rejection-sampler warmup declares fp64 uniforms,
+            # which QAIC does not support.
             vllm_config.kernel_config.enable_jit_warmup = False
             assert vllm_config.kv_transfer_config is None, (
                 "QAIC eager mode does not support disaggregated serving"
@@ -447,6 +449,19 @@ class QaicPlatform(Platform):
                         "supported in eager (PYT) mode on QAIC. "
                         "Only 'ngram' and 'suffix' are supported. "
                         "Draft-model SpD requires AOT compilation."
+                    )
+                # KV-cache rollback on rejection does not restore recurrent
+                # (mamba / linear-attention) state.
+                if model_config.is_hybrid or model_config.is_attention_free:
+                    raise ValueError(
+                        "Speculative decoding is not supported in eager (PYT) "
+                        "mode on QAIC for models with linear-attention or other "
+                        "recurrent-state layers."
+                    )
+                if model_config.use_fp64_gumbel:
+                    raise ValueError(
+                        "use_fp64_gumbel is not supported with speculative "
+                        "decoding in eager (PYT) mode: QAIC has no float64."
                     )
             if scheduler_config.async_scheduling:
                 logger.warning_once(
