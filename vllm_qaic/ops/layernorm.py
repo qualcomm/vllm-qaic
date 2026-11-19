@@ -16,6 +16,17 @@ from vllm.model_executor.layers.layernorm import (
 
 from vllm_qaic._custom_ops import rms_norm_hexagon as _call_hexagon_rms_norm
 from vllm_qaic.ops._triton_flags import triton_op_enabled
+from vllm.model_executor.determinism.batch_invariant import (
+    rms_norm_batch_invariant,
+)
+
+from vllm.models.minimax_m3.amd.ops.gemma_rmsnorm import (
+    gemma_fused_add_rmsnorm,
+    gemma_rmsnorm,
+)
+from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
+    rmsnorm_fn,
+)
 
 triton_en = triton_op_enabled("RMS_NORM")
 triton_gated_en = triton_op_enabled("RMS_NORM_GATED")
@@ -50,10 +61,6 @@ class QAicRMSNorm(RMSNorm):
         # with has_weight=False gets weight=None (no per-channel multiply).
         weight = self.weight if self.pass_weight else None
         if triton_en:
-            from vllm.model_executor.determinism.batch_invariant import (
-                rms_norm_batch_invariant,
-            )
-
             return rms_norm_batch_invariant(x, weight, self.variance_epsilon)
 
         return F.rms_norm(x, [self.hidden_size], weight, self.variance_epsilon)
@@ -72,11 +79,6 @@ class QAicGemmaRMSNorm(GemmaRMSNorm):
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if triton_en:
-            from vllm.models.minimax_m3.amd.ops.gemma_rmsnorm import (
-                gemma_fused_add_rmsnorm,
-                gemma_rmsnorm,
-            )
-
             if residual is None:
                 return gemma_rmsnorm(x, self.weight, self.variance_epsilon)
             return gemma_fused_add_rmsnorm(
@@ -114,10 +116,6 @@ class QAicRMSNormGated(RMSNormGated):
             return super().forward_native(x, z)
 
         if triton_gated_en:
-            from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
-                rmsnorm_fn,
-            )
-
             return rmsnorm_fn(
                 x,
                 self.weight,

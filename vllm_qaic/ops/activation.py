@@ -10,6 +10,7 @@ import torch
 from vllm.model_executor.layers.activation import SiluAndMul
 
 from vllm_qaic.ops._triton_flags import triton_op_enabled
+from vllm.model_executor.layers.activation import swiglustep_and_mul_triton
 
 triton_en = triton_op_enabled("SILU_AND_MUL")
 _QAIC_SILU_AND_MUL_OP = None
@@ -61,8 +62,6 @@ class QAicSiluAndMul(SiluAndMul):
         # ([B, 2*d]); flatten any leading dimensions. Reuse MoE's
         # output buffer so Triton can write directly into it.
         if triton_en:
-            from vllm.model_executor.layers.activation import swiglustep_and_mul_triton
-
             d = x.shape[-1] // 2
             if output is None:
                 output = torch.empty((*x.shape[:-1], d), dtype=x.dtype, device=x.device)
