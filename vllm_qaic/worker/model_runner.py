@@ -820,6 +820,8 @@ class QaicModelRunnerAoT(GPUModelRunner):
         :return: SpecDecodeMetadata
         """
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        if self.is_kv_producer:
+            total_num_scheduled_tokens = int(np.sum(num_scheduled_tokens))
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
@@ -886,9 +888,18 @@ class QaicModelRunnerAoT(GPUModelRunner):
         num_tokens = [self.requests[r].num_tokens for r in self.input_batch.req_ids]
         num_tokens_np = np.array(num_tokens, dtype=np.int32)
 
-        self.discard_request_mask.np[:num_reqs] = (
-            self.optimistic_seq_lens_cpu[:num_reqs].numpy() < num_tokens_np
-        )
+        _seq_lens_for_discard = self.optimistic_seq_lens_cpu[:num_reqs].numpy()
+        if self.is_kv_producer:
+            _seq_lens_for_discard = self.input_batch.num_computed_tokens_cpu[
+                :num_reqs
+            ] + np.array(
+                [
+                    scheduler_output.num_scheduled_tokens[r]
+                    for r in self.input_batch.req_ids[:num_reqs]
+                ],
+                dtype=np.int32,
+            )
+        self.discard_request_mask.np[:num_reqs] = _seq_lens_for_discard < num_tokens_np
         if self.input_batch.prev_sampled_token_ids is not None:
             self._prepare_input_ids(
                 scheduler_output, num_scheduled_tokens, cu_num_tokens
@@ -1159,6 +1170,16 @@ class QaicModelRunnerAoT(GPUModelRunner):
             req_ids = self.input_batch.req_ids
             tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
             num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
+            if self.is_kv_producer:
+                _n = len(req_ids)
+                _end = (
+                    self.input_batch.num_computed_tokens_cpu[:_n]
+                    + num_scheduled_tokens_np
+                )
+                num_scheduled_tokens_np -= (
+                    (_end >= self.input_batch.num_prompt_tokens[:_n])
+                    & (num_scheduled_tokens_np > 1)
+                ).astype(np.int32)
 
             # Variable-K: determine active K BEFORE _prepare_qaic_inputs,
             # which uses self.active_k to pad decode requests.
