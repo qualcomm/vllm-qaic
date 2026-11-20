@@ -435,7 +435,7 @@ def make_runner(
         dg: list,
         enable_chunked_prefill: bool = False,
         enable_prefix_caching: bool = False,
-        block_size: int = 16,
+        block_size: int | None = None,
         lora_modules: list | None = None,
         max_num_seqs: int | None = None,
         override_qaic_config: dict | None = override_qaic_config,
@@ -535,6 +535,9 @@ def qaic_model(
     seq_len = _resolve_qaic_test_config_value(
         request, pytestconfig, "seq_len", default=128
     )
+    block_size = _resolve_qaic_test_config_value(
+        request, pytestconfig, "block_size", default=None
+    )
     ctx_len = _resolve_qaic_test_config_value(request, pytestconfig, "ctx_len")
     dtype = _resolve_qaic_test_config_value(request, pytestconfig, "dtype")
     kv_dtype = _resolve_qaic_test_config_value(
@@ -600,6 +603,7 @@ def qaic_model(
             max_model_len=ctx_len,
             quantization=dtype,
             kv_cache_dtype=kv_dtype,
+            block_size=block_size,
             enable_prefix_caching=enable_prefix_caching,
             async_scheduling=False,
             speculative_config=speculative_config,

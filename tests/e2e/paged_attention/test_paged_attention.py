@@ -54,6 +54,7 @@ def make_runner(qaic_test_config):
         async_scheduling: bool = False,
         enable_chunked_prefill: bool = False,
         prefix_caching: bool = False,
+        block_size: int | None = None,
         **kwargs,
     ) -> VllmRunner:
         _seq_len = seq_len if seq_len is not None else qaic_test_config["seq_len"]
@@ -77,6 +78,7 @@ def make_runner(qaic_test_config):
             async_scheduling=async_scheduling,
             disable_log_stats=False,
             enable_chunked_prefill=enable_chunked_prefill,
+            block_size=block_size,
             **kwargs,
         )
 
