@@ -605,15 +605,13 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         """
         plan = []
         for i, (name, _) in enumerate(self.session.decode_buff_map):
-            part = name.split(".")[1] if "." in name else "0"
-            layer_num = int(part.split("_")[0])
             num_kv_heads = self.kv_cache_info[i][0][1]
             role = (
                 "index"
                 if self.index_block_size is not None and num_kv_heads == 1
                 else "attention"
             )
-            plan.append({"name": name, "layer_num": layer_num, "role": role})
+            plan.append({"name": name, "role": role})
         return plan
 
     def _kv_handoff(
