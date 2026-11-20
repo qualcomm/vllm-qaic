@@ -2031,7 +2031,6 @@ class QaicModelRunnerAoT(GPUModelRunner):
         """
         block_size = self.cache_config.block_size
         kv_cache_spec: dict[str, KVCacheSpec] = {}
-
         n_layers = self.model_config.get_num_layers(self.parallel_config)
         for i in range(n_layers):
             layer_name = f"layer_{i}"
