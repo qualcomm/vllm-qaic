@@ -79,7 +79,9 @@ def rs_kernels(monkeypatch):
 
     rsn.install()
     try:
-        for name in rsn.KERNEL_NAMES:
+        # v0.30 launches through the dispatcher globals, which capture their
+        # kernel at import; swap both so the pristine module also runs Numba.
+        for name in rsn.KERNEL_NAMES + rsn.DISPATCHER_NAMES:
             monkeypatch.setattr(_PRISTINE_RS, name, getattr(upstream_rs, name))
         yield "numba"
     finally:
@@ -146,15 +148,13 @@ def _make_rejection_sampler(
     return sampler
 
 
-def _install_topk_topp_shim(monkeypatch) -> None:
-    """Ensure the centralized AOT top-k/top-p patch is active for this test.
+def _pin_topk_topp_selector(monkeypatch) -> None:
+    """Pin the top-k/top-p selector used by the patched forward to PyTorch.
 
     Other modules in the full unit collection can import rejection_sampler
-    before this module. Patch the function-global alias as well so this test is
+    before this module. Patch the function-global alias so this test is
     independent of pytest's module collection order.
     """
-    monkeypatch.setattr(patch_topk_topp_sampler, "_installed", False)
-    patch_topk_topp_sampler.install()
     monkeypatch.setitem(
         qaic_patch.apply_sampling_constraints.__globals__,
         "apply_top_k_top_p",
@@ -201,7 +201,7 @@ OPTIONS = {
 def test_qaic_forward_matches_upstream(case, options, monkeypatch):
     use_fp64_gumbel, synthetic, with_draft_probs = OPTIONS[options]
     seed = 0
-    _install_topk_topp_shim(monkeypatch)
+    _pin_topk_topp_selector(monkeypatch)
     assert RejectionSampler.forward is qaic_patch._qaic_forward
     metadata = _make_spec_metadata(DRAFT_TOKEN_IDS)
     num_tokens = sum(len(ids) for ids in DRAFT_TOKEN_IDS)

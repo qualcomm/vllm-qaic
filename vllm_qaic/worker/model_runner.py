@@ -13,7 +13,7 @@ import time
 from collections.abc import Generator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import copy, deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from queue import Queue
 from typing import TYPE_CHECKING, NamedTuple, cast
 
@@ -66,7 +66,7 @@ except ImportError:
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
     from vllm_qaic.model_loader.qaic import QaicCausalLM
-    from vllm.v1.spec_decode.qaic_draft_model import QaicDraftModelProposer
+    from vllm_qaic.spec_decode.qaic_draft_model import QaicDraftModelProposer
 
     from vllm_qaic.spec_decode.dflash_draft_model import QaicDFlashProposer
 
@@ -252,10 +252,15 @@ class QaicAsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
             state.num_decodes_executed,
             spec_decode_metadata=state.spec_decode_metadata,
         )
-        # Apply structured output bitmasks if present.
+        # Apply structured output bitmasks if present. With SpD the platform
+        # forces sync scheduling, so the unpad is a no-op here; kept so this
+        # path stays consistent with the sync one.
         if self._grammar_output is not None:
             apply_grammar_bitmask(
-                state.scheduler_output, self._grammar_output, mr.input_batch, logits
+                state.scheduler_output,
+                mr._unpad_grammar_output(state.scheduler_output, self._grammar_output),
+                mr.input_batch,
+                logits,
             )
 
         sampler_output = mr._sample(logits, state.spec_decode_metadata)
@@ -1127,12 +1132,84 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 mm_kwargs_list.append(_kw)
         return mm_kwargs_list
 
+    @staticmethod
+    def _strip_waiting_spec_padding(
+        scheduler_output: SchedulerOutput,
+    ) -> SchedulerOutput:
+        """Drop upstream's placeholder drafts on requests from the waiting queue.
+
+        vLLM >= 0.30 pads a request scheduled from the waiting queue whose
+        remaining work is a single token (a disaggregated consumer after the KV
+        transfer, or a full prefix-cache hit) to ``1 + K`` tokens with ``-1``
+        drafts, to keep a uniform CUDA-graph shape. QAIC runs such a request
+        without drafts (K=0 kernel on the consumer's first step), so present it
+        un-padded. The scheduler still sees K drafts with no accepted token and
+        rolls ``num_computed_tokens`` back, as for rejected upstream padding.
+
+        Returns a shallow copy: the scheduler keeps its own padded view, since
+        it rolls ``num_computed_tokens`` back from the drafts it scheduled. The
+        object is shared whenever the worker runs in the EngineCore process
+        (the AOT ``uni`` executor; ``VLLM_ENABLE_V1_MULTIPROCESSING=0`` also
+        puts the frontend there), so it must not be mutated in place.
+        """
+        spec = scheduler_output.scheduled_spec_decode_tokens
+        if not spec:
+            return scheduler_output
+        # Only running requests carry real drafts.
+        waiting = {r.req_id for r in scheduler_output.scheduled_new_reqs}
+        waiting |= scheduler_output.scheduled_cached_reqs.resumed_req_ids
+        padded = [r for r in waiting if r in spec and all(t == -1 for t in spec[r])]
+        if not padded:
+            return scheduler_output
+        spec = dict(spec)
+        num_scheduled = dict(scheduler_output.num_scheduled_tokens)
+        total = scheduler_output.total_num_scheduled_tokens
+        num_pads = {}
+        for req_id in padded:
+            num_pads[req_id] = len(spec.pop(req_id))
+            num_scheduled[req_id] -= num_pads[req_id]
+            total -= num_pads[req_id]
+        stripped = replace(
+            scheduler_output,
+            num_scheduled_tokens=num_scheduled,
+            total_num_scheduled_tokens=total,
+            scheduled_spec_decode_tokens=spec,
+        )
+        # The scheduler built the grammar bitmask from the padded drafts.
+        stripped.qaic_spec_padding = num_pads  # type: ignore[attr-defined]
+        return stripped
+
+    @staticmethod
+    def _unpad_grammar_output(
+        scheduler_output: SchedulerOutput, grammar_output: GrammarOutput
+    ) -> GrammarOutput:
+        """Drop the bitmask rows of drafts removed by the padding strip.
+
+        The scheduler emits ``1 + len(drafts)`` rows per structured-output
+        request from its padded drafts, while ``apply_grammar_bitmask`` walks
+        the rows with the stripped drafts.
+        """
+        num_pads = getattr(scheduler_output, "qaic_spec_padding", None)
+        if not num_pads:
+            return grammar_output
+        spec = scheduler_output.scheduled_spec_decode_tokens
+        keep: list[int] = []
+        row = 0
+        for req_id in grammar_output.structured_output_request_ids:
+            num_rows = 1 + len(spec.get(req_id, ()))
+            keep.extend(range(row, row + num_rows))
+            row += num_rows + num_pads.get(req_id, 0)
+        return replace(
+            grammar_output, grammar_bitmask=grammar_output.grammar_bitmask[keep]
+        )
+
     @torch.inference_mode()
     def execute_model(
         self,
         scheduler_output: SchedulerOutput,
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
+        scheduler_output = self._strip_waiting_spec_padding(scheduler_output)
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         with (
             record_function_or_nullcontext("qaic_model_runner: preprocess"),
@@ -1373,7 +1450,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
                     ]
                     assert self.drafter is not None
                     assert tlm_prefill_hidden_chunks is not None
-                    self.drafter.build_prefill_pending(
+                    cast("QaicDFlashProposer", self.drafter).build_prefill_pending(
                         prefill_cum_sum,
                         prefill_positions,
                         prefill_block_ids,
@@ -1528,7 +1605,10 @@ class QaicModelRunnerAoT(GPUModelRunner):
         # Apply structured output bitmasks if present.
         if grammar_output is not None:
             apply_grammar_bitmask(
-                scheduler_output, grammar_output, self.input_batch, logits
+                scheduler_output,
+                self._unpad_grammar_output(scheduler_output, grammar_output),
+                self.input_batch,
+                logits,
             )
 
         if self.is_kv_producer:
@@ -1598,10 +1678,11 @@ class QaicModelRunnerAoT(GPUModelRunner):
             and not self.is_kv_producer
             and self.drafter is not None
         ):
-            self.drafter.update_prefill_kv()
+            dflash_drafter = cast("QaicDFlashProposer", self.drafter)
+            dflash_drafter.update_prefill_kv()
             if not propose_drafts_after_bookkeeping:
                 # Gate is batch-wide: advance others' DLM KV via a discarded forward.
-                self.drafter.propose(
+                dflash_drafter.propose(
                     self.input_batch,
                     valid_sampled_token_ids,
                     self.batch_indices,
@@ -1646,8 +1727,13 @@ class QaicModelRunnerAoT(GPUModelRunner):
         spec_config = self.speculative_config
         assert spec_config is not None
         assert self.drafter is not None
+        # The QPC decode graphs are compiled for a fixed K, so the n-gram and
+        # suffix drafters always propose the full num_speculative_tokens
+        # (dynamic SD, which varies it per step, is rejected by the platform).
+        num_spec_tokens = spec_config.num_speculative_tokens
         if spec_config.method == "ngram":
             draft_token_ids = self.drafter.propose(  # type: ignore[call-arg]
+                num_spec_tokens,
                 sampled_token_ids,
                 self.input_batch.num_tokens_no_spec,
                 self.input_batch.token_ids_cpu,
@@ -1661,7 +1747,10 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 np.int32, copy=False
             )
             draft_token_ids = self.drafter.propose(  # type: ignore[call-arg]
-                self.input_batch, sampled_token_ids, slot_mappings=slot_mappings
+                num_spec_tokens,
+                self.input_batch,
+                sampled_token_ids,
+                slot_mappings=slot_mappings,
             )
             self.input_batch.token_ids_cpu = token_ids_cpu_orig
         elif spec_config.uses_draft_model():
@@ -1762,7 +1851,9 @@ class QaicModelRunnerAoT(GPUModelRunner):
             and self.drafter is not None
         ):
             # DFlash: the DLM's sub-block fan-out is sized by the TLM prefill_seq_len.
-            self.drafter.tlm_prefill_seq_len = self.model.prefill_seq_len
+            cast(
+                "QaicDFlashProposer", self.drafter
+            ).tlm_prefill_seq_len = self.model.prefill_seq_len
             self.drafter.load_model()
             self._setup_dflash_hidden_capture()
 

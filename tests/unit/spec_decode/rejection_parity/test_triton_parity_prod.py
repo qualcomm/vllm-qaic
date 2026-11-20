@@ -6,7 +6,7 @@
 
 Complements ``test_triton_parity_kernels.py`` (int32 draft ids, int32 expand
 input).  Every case builds the positional args exactly as the upstream call
-sites in ``vllm/v1/sample/rejection_sampler.py`` (v0.23.0) do, with the AOT
+sites in ``vllm/v1/sample/rejection_sampler.py`` (v0.30.0) do, with the AOT
 dtypes (draft int64, cu int32, bonus int32 [B,1], argmax int64, output int32
 [B,K+1], recovered int64, uniform fp64, target/draft probs fp32, inv_q fp32 or
 fp64, temperature/top_p fp32, top_k int32), launches the real upstream Triton
@@ -19,7 +19,7 @@ upstream-layout adapter, e.g. to tell a wrapper bug from a kernel bug.
 
 Tier A (``triton_parity``): skipped without triton-cpu.
 
-    TRITON_CPU_BACKEND=1 .venv_aot/bin/python -m pytest -s -q \
+    CUDA_VISIBLE_DEVICES= TRITON_CPU_BACKEND=1 .venv_aot/bin/python -m pytest -s -q \
         tests/unit/spec_decode/rejection_parity/test_triton_parity_prod.py
     RS_PROD_HEAVY=0 ...   # skip the 128x16 x V=128256 recovered case (~1 GB probs)
 """
@@ -293,9 +293,12 @@ def test_expand_through_upstream_helper():
     temp = torch.tensor([0.0, 0.7, 0.0, 1.3], dtype=torch.float32)
     cu = torch.tensor([2, 2, 6, 7], dtype=torch.int32)
     ref = rs.expand_batch_to_tokens(temp, cu, 7, replace_from=0, replace_to=1)
-    saved = {n: getattr(rs, n) for n in common.KERNEL_NAMES}
+    saved = {n: getattr(rs, n) for n in common.ALL_NAMES}
     try:
+        # v0.30 launches through the ``_expand`` dispatcher, which captured the
+        # Triton kernel at import; swap both.
         rs.expand_kernel = _WRAPPERS["expand_kernel"]
+        rs._expand = _WRAPPERS["_expand"]
         out = rs.expand_batch_to_tokens(temp, cu, 7, replace_from=0, replace_to=1)
     finally:
         for name, obj in saved.items():
@@ -544,9 +547,9 @@ def test_rejection_sample_end_to_end(mode, synthetic, fp64, shape):
             use_fp64_gumbel=fp64,
         )
 
-    saved = {n: getattr(rs, n) for n in common.KERNEL_NAMES}
+    saved = {n: getattr(rs, n) for n in common.ALL_NAMES}
     try:
-        for n in common.KERNEL_NAMES:
+        for n in common.ALL_NAMES:
             setattr(rs, n, common.ORIGINAL_KERNELS[n])
         if synthetic and mode != "random" and c.draft.dtype == torch.int64:
             # See triton_synthetic_int64_broken: upstream Triton cannot compile
@@ -557,7 +560,7 @@ def test_rejection_sample_end_to_end(mode, synthetic, fp64, shape):
             ref = run(c.draft.to(torch.int32))
         else:
             ref = run()
-        for n in common.KERNEL_NAMES:
+        for n in common.ALL_NAMES:
             setattr(rs, n, _WRAPPERS[n])
         out = run()
     finally:

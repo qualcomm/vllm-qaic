@@ -54,7 +54,7 @@ def warm_up_ngram_proposer(
     saved_draft = drafter.valid_ngram_draft[:1].copy()
     saved_num_drafts = drafter.valid_ngram_num_drafts[:1].copy()
     try:
-        drafter.propose([[0]], ntok, tok, slot_mappings=None)
+        drafter.propose(drafter.k, [[0]], ntok, tok, slot_mappings=None)
     finally:
         drafter.valid_ngram_draft[:1] = saved_draft
         drafter.valid_ngram_num_drafts[:1] = saved_num_drafts

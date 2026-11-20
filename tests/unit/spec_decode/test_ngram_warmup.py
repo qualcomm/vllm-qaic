@@ -70,7 +70,10 @@ _COMPILE_PROBE = textwrap.dedent(
         maybe_warm_up_ngram_proposer(cfg.speculative_config, drafter, batch)
     with event.install_recorder("numba:compile") as rec:
         drafts = drafter.propose(
-            [[1], [1], [], []], batch.num_tokens_no_spec, batch.token_ids_cpu,
+            drafter.k,
+            [[1], [1], [], []],
+            batch.num_tokens_no_spec,
+            batch.token_ids_cpu,
             slot_mappings=None,
         )
     n = sum(1 for _, ev in rec.buffer if ev.is_start)
@@ -142,6 +145,7 @@ class _RecordingDrafter:
     def __init__(self, exc: Exception | None = None):
         self.calls = 0
         self.exc = exc
+        self.k = K
         self.max_model_len = MAX_MODEL_LEN
         self.valid_ngram_draft: np.ndarray = np.zeros((MAX_NUM_SEQS, K), dtype=np.int32)
         self.valid_ngram_num_drafts: np.ndarray = np.zeros(MAX_NUM_SEQS, dtype=np.int32)

@@ -7,20 +7,11 @@ import random
 
 import pytest
 from vllm import SamplingParams
-from vllm.triton_utils.importing import HAS_TRITON
 
-# DFlash speculative decoding relies on the Triton rejection-sampler kernels
-# (`vllm.v1.sample.rejection_sampler`). On QAIC (CPU) these require a Triton
-# CPU backend, which is only present when vllm-qaic is installed with
-# `TRITON_CPU=1`. Skip the whole module when Triton is unavailable, and in
-# PyT (eager) mode, where QAIC rejects speculative decoding.
+# The AOT rejection sampler runs on Numba (vllm_qaic.v1.sample.
+# rejection_sampler_numba), so DFlash needs no Triton backend.  Speculative
+# decoding is rejected in PyT (eager) mode.
 pytestmark = [
-    pytest.mark.skipif(
-        not HAS_TRITON,
-        reason=(
-            "DFlash requires a functional Triton backend (install with TRITON_CPU=1)"
-        ),
-    ),
     pytest.mark.qaic_aot_mode("SpD is not supported in eager mode on QAIC"),
 ]
 

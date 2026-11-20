@@ -19,7 +19,7 @@ import vllm.v1.sample.rejection_sampler as rs  # noqa: E402
 
 from vllm_qaic.v1.sample import rejection_sampler_numba as rsn  # noqa: E402
 
-UPSTREAM = {n: getattr(rs, n) for n in rsn.KERNEL_NAMES}
+UPSTREAM = {n: getattr(rs, n) for n in rsn.KERNEL_NAMES + rsn.DISPATCHER_NAMES}
 
 
 @pytest.fixture(autouse=True)
@@ -47,10 +47,83 @@ def test_install_swaps_and_uninstall_restores(_restore):
     for n in rsn.KERNEL_NAMES:
         assert getattr(rs, n) is not UPSTREAM[n]
         assert isinstance(getattr(rs, n), rsn._NumbaKernel)
+    for n in rsn.DISPATCHER_NAMES:
+        assert isinstance(getattr(rs, n), rsn._NumbaDispatcher)
+        assert getattr(rs, n).kernel is getattr(rs, rsn.DISPATCHER_KERNELS[n])
     assert rs.RejectionSampler.forward is _restore
     rsn.uninstall()
     for n, k in UPSTREAM.items():
         assert getattr(rs, n) is k
+
+
+def test_rejection_sample_routes_through_numba(monkeypatch):
+    """v0.30 ``rejection_sample()`` must reach the Numba kernels.
+
+    Upstream dispatchers capture their Triton kernel at import, so replacing
+    only the ``*_kernel`` globals is silently bypassed (vLLM v0.30 regression).
+    """
+    from vllm.v1.sample.metadata import SamplingMetadata
+
+    calls = []
+    for n in rsn.KERNEL_NAMES:
+        fn = rsn._NUMBA_FNS[n]
+
+        def _spy(*args, _n=n, _fn=fn, **kwargs):
+            calls.append(_n)
+            return _fn(*args, **kwargs)
+
+        # Spy before install(); the _restore fixture uninstalls afterwards.
+        monkeypatch.setitem(rsn._NUMBA_FNS, n, _spy)
+    rsn.install()
+
+    B, K, V = 2, 2, 16
+    draft = torch.tensor([3, 4, 5, 6], dtype=torch.int64)
+    cu = torch.tensor([K, 2 * K], dtype=torch.int32)
+    logits = torch.randn(B * K, V, generator=torch.Generator().manual_seed(0))
+    logits[0, 3] = 100.0  # request 0 accepts its first draft under greedy
+    bonus = torch.zeros((B, 1), dtype=torch.int32)
+    meta = SamplingMetadata(
+        temperature=torch.tensor([0.0, 1.0]),
+        all_greedy=False,
+        all_random=False,
+        top_p=None,
+        top_k=None,
+        generators={},
+        max_num_logprobs=None,
+        no_penalties=True,
+        prompt_token_ids=None,
+        frequency_penalties=torch.zeros(B),
+        presence_penalties=torch.zeros(B),
+        repetition_penalties=torch.ones(B),
+        output_token_ids=[[], []],
+        allowed_token_ids_mask=None,
+        bad_words_token_ids={},
+        logitsprocs=None,
+    )
+    out = rs.rejection_sample(draft, [K, K], K, cu, None, logits, bonus, meta)
+    temp = rs.expand_batch_to_tokens(meta.temperature, cu, B * K)
+    assert torch.equal(temp, torch.tensor([0.0, 0.0, 1.0, 1.0]))
+    assert out.shape == (B, K + 1)
+    assert out[0, 0] == 3
+    assert set(calls) >= {
+        "expand_kernel",
+        "rejection_greedy_sample_kernel",
+        "sample_recovered_tokens_kernel",
+        "rejection_random_sample_kernel",
+    }
+
+
+def test_register_warmup_is_noop_after_install(monkeypatch):
+    # RejectionSampler.__init__ registers every dispatcher for Triton warm-up;
+    # after install() none of them may reach the registry.
+    from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
+
+    calls = []
+    monkeypatch.setattr(JitWarmupRegistry, "register", lambda *a, **k: calls.append(a))
+    rsn.install()
+    for n in rsn.DISPATCHER_NAMES:
+        getattr(rs, n).register_warmup(synthetic_mode=True)
+    assert calls == []
 
 
 def test_install_idempotent():
@@ -108,6 +181,50 @@ def test_greedy_int64_production_dtypes():
     args = _greedy_args()
     rs.rejection_greedy_sample_kernel[(2,)](*args, SYNTHETIC_MODE=False)
     assert args[0].tolist() == [[3, 9, -1], [5, 6, 12]]
+
+
+def test_greedy_synthetic_rejects_padded_draft():
+    # v0.30: a -1 draft id marks a padded slot and is rejected even when the
+    # synthetic acceptance rate would accept it.
+    rsn.install()
+    out = torch.full((1, 3), -1, dtype=torch.int32)
+    rs._rejection_greedy_sample(
+        out,
+        torch.tensor([2], dtype=torch.int32),
+        torch.tensor([3, -1], dtype=torch.int64),
+        torch.tensor([7, 8], dtype=torch.int64),
+        torch.tensor([[11]], dtype=torch.int32),
+        None,
+        2,
+        torch.zeros(2, dtype=torch.float64),
+        torch.ones(2, dtype=torch.float32),
+    )
+    assert out.tolist() == [[3, 8, -1]]
+
+
+@pytest.mark.parametrize("with_draft_probs", [False, True])
+@pytest.mark.parametrize("synthetic", [False, True])
+def test_random_rejects_padded_draft(with_draft_probs, synthetic):
+    # v0.30: a -1 draft id is rejected before any probability is indexed and
+    # replaced by the recovered token.
+    rsn.install()
+    V = 16
+    probs = torch.full((2, V), 1.0 / V, dtype=torch.float32)
+    out = torch.full((1, 3), -1, dtype=torch.int32)
+    rs._rejection_random_sample(
+        out,
+        torch.tensor([2], dtype=torch.int32),
+        torch.tensor([3, -1], dtype=torch.int64),
+        probs.clone() if with_draft_probs else None,
+        probs,
+        torch.tensor([[11]], dtype=torch.int32),
+        torch.tensor([5, 9], dtype=torch.int64),
+        torch.zeros(2, dtype=torch.float64),  # uniform 0: accept any valid draft
+        torch.zeros(1, dtype=torch.bool),
+        2,
+        torch.ones(2, dtype=torch.float32) if synthetic else None,
+    )
+    assert out.tolist() == [[3, 9, -1]]
 
 
 @pytest.mark.parametrize(
@@ -223,6 +340,9 @@ def test_install_preserves_torch_thread_cap(tmp_path):
     code = (
         "import torch\n"
         "torch.set_num_threads(2)\n"
+        # Import vllm first, as the worker does: importing vllm_qaic.logger
+        # first re-enters it via vllm's platform plugin resolution.
+        "import vllm  # noqa: F401\n"
         "from vllm_qaic.v1.sample import rejection_sampler_numba as rsn\n"
         "rsn.install()\n"
         "import numba\n"

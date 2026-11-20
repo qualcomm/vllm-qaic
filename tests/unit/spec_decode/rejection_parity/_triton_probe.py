@@ -71,7 +71,9 @@ def _probe() -> tuple[bool, str]:
             return False, (
                 "vllm rejection_sampler.expand_kernel is "
                 f"{type(kernel).__module__}.{type(kernel).__name__}, not a "
-                "triton JITFunction (vLLM TritonPlaceholder in use?)"
+                "triton JITFunction (vLLM TritonPlaceholder in use? vLLM >= 0.30 "
+                "ignores the triton cpu backend unless CUDA_VISIBLE_DEVICES is "
+                "set to an empty string before vllm is first imported)"
             )
     except Exception as exc:  # noqa: BLE001
         return False, f"upstream kernel probe failed: {exc!r}"

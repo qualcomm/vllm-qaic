@@ -10,7 +10,7 @@ ragged batch with empty requests, draft ids at row edges, and odd vocab sizes
 
 Tier A (``triton_parity``): skipped without triton-cpu.
 
-    TRITON_CPU_BACKEND=1 .venv_aot/bin/python -m pytest -s -q \
+    CUDA_VISIBLE_DEVICES= TRITON_CPU_BACKEND=1 .venv_aot/bin/python -m pytest -s -q \
         tests/unit/spec_decode/rejection_parity/test_triton_parity_kernels.py
 """
 
@@ -96,7 +96,8 @@ def test_recovered(seed, vocab, no_draft, fp64, ties):
 @pytest.mark.parametrize("vocab", (31, 1000))
 @pytest.mark.parametrize("no_draft", (True, False))
 @pytest.mark.parametrize("synthetic", (False, True))
-def test_greedy_and_random(seed, vocab, no_draft, synthetic):
+@pytest.mark.parametrize("padded", (False, True))
+def test_greedy_and_random(seed, vocab, no_draft, synthetic, padded):
     max_len = 6
     g, cu, draft, total, batch = _batch(seed, vocab, max_len)
     # Mix accepted/rejected positions: argmax equals draft ~60% of the time.
@@ -114,6 +115,11 @@ def test_greedy_and_random(seed, vocab, no_draft, synthetic):
     if dprobs is not None and total:
         dprobs[0, draft[0]] = 0.0  # draft_prob == 0 must reject
     recovered = torch.randint(0, vocab, (total,), generator=g, dtype=torch.int32)
+    if padded:
+        # vLLM >= 0.30 schedules -1 placeholder drafts; both kernels must
+        # reject them (and the random kernel must not index probs with them).
+        pad = torch.rand(total, generator=g) < 0.3
+        draft = torch.where(pad, torch.full_like(draft, -1), draft)
 
     for mask in (None, is_greedy):
         ref = torch.full((batch, max_len + 1), -1, dtype=torch.int32)

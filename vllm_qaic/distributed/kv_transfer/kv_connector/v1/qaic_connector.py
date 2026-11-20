@@ -762,6 +762,17 @@ class QaicConnector(KVConnectorBase_V1):
             )
         return handoff_id
 
+    @staticmethod
+    def _num_scheduled_prompt_tokens(
+        scheduler_output: SchedulerOutput, req_id: str
+    ) -> int:
+        # vLLM >= 0.30 pads a waiting request with a single new token (e.g. a
+        # disagg consumer after the KV transfer) to 1 + K tokens with K
+        # placeholder drafts. Those are not prompt tokens; counting them would
+        # mark the prefill as partial and reload the consumed KV next step.
+        num_spec = len(scheduler_output.scheduled_spec_decode_tokens.get(req_id, ()))
+        return scheduler_output.num_scheduled_tokens[req_id] - num_spec
+
     def build_connector_meta(
         self,
         scheduler_output: SchedulerOutput,
@@ -779,7 +790,7 @@ class QaicConnector(KVConnectorBase_V1):
         total_need_load = 0
         for new_req in scheduler_output.scheduled_new_reqs:
             total_prefill_tokens = (
-                scheduler_output.num_scheduled_tokens[new_req.req_id]
+                self._num_scheduled_prompt_tokens(scheduler_output, new_req.req_id)
                 + new_req.num_computed_tokens
             )
             if new_req.req_id in self._request_tracker:
@@ -809,7 +820,7 @@ class QaicConnector(KVConnectorBase_V1):
         cached_reqs = scheduler_output.scheduled_cached_reqs
         for i, req_id in enumerate(cached_reqs.req_ids):
             total_prefill_tokens = (
-                scheduler_output.num_scheduled_tokens[req_id]
+                self._num_scheduled_prompt_tokens(scheduler_output, req_id)
                 + cached_reqs.num_computed_tokens[i]
             )
             if req_id in self._request_tracker:

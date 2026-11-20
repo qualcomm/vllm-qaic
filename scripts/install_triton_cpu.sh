@@ -18,7 +18,10 @@
 #   TRITON_CPU=1 ./scripts/install.sh aot
 #
 # Then run the parity tests:
-#   VLLM_QAIC_REQUIRE_TRITON_PARITY=1 pytest -s tests/unit/spec_decode/rejection_parity
+#   CUDA_VISIBLE_DEVICES= VLLM_QAIC_REQUIRE_TRITON_PARITY=1 \
+#       pytest -s tests/unit/spec_decode/rejection_parity
+#   (vLLM >= 0.30 ignores the triton cpu backend unless CUDA_VISIBLE_DEVICES is
+#   set to an empty string.)
 #
 # Environment (all have defaults in utility.sh):
 #   TRITON_CPU_SRC      Clone destination (default: $HOME/triton-cpu)
@@ -62,13 +65,23 @@ if [ "${TRITON_CPU_SKIP_DISK_CHECK:-0}" != "1" ]; then
 fi
 
 # ── Clone / checkout triton-cpu ───────────────────────────────────────────────
-if [ ! -f "${TRITON_CPU_SRC}/python/setup.py" ]; then
+if [ ! -e "${TRITON_CPU_SRC}/.git" ]; then
     echo "INFO: triton-cpu not found at ${TRITON_CPU_SRC} — cloning..."
     git clone https://github.com/triton-lang/triton-cpu "${TRITON_CPU_SRC}"
+fi
+# An existing clone from an older pin may not have the new commit yet.
+if ! git -C "${TRITON_CPU_SRC}" cat-file -e "${TRITON_CPU_COMMIT}^{commit}" 2>/dev/null; then
+    git -C "${TRITON_CPU_SRC}" fetch origin
 fi
 echo "INFO: checking out commit ${TRITON_CPU_COMMIT}"
 git -C "${TRITON_CPU_SRC}" checkout "${TRITON_CPU_COMMIT}"
 git -C "${TRITON_CPU_SRC}" submodule update --init --recursive
+# Triton 3.4+ moved setup.py from python/ to the repository root.
+if [ -f "${TRITON_CPU_SRC}/setup.py" ]; then
+    TRITON_CPU_PKG="${TRITON_CPU_SRC}"
+else
+    TRITON_CPU_PKG="${TRITON_CPU_SRC}/python"
+fi
 
 # ── Resolve the active Python / pip ────────────────────────────────────────
 # Prefer ${VIRTUAL_ENV}/bin/python when a venv is active — command -v python can
@@ -136,12 +149,13 @@ export TRITON_CUPTI_LIB_PATH="${TRITON_CUPTI_LIB_PATH:-/usr/lib/x86_64-linux-gnu
 # ── Build dependencies (needed because --no-build-isolation skips pyproject.toml) ──
 # pip does not install triton-cpu's [build-system].requires under
 # --no-build-isolation, so install them here: requirements/build.txt
-# (setuptools, wheel, cmake, ...) plus triton-cpu's pybind11/ninja.
+# (setuptools, wheel, cmake, ...) plus triton-cpu's own [build-system].requires
+# (pybind11 up to triton 3.3, nanobind and cmake<4 from 3.4 on).
 # install.sh installs requirements/build.txt before calling this script, but
 # a standalone run (e.g. in a fresh venv) would otherwise lack them: Python
 # 3.12 venvs ship no setuptools. After install.sh this is a no-op.
 ${PIP} install -r "${SCRIPT_DIR}/../requirements/build.txt" \
-    "pybind11>=2.13.1" "ninja>=1.11.1"
+    "pybind11>=2.13.1" "ninja>=1.11.1" "nanobind==2.10.2" "cmake>=3.26,<4.0"
 
 # pip treats a half-removed cmake as installed, leaving a wrapper that exits 1;
 # fail here with a clear fix instead of a CalledProcessError inside setup.py.
@@ -152,8 +166,10 @@ if ! cmake --version >/dev/null 2>&1; then
 fi
 
 # ── Install (editable, no build isolation so it reuses existing torch) ──────
+# Proton (the GPU profiler) needs CUDA headers and is not used on CPU.
+export TRITON_BUILD_PROTON="${TRITON_BUILD_PROTON:-0}"
 echo "=== Building and installing triton-cpu (editable) ==="
-if ! MAX_JOBS="${TRITON_CPU_COMPILE_MAX_JOBS:-4}" ${PIP} install -e "${TRITON_CPU_SRC}/python" --no-build-isolation; then
+if ! MAX_JOBS="${TRITON_CPU_COMPILE_MAX_JOBS:-4}" ${PIP} install -e "${TRITON_CPU_PKG}" --no-build-isolation; then
     echo "" >&2
     echo "ERROR: triton-cpu C++ build failed (see output above)." >&2
     echo "  If the error mentions 'Disk quota exceeded' or 'No space left on device':" >&2
@@ -186,5 +202,6 @@ echo "  triton-cpu installed successfully (parity-test extra only;"
 echo "  not needed for AOT SpD, which uses the Numba rejection sampler)"
 echo ""
 echo "  Run the Numba/Triton rejection-sampler parity tests with:"
-echo "    VLLM_QAIC_REQUIRE_TRITON_PARITY=1 pytest -s tests/unit/spec_decode/rejection_parity"
+echo "    CUDA_VISIBLE_DEVICES= VLLM_QAIC_REQUIRE_TRITON_PARITY=1 \\"
+echo "        pytest -s tests/unit/spec_decode/rejection_parity"
 echo "========================================================"

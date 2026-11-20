@@ -17,7 +17,7 @@ QEFF_BRANCH="${QEFF_BRANCH:-main}"
 # TRANSFORMERS_VERSION_AOT="4.55.3"  # optional: uncomment to pin if qefficient's version conflicts
 VLLM_TARGET_DEVICE_AOT="${VLLM_TARGET_DEVICE_AOT:-empty}"
 TRITON_CPU="${TRITON_CPU:-0}"                          # set to 1 to enable
-TRITON_CPU_COMMIT="${TRITON_CPU_COMMIT:-e60f448f8f197073b75d6d3e77347414a5db3ee7}"
+TRITON_CPU_COMMIT="${TRITON_CPU_COMMIT:-274d157b94b244d61d69d26e27b8c897d61e75fb}"  # triton 3.9, matches vLLM 0.30
 TRITON_CPU_SRC="${TRITON_CPU_SRC:-${SCRIPT_DIR}/../.build/triton-cpu}"                 # clone destination
 TRITON_CPU_COMPILE_MAX_JOBS="${TRITON_CPU_COMPILE_MAX_JOBS:-4}"        # parallel build jobs
 

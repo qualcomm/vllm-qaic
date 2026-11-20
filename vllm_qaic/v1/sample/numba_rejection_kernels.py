@@ -9,7 +9,7 @@
 """Numba CPU ports of vLLM's rejection-sampler Triton kernels.
 
 Each ``*_numba`` function takes the same CPU tensors as the matching upstream
-Triton kernel (vllm/v1/sample/rejection_sampler.py, v0.23.0) and writes into
+Triton kernel (vllm/v1/sample/rejection_sampler.py, v0.30.0) and writes into
 the same preallocated output, so results can be compared bit-exactly.  The
 tensor -> NumPy view conversion happens inside the function and is therefore
 part of any timed call.
@@ -83,7 +83,8 @@ def _greedy_row(out, req, cu, draft, argmax, bonus, stride, uniform, rates, synt
         d = draft[start + pos]
         t = np.int32(argmax[start + pos])
         if synthetic:
-            accepted = uniform[start + pos] < rates[pos]
+            # -1 marks a padded draft slot that must be rejected.
+            accepted = uniform[start + pos] < rates[pos] and d >= 0
             out[base + pos] = d if accepted else t
             rejected = not accepted
         else:
@@ -170,7 +171,10 @@ def _random_row(
     for pos in range(n):
         tok = start + pos
         d = draft[tok]
-        if synthetic:
+        if d < 0:
+            # -1 marks a padded draft slot: reject before indexing the probs.
+            accepted = False
+        elif synthetic:
             accepted = uniform[tok] < rates[pos]
         else:
             # Keep the division in the input dtype (fp32/fp32) as Triton does;

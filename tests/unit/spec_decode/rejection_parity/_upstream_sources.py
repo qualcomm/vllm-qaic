@@ -47,7 +47,15 @@ CALL_SITES = (
     "RejectionSampler.__init__",
     "RejectionSampler.forward",
 )
-HASHED_NAMES = KERNELS + CALL_SITES
+# v0.30 launch wrappers: the Numba dispatchers mirror their grid / constexpr
+# derivation, so a change here must re-run tier A too.
+DISPATCHERS = (
+    "_expand",
+    "_rejection_greedy_sample",
+    "_rejection_random_sample",
+    "_sample_recovered_tokens",
+)
+HASHED_NAMES = KERNELS + CALL_SITES + DISPATCHERS
 CONSTANTS = ("MAX_SPEC_LEN", "PLACEHOLDER_TOKEN_ID", "GREEDY_TEMPERATURE")
 # Helpers in other modules whose output feeds the kernels: {qualname: module}.
 EXTERNAL = {
