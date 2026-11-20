@@ -351,9 +351,7 @@ class QaicPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-        from vllm.triton_utils import HAS_TRITON
-
-        if HAS_TRITON and not cls.is_aot:
+        if _HAS_TRITON and not cls.is_aot:
             if "QAIC_NUM_CORES" not in os.environ:
                 os.environ.setdefault("QAIC_NUM_CORES", str(cls.get_num_cores()))
             if "QAIC_NUM_THREADS" not in os.environ:
