@@ -482,19 +482,29 @@ class QaicPlatform(Platform):
                         "Only 'ngram' and 'suffix' are supported. "
                         "Draft-model SpD requires AOT compilation."
                     )
-                # KV-cache rollback on rejection does not restore recurrent
-                # (mamba / linear-attention) state.
+                # Upstream keeps one recurrent-state slot per speculative
+                # position and selects it by num_accepted_tokens inside the
+                # mamba/GDN Triton kernels, but only for is_hybrid models, so
+                # attention-free models are unsupported upstream too. For
+                # hybrids the mechanism is inherited but unvalidated on QAIC:
+                # the Mamba2 SSD prefill kernel already fails without SpD.
                 if model_config.is_hybrid or model_config.is_attention_free:
                     raise ValueError(
                         "Speculative decoding is not supported in eager (PYT) "
-                        "mode on QAIC for models with linear-attention or other "
-                        "recurrent-state layers."
+                        "mode on QAIC for hybrid or attention-free (recurrent "
+                        "state) models: recurrent-state speculative decoding "
+                        "is not validated on QAIC."
                     )
                 if model_config.use_fp64_gumbel:
                     raise ValueError(
                         "use_fp64_gumbel is not supported with speculative "
                         "decoding in eager (PYT) mode: QAIC has no float64."
                     )
+                from vllm_qaic.v1.sample.rejection_sampler_shim import (
+                    require_qualcomm_triton,
+                )
+
+                require_qualcomm_triton()
             if scheduler_config.async_scheduling:
                 logger.warning_once(
                     "QAIC eager mode does not support async scheduling; "

@@ -17,9 +17,10 @@ float64, which the QAIC backend does not support
 (``RuntimeError: Unsupported datatype for QAIC: Double``).  This shim rebinds it
 to a float32 version.
 
-``vllm_qaic.patch.patch_qaic_triton_import`` sets ``HAS_TRITON`` when the
-Qualcomm backend is present; the Qualcomm Triton wheel with
-``qcom_hexagon_backend`` must be installed.
+The kernels need the Qualcomm Triton wheel with ``qcom_hexagon_backend``; with
+it installed, upstream's own Triton detection sets ``HAS_TRITON``.  The platform
+checks this once at config time (``require_qualcomm_triton``), because a missing
+backend otherwise only surfaces at the first speculative step.
 """
 
 from __future__ import annotations
@@ -63,7 +64,12 @@ def generate_uniform_probs(
 _shim_installed = False
 
 
-def _require_qualcomm_triton() -> None:
+def require_qualcomm_triton() -> None:
+    """Fail at config time if the Qualcomm Triton backend is missing.
+
+    Without it, upstream binds ``TritonPlaceholder`` and the rejection-sampler
+    kernels only fail at the first speculative step with an opaque error.
+    """
     try:
         from triton.backends import backends
     except ImportError as exc:
@@ -84,8 +90,6 @@ def install() -> None:
     global _shim_installed
     if _shim_installed:
         return
-
-    _require_qualcomm_triton()
 
     import vllm.v1.sample.rejection_sampler as rejection_sampler
 

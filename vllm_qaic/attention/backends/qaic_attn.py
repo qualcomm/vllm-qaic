@@ -6,6 +6,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Adapted from vllm/vllm/v1/attention/backends/cpu_attn.py
 
+import logging
 import os
 from dataclasses import dataclass
 from typing import ClassVar
@@ -338,7 +339,7 @@ class QAicAttentionBackendImpl(AttentionImpl):
             )
 
         key_cache, value_cache = kv_cache.split(self.head_size, dim=-1)
-        if self._run_native_paged_attention(
+        native_path = self._run_native_paged_attention(
             query=query,
             key=key,
             value=value,
@@ -347,7 +348,16 @@ class QAicAttentionBackendImpl(AttentionImpl):
             output=output,
             attn_metadata=attn_metadata,
             num_actual_tokens=num_actual_tokens,
-        ):
+        )
+        if logger.isEnabledFor(logging.DEBUG):
+            # Logged once per (path, query shape); used to prove which KV path
+            # serves multi-token rows such as speculative-decoding verify rows.
+            logger.debug_once(
+                "QAIC decoder attention path: %s (max_query_len %s)",
+                native_path or "sdpa",
+                ">1" if attn_metadata.max_query_len > 1 else "1",
+            )
+        if native_path:
             return output
 
         return self._run_sdpa_decode_forward(
@@ -368,26 +378,31 @@ class QAicAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
         attn_metadata: QAicAttentionMetadata,
         num_actual_tokens: int,
-    ) -> bool:
+    ) -> str | None:
+        """Run the native paged-attention kernel when supported.
+
+        Returns the native variant that ran (``"native-single"`` or
+        ``"native-split"``), or None when the SDPA fallback must be used.
+        """
         if os.environ.get("QAIC_NATIVE_PAGED_ATTN", "1") == "0":
-            return False
+            return None
         write_cache = self.kv_sharing_target_layer_name is None
         if self.attn_type != AttentionType.DECODER:
-            return False
+            return None
         if query.device.type != "qaic" or query.dtype != torch.float16:
-            return False
+            return None
         if key_cache.dtype != torch.float16 or value_cache.dtype != torch.float16:
-            return False
+            return None
         if self.alibi_slopes is not None:
-            return False
+            return None
         if self.sliding_window[1] not in (-1, 0):
-            return False
+            return None
         if self.logits_soft_cap != 0:
-            return False
+            return None
         if self.sinks is not None and self.sinks.shape != (self.num_heads,):
-            return False
+            return None
         if self.num_kv_heads <= 0:
-            return False
+            return None
         backend = os.environ.get("QAIC_PAGED_ATTN_BACKEND")
         if backend is None:
             backend = (
@@ -395,27 +410,32 @@ class QAicAttentionBackendImpl(AttentionImpl):
             )
         backend = backend.lower()
         if backend == "hvx" and self.head_size > 256:
-            return False
+            return None
         if self.num_heads % self.num_kv_heads != 0:
-            return False
+            return None
         if query.dim() != 3:
-            return False
+            return None
         if write_cache:
             if key is None or value is None:
-                return False
+                return None
             if key.dtype != torch.float16 or value.dtype != torch.float16:
-                return False
+                return None
             if key.dim() != 3 or value.dim() != 3:
-                return False
+                return None
         if key_cache.dim() != 4 or value_cache.dim() != 4:
-            return False
+            return None
         if num_actual_tokens <= 0:
-            return True
+            return "native-single"
 
         try:
             from vllm_qaic import _custom_ops as qaic_ops
-        except Exception:
-            return False
+        except Exception as e:
+            logger.warning_once(
+                "QAIC native paged attention unavailable (%s); "
+                "falling back to SDPA attention.",
+                e,
+            )
+            return None
 
         native_key = key[:num_actual_tokens] if key is not None else None
         native_value = value[:num_actual_tokens] if value is not None else None
@@ -487,7 +507,7 @@ class QAicAttentionBackendImpl(AttentionImpl):
             output[num_decode_tokens:num_actual_tokens].copy_(
                 prefill_out.reshape_as(output[num_decode_tokens:num_actual_tokens])
             )
-            return True
+            return "native-split"
 
         native_out = qaic_ops.paged_attention(
             query[:num_actual_tokens],
@@ -508,7 +528,7 @@ class QAicAttentionBackendImpl(AttentionImpl):
         output[:num_actual_tokens].copy_(
             native_out.reshape_as(output[:num_actual_tokens])
         )
-        return True
+        return "native-single"
 
     def _run_sdpa_decode_forward(
         self,

@@ -38,5 +38,5 @@ Eager (PYT) mode currently supports a focused set of vision-language models via 
 | Quantization | mxfp6, mxint8 KV cache | Not supported |
 | First-token latency | Depends on QPC compile time (cached) | Immediate startup |
 | Text-only LLMs | Broad support | Not validated |
-| Speculative decoding | Full support (ngram, suffix, draft) | Not supported |
+| Speculative decoding | Full support (ngram, suffix, draft) | `ngram` and `suffix` only |
 | Multimodal (VLM) | Supported | Experimental |

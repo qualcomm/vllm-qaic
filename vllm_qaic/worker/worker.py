@@ -225,10 +225,8 @@ class QaicWorkerPyt(QaicWorker):
 
         register_qaic_customop()
 
-        # Patches and the SpD rejection-sampler shim must be active in this
-        # (worker) process, where sampling runs; install() is idempotent.
-        from vllm_qaic import patch  # noqa: F401
-
+        # The SpD rejection-sampler shim must be active in this (worker)
+        # process, where sampling runs; install() is idempotent.
         if self.speculative_config is not None:
             from vllm_qaic.v1.sample.rejection_sampler_shim import (
                 install as install_rejection_sampler_shim,
