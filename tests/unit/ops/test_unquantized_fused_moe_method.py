@@ -115,3 +115,55 @@ def test_fused_kernel_on_device(monkeypatch, kernel, activation, has_bias, num_t
     ).cpu()
 
     torch.testing.assert_close(out.float(), expected, atol=2e-2, rtol=2e-2)
+
+
+@requires_qaic
+@pytest.mark.parametrize("kernel", ["hmx", "hvx"])
+def test_fused_kernel_repeated_routes_on_device(monkeypatch, kernel):
+    """Exercise the NSP join with changing routes, tails, and remote experts."""
+    monkeypatch.setenv("QAIC_UNQUANTIZED_FUSED_MOE_KERNEL", kernel)
+    torch.manual_seed(91)
+    global_experts, local_experts, hidden, intermediate, topk = 128, 16, 65, 33, 8
+    w13 = 0.02 * torch.randn(local_experts, 2 * intermediate, hidden).half()
+    w2 = 0.02 * torch.randn(local_experts, hidden, intermediate).half()
+    b13 = 0.01 * torch.randn(local_experts, 2 * intermediate).half()
+    b2 = 0.01 * torch.randn(local_experts, hidden).half()
+    expert_map = torch.full((global_experts,), -1, dtype=torch.float32)
+    expert_map[1::8] = torch.arange(local_experts, dtype=torch.float32)
+    layer = make_layer(
+        "silu",
+        w13_weight=w13.to("qaic:0"),
+        w2_weight=w2.to("qaic:0"),
+        w13_bias=b13.to("qaic:0"),
+        w2_bias=b2.to("qaic:0"),
+    )
+    layer.expert_map = expert_map.to("qaic:0")
+    method = make_method(QAicUnquantizedFusedMoEMethod, has_bias=True)
+    pending = []
+    # Queue successive calls before reading outputs. Every invocation must
+    # complete its grouping/compute dependencies even when another call follows.
+    for step, tokens in enumerate([1, 17, 3, 128, 1, 17, 3, 128]):
+        x = torch.randn(tokens, hidden).half()
+        weights, ids = make_routing(tokens, global_experts, topk)
+        if step % 4 == 1:
+            ids[:] = torch.arange(topk, dtype=torch.int32) * 8 + 1
+        elif step % 4 == 2:
+            ids[:] = torch.arange(topk, dtype=torch.int32) * 2
+        mapped = expert_map[ids.long()].long()
+        expected = ref_moe(
+            x,
+            weights * (mapped >= 0),
+            mapped.clamp_min(0),
+            w13,
+            w2,
+            b13,
+            b2,
+            "silu",
+        )
+        actual = method.forward_oot(
+            layer, x.to("qaic:0"), weights.to("qaic:0"), ids.to("qaic:0")
+        )
+        pending.append((actual, expected))
+
+    for actual, expected in pending:
+        torch.testing.assert_close(actual.cpu().float(), expected, atol=2e-2, rtol=2e-2)
