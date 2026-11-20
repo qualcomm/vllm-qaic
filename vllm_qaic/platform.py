@@ -33,7 +33,6 @@ except ImportError:
     qaic = PlaceholderModule("qaic")
 
 if TYPE_CHECKING:
-    from qaicrt import QDevInfo
     from vllm.config import ModelConfig, VllmConfig
 else:
     ModelConfig = None
@@ -286,8 +285,7 @@ class QaicPlatform(Platform):
         return False
 
     @classmethod
-    @functools.cache
-    def _get_qaic_device_info(cls, device_id: int = 0) -> "QDevInfo":
+    def get_num_cores(cls, device_id: int = 0) -> int:
         try:
             import qaicrt
         except ModuleNotFoundError as exc:
@@ -307,11 +305,6 @@ class QaicPlatform(Platform):
             raise RuntimeError(
                 f"QAIC device info query failed for QID {device_id}: {status}"
             )
-        return info
-
-    @classmethod
-    def get_num_cores(cls, device_id: int = 0) -> int:
-        info = cls._get_qaic_device_info(device_id)
         return info.devData.resourceInfo.nspTotal
 
     @classmethod
@@ -321,14 +314,12 @@ class QaicPlatform(Platform):
         AIC version: AI100 : 0x20000 has 4 HVX threads per NSP core
         AIC version: AI200 : 0x30200 has 8 HVX threads per NSP core
         """
-        info = cls._get_qaic_device_info(device_id)
-        if info.devData.hwVersion == 0x20000:
+        hw_version = cls.get_hw_version(device_id)
+        if hw_version == 0x20000:
             return 4
-        if info.devData.hwVersion == 0x30200:
+        if hw_version == 0x30200:
             return 8
-        raise RuntimeError(
-            f"Unsupported AIC version {info.devData.hwVersion} for QID {info.qid}"
-        )
+        raise RuntimeError(f"Unsupported AIC version {hw_version} for QID {device_id}")
 
     @classmethod
     def num_compute_units(cls, device_id: int = 0) -> int:
