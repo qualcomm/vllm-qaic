@@ -605,7 +605,17 @@ def qaic_runner_factory(vllm_runner, device_pool_ids):
         num_device_groups=1,
         device_group_size=1,
         disable_log_stats=True,
+        dtype=None,
+        enforce_eager=None,
+        **llm_kwargs,
     ):
+        # Model dtype / enforce_eager are only forwarded when set, so callers
+        # that omit them keep VllmRunner's defaults. `quantization` (not
+        # `dtype`) carries the AOT weight format, as in `qaic_model`.
+        if dtype is not None:
+            llm_kwargs["dtype"] = dtype
+        if enforce_eager is not None:
+            llm_kwargs["enforce_eager"] = enforce_eager
         ids = _device_pool.acquire(
             device_pool_ids, num_device_groups * device_group_size
         )
@@ -631,6 +641,7 @@ def qaic_runner_factory(vllm_runner, device_pool_ids):
                 disable_log_stats=disable_log_stats,
                 speculative_config=speculative_config,
                 additional_config=additional_config,
+                **llm_kwargs,
             )
             with runner as model:
                 yield model
@@ -654,8 +665,7 @@ def pytest_collection_modifyitems(session, config, items):
         else len(config.getoption("device_id"))
     )
     for item in items:
-        marker = item.get_closest_marker("qaic_test_config")
-        kwargs = marker.kwargs if marker is not None else {}
+        kwargs = _marker_kwargs(item.get_closest_marker("qaic_test_config"))
         roles = ("encode", "prefill", "decode")
         if any(f"num_{role}_workers" in kwargs for role in roles):
             required = sum(

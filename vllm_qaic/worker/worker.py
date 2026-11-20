@@ -225,6 +225,15 @@ class QaicWorkerPyt(QaicWorker):
 
         register_qaic_customop()
 
+        # The SpD rejection-sampler shim must be active in this (worker)
+        # process, where sampling runs; install() is idempotent.
+        if self.speculative_config is not None:
+            from vllm_qaic.v1.sample.rejection_sampler_shim import (
+                install as install_rejection_sampler_shim,
+            )
+
+            install_rejection_sampler_shim()
+
     def annotate_profile(self, scheduler_output):
         # adapted from v1/worker/gpu_worker.py
         # add trace annotation so that we can easily distinguish

@@ -11,6 +11,12 @@ Speculative decoding (SpD) accelerates token generation by using a fast proposer
     is needed for SpD or normal AOT serving. The dedicated parity environment must
     be installed with `TRITON_CPU=1` to run mandatory Tier A Numba/Triton tests.
 
+!!! note "Eager (PYT) mode"
+    In PYT (eager) mode only `ngram` and `suffix` are supported; `draft_model`
+    and `dflash` require AOT mode. The eager rejection sampler runs upstream's
+    Triton kernels through the Qualcomm Triton backend instead of Numba. `suffix` requires
+    `arctic-inference` (`pip install vllm-qaic[spd]`).
+
 ## Methods
 
 Cloud AI supports four speculative decoding methods:
@@ -216,27 +222,6 @@ No additional hardware is required — both models run on the same device.
     | `override_qaic_config.num_cores` | Compute for verification (target) | 10-12 for 8B models |
     | `draft_override_qaic_config.num_cores` | Compute for proposing (draft) | 4-6 for 1B models |
     | `max_num_seqs` | Batch size | Lower batch = higher acceptance rate |
-
-!!! tip "LD_PRELOAD libiomp5 for CPU-bound SpD proposers (AOT mode)"
-    For AOT mode, `ngram`/`suffix` SpD proposers run on host CPU and benefit
-    from Intel OpenMP (`libiomp5.so`) runtime tuning — on both Intel **and**
-    AMD hosts. Benchmarks on an AMD EPYC host showed meaningful throughput
-    gains for CPU-bound proposers like `ngram`, with the improvement growing
-    at higher batch sizes (actual gains are workload-dependent).
-
-    ```bash
-    # install Intel OpenMP (provides libiomp5.so) into your active venv
-    pip install intel-openmp
-
-    # manually find the path
-    IOMP_PATH=$(find "$(python -c 'import sysconfig; print(sysconfig.get_paths()["data"])')" -iname "libiomp5.so" | head -1)
-
-    # add it to LD_PRELOAD
-    export LD_PRELOAD="$IOMP_PATH:$LD_PRELOAD"
-    ```
-
-    When `libiomp5.so` is on `LD_PRELOAD`, vllm-qaic sets `KMP_BLOCKTIME=1` and
-    `KMP_TPAUSE=0`. Set `VLLM_DISABLE_LD_PRELOAD_OPT=1` to opt out of this tuning.
 
 ## SpD with Disaggregated Serving
 
