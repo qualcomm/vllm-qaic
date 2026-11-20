@@ -7,6 +7,7 @@
 
 import json
 import os
+import regex as re
 import threading
 import time
 from collections import deque
@@ -1791,7 +1792,6 @@ single_qpc_config = {
     "qpc_path": os.environ.get("VLLM_QAIC_QPC_PATH", None),
     "mos": os.environ.get("VLLM_QAIC_MOS", None),
     "aic_enable_depth_first": os.environ.get("VLLM_QAIC_DFS_EN", None),
-    "device_group": os.environ.get(current_platform.device_control_env_var, None),
     "num_cores": os.environ.get("VLLM_QAIC_NUM_CORES", None),
     "compiler_args": os.environ.get("VLLM_QAIC_COMPILER_ARGS", None),
 }
@@ -2146,6 +2146,19 @@ def _get_qaic_compile_config(
     cfg.pop("weight_free", None)
     # update through environment variable
     cfg.update(_clean_config(QAIC_DEVICE_CONFIG[speculative_model_type]))
+    # QAIC_VISIBLE_DEVICES selects the devices qaicrt sees and renumbers them
+    # from 0, so device_group holds QIDs in that renumbered space. Without a
+    # device_group, use every visible device. Draft/target speculative models
+    # take their QIDs from VLLM_QAIC_SPEC_{DRAFT,TARGET}_QID instead.
+    if cfg["device_group"] is None and speculative_model_type not in (
+        "draft",
+        "target",
+    ):
+        visible = os.environ.get(current_platform.device_control_env_var, "")
+        num_visible = len(re.findall(r"\d+", visible))
+        if num_visible:
+            cfg["device_group"] = list(range(num_visible))
+            cfg["num_devices"] = num_visible
     if speculative_model_type == "draft":
         # The draft model is never disaggregated: it always runs its own
         # prefill inline (see qaic_draft_model.py's propose()), so it needs

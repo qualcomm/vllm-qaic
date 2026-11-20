@@ -56,6 +56,14 @@ additional_config={"override_qaic_config": {"device_group": [0]}}
 additional_config={"override_qaic_config": {"device_group": [0, 1, 2, 3]}}
 ```
 
+!!! note "device_group and QAIC_VISIBLE_DEVICES"
+    `device_group` applies to AoT mode only; PyT mode selects devices with
+    `QAIC_VISIBLE_DEVICES` alone, set before vLLM (and torch) is imported.
+    When `QAIC_VISIBLE_DEVICES` is set, the visible devices are renumbered
+    from 0, and `device_group` indexes into that list: with
+    `QAIC_VISIBLE_DEVICES=4,5,6,7`, `device_group: [0, 1]` runs on physical
+    QIDs 4 and 5. Without a `device_group`, AoT uses every visible device.
+
 !!! tip "Same board serial"
     For tensor-parallel execution across multiple QIDs, always select QIDs that share
     the same board serial number (i.e., on the same physical card) for optimal
