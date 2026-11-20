@@ -493,9 +493,9 @@ class QaicPlatform(Platform):
                                     "prefill_seq_len"
                                 )
                             else:
-                                # Default prefill length: min(128, max_model_len).
-                                cache_config.block_size = min(
-                                    128, model_config.max_model_len
+                                # Keep vLLM's default when neither size is provided.
+                                override_qaic_config["prefill_seq_len"] = (
+                                    cache_config.block_size
                                 )
                 else:
                     cache_config.block_size = model_config.max_model_len  # ctx_len
