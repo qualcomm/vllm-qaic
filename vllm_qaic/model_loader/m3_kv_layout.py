@@ -7,14 +7,10 @@
 Ported, oracle-verified reshape/transpose math -- reshards a CP=1 prefill KV
 buffer into the CP=`cp` layout a decode QPC expects. `attention_cp1_to_cpn`
 covers `past_key.*`/`past_value.*`; `index_cp1_to_cpn` covers the lightning
-indexer's `index_key.*` (block-cyclic, granularity `INDEX_BLOCK_SIZE`).
+indexer's `index_key.*`
 """
 
 import numpy as np
-
-# The one M3 model constant that can't be read back out of a QPC's own
-# binding dims.
-INDEX_BLOCK_SIZE = 128
 
 
 def attention_cp1_to_cpn(
