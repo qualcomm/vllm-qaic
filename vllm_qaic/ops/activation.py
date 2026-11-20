@@ -10,6 +10,9 @@ import torch
 from vllm.model_executor.layers.activation import SiluAndMul
 
 from vllm_qaic.ops._triton_flags import triton_op_enabled
+from vllm.model_executor.layers.activation import (
+    swiglustep_and_mul_triton,
+)
 
 triton_en = triton_op_enabled("SILU_AND_MUL")
 
@@ -57,10 +60,6 @@ class QAicSiluAndMul(SiluAndMul):
         # dims to be safe and restore the original shape afterwards. Flag off ->
         # the QAIC NSP swiglu op below, bit-for-bit.
         if triton_en:
-            from vllm.model_executor.layers.activation import (
-                swiglustep_and_mul_triton,
-            )
-
             d = x.shape[-1] // 2
             x2d = x.reshape(-1, x.shape[-1])
             out2d = torch.empty((x2d.shape[0], d), dtype=x.dtype, device=x.device)

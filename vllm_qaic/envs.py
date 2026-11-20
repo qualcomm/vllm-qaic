@@ -36,8 +36,8 @@ if TYPE_CHECKING:
     # Repurpose vLLM's SWIGLUSTEP Triton kernel (swiglustep_and_mul_triton) as
     # plain SiluAndMul (limit=+inf); routes the SwiGLU MLP activation to Triton.
     VLLM_QAIC_TRITON_SILU_AND_MUL: bool = False
-    # Route the unquantized fused-MoE forward to vLLM's hand-written Triton
-    # fused-MoE kernel (fused_experts -> fused_moe_kernel)
+    # Route unquantized fused MoE and GPT-OSS MXFP4 experts through their
+    # upstream Triton kernels.
     VLLM_QAIC_TRITON_FUSED_MOE: bool = False
     # Route the unquantized linear/GEMM family (QKV/Column/Row/MergedColumn
     # ParallelLinear, ParallelLMHead, LogitsProcessor matmul) to vLLM's

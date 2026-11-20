@@ -13,6 +13,7 @@ from vllm.model_executor.layers.rotary_embedding.mrope import (
 )
 
 from vllm_qaic.ops._triton_flags import triton_op_enabled
+from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
 
 triton_en = triton_op_enabled("MROTARY_EMBEDDING")
 
@@ -50,8 +51,6 @@ class QAicMRotaryEmbedding(MRotaryEmbedding):
         # (triton_mrope requires 2D positions).
         # ------------------------------------------------------------------
         if positions.ndim == 2 and triton_en:
-            from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
-
             assert self.mrope_section
             cos_sin = cos_sin_cache[positions]  # [3, num_tokens, rotary_dim]
             cos, sin = cos_sin.chunk(2, dim=-1)  # each [3, num_tokens, half]
@@ -66,6 +65,7 @@ class QAicMRotaryEmbedding(MRotaryEmbedding):
                 self.head_size,
                 self.rotary_dim,
                 self.mrope_interleaved,
+                self.is_neox_style,
             )
             return q.reshape(query_shape), k.reshape(key_shape)
 
