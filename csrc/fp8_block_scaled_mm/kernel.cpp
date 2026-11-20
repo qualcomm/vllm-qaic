@@ -533,7 +533,9 @@ QAIC_KERNEL_API int32_t multinsp_multithreaded_fp8_block_scaled_mm(
 
   // Slots 0..4 are tensors (a, b, as, bs, out); 5..10 are int32 scalars.
   AicJitPtr aPtr = 0, bPtr = 0, asPtr = 0, bsPtr = 0, outPtr = 0;
-  int32_t m = 0, n = 0, k = 0, blockN = 0, blockK = 0, dtypeId = 0;
+  // Scalars are written by get_i32_arg below; every failure path returns before
+  // they are read.
+  int32_t m, n, k, blockN, blockK, dtypeId;
   if (!get_arg(pointerArray, 0, &aPtr) || !get_arg(pointerArray, 1, &bPtr) ||
       !get_arg(pointerArray, 2, &asPtr) || !get_arg(pointerArray, 3, &bsPtr) ||
       !get_arg(pointerArray, 4, &outPtr) || !get_i32_arg(pointerArray, 5, &m) ||
