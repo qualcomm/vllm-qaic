@@ -30,7 +30,8 @@
 #   - vllm is installed from source with target device "empty" (no C++ build)
 #   - vllm_qaic itself compiles Hexagon kernel C++ extensions — build-essential
 #     and cmake are required; QAIC_DEVICE_ARCH controls which sources compile
-#   - No triton-cpu step (PYT mode has no equivalent)
+#   - No triton-cpu step; instead optional triton-qaic (TRITON_QAIC=1): SDK
+#     Triton-QAIC wheel + triton_kernels
 #   - Rust frontend build (VLLM_BUILD_RUST) is shared with Dockerfile.aot —
 #     it's independent of the AOT/PYT backend split
 #   - TORCH_QAIC_INSTALLED is not set (auto-detected = 1 via torch_qaic import)
@@ -67,6 +68,10 @@
 #     --build-arg PYTHON_VERSION=3.11 \
 #     --build-arg WHEEL_NAME=vllm_qaic-1.24.0+pyt-cp311-cp311-linux_x86_64.whl \
 #     --output type=local,dest=./dist/pyt/py311 .
+#
+#   # Any target — also install triton-qaic (SDK Triton-QAIC wheel + triton_kernels):
+#   docker build --target release -f docker/Dockerfile.pyt \
+#     --build-arg TRITON_QAIC=1 -t vllm-qaic-pyt:1.24-triton .
 #
 #   # Any target — also build vllm's experimental Rust OpenAI frontend
 #   # (vllm-rs). See docs/installation.md for known caveats.
@@ -117,6 +122,14 @@ ARG TORCHVISION_VERSION_PYT="0.28.0+cpu"
 ARG TORCHAUDIO_VERSION_PYT="2.11.0+cpu"
 ARG VLLM_TARGET_DEVICE_PYT="empty"
 ARG TORCH_QAIC_BASE_PATH="/opt/qti-aic/integrations/torch_qaic"
+
+# ---------------------------------------------------------------------------
+# triton-qaic — optional; default OFF. Installs the SDK Triton-QAIC wheel and
+# triton_kernels (pinned to the tag vllm 0.30.0 pins).
+# ---------------------------------------------------------------------------
+ARG TRITON_QAIC="0"
+ARG TRITON_QAIC_BASE_PATH="/opt/qti-aic/integrations/triton_qaic"
+ARG TRITON_KERNELS_REF="v3.5.1"
 
 # ---------------------------------------------------------------------------
 # Device architecture for Hexagon kernel C++ extension compile.
@@ -182,6 +195,7 @@ FROM ${RUST_IMAGE} AS rust-toolchain
 #   4b. step2c    : rust frontend build (optional)
 #   5. step3      : vllm deps + vllm install from the local clone, then
 #                   delete it
+#   6. step4      : triton-qaic (optional, TRITON_QAIC=1)
 # ===========================================================================
 # hadolint ignore=DL3006
 FROM ${BASE_IMAGE} AS pyt-base
@@ -232,6 +246,9 @@ ARG QAIC_DEVICE_ARCH="v68"
 ARG VLLM_BUILD_RUST="1"
 ARG VLLM_PR=""
 ARG VLLM_BRANCH=""
+ARG TRITON_QAIC="0"
+ARG TRITON_QAIC_BASE_PATH="/opt/qti-aic/integrations/triton_qaic"
+ARG TRITON_KERNELS_REF="v3.5.1"
 
 # ---------------------------------------------------------------------------
 # Layer 1 — infra: system packages + uv-managed python + build tools (merged)
@@ -339,6 +356,27 @@ RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
     VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE_PYT}" uv pip install \
         --no-build-isolation --no-deps /src/vllm && \
     rm -rf /src/vllm
+
+# ---------------------------------------------------------------------------
+# Layer 6 — step4: triton-qaic (optional, TRITON_QAIC=1)
+# SDK Triton-QAIC wheel (Hexagon backend) from ${TRITON_QAIC_BASE_PATH}/py<ver>,
+# plus triton_kernels (not on PyPI) from triton-lang/triton @ TRITON_KERNELS_REF.
+# Any existing triton is removed first (a PyPI build has no Hexagon backend).
+# --no-deps keeps a PyPI triton from being pulled back in.
+# ---------------------------------------------------------------------------
+RUN --mount=type=cache,sharing=locked,target=/var/cache/uv \
+    if [ "${TRITON_QAIC}" = "1" ]; then \
+        PYVER="py$(echo "${PYTHON_VERSION}" | tr -d '.')" && \
+        if ! ls "${TRITON_QAIC_BASE_PATH}/${PYVER}"/triton-*.whl >/dev/null 2>&1; then \
+            echo "ERROR: no triton wheel in ${TRITON_QAIC_BASE_PATH}/${PYVER}" >&2; exit 1; \
+        fi && \
+        { uv pip uninstall triton 2>/dev/null || true; } && \
+        uv pip install --no-deps "${TRITON_QAIC_BASE_PATH}/${PYVER}"/triton-*.whl && \
+        uv pip install --no-deps --reinstall \
+            "triton_kernels @ git+https://github.com/triton-lang/triton.git@${TRITON_KERNELS_REF}#subdirectory=python/triton_kernels"; \
+    else \
+        echo "INFO: triton-qaic skipped (TRITON_QAIC=${TRITON_QAIC})"; \
+    fi
 
 ENV VLLM_PLUGINS="qaic"
 
