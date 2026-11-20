@@ -161,15 +161,26 @@ def _qaic_impl(monkeypatch, backend):
 
     monkeypatch.setattr(impl, "_run_sdpa_decode_forward", _no_sdpa)
 
-    paths: list[str | None] = []
+    from vllm_qaic import _custom_ops as qaic_ops
+
+    # Kernel launches per forward(): 1 = single native call, 2 = split mixed
+    # (decode rows and prefill/verify rows in separate calls).
+    launches: list[int] = []
+    kernel = qaic_ops.paged_attention
+
+    def _count(*args, **kwargs):
+        launches[-1] += 1
+        return kernel(*args, **kwargs)
+
     native = impl._run_native_paged_attention
 
     def _record(*args, **kwargs):
-        paths.append(native(*args, **kwargs))
-        return paths[-1]
+        launches.append(0)
+        return native(*args, **kwargs)
 
+    monkeypatch.setattr(qaic_ops, "paged_attention", _count)
     monkeypatch.setattr(impl, "_run_native_paged_attention", _record)
-    return impl, paths
+    return impl, launches
 
 
 def _forward(impl, kv_cache, block_table, starts, new_k, new_v, num_decode_tokens):
@@ -228,7 +239,7 @@ def _rows(q_lens, keep):
     return torch.cat([torch.arange(q) < n for q, n in zip(q_lens, keep, strict=True)])
 
 
-def _run_rejection_scenario(monkeypatch, backend, stale, reqs, expected_paths):
+def _run_rejection_scenario(monkeypatch, backend, stale, reqs, expected_launches):
     """prefill P -> verify P..P+k -> accept a -> verify from P+a+1.
 
     Decode requests (k == 0) must come first, as the builder reorders them.
@@ -237,7 +248,7 @@ def _run_rejection_scenario(monkeypatch, backend, stale, reqs, expected_paths):
     """
     assert all(r.num_drafts == 0 for r in reqs[: sum(r.num_drafts == 0 for r in reqs)])
     torch.manual_seed(0)
-    impl, paths = _qaic_impl(monkeypatch, backend)
+    impl, launches = _qaic_impl(monkeypatch, backend)
     fill = HUGE if stale == "huge" else 0.0
     kv_cache = lbnhc_kv_cache(NUM_BLOCKS, BLOCK, HKV, D, DEV, fill=fill)
     final_lens = [r.prompt_len + r.num_accepted + 2 + r.num_drafts for r in reqs]
@@ -314,7 +325,7 @@ def _run_rejection_scenario(monkeypatch, backend, stale, reqs, expected_paths):
             if stale == "huge" and p in overwritten:
                 assert key_cache[blk, :, p % BLOCK].abs().max() < HUGE
 
-    assert paths == expected_paths
+    assert launches == expected_launches
 
 
 @requires_qaic
@@ -330,7 +341,7 @@ def test_native_paged_attention_spec_rejection_overwrites_stale_tail(
         _Req(prompt_len=70, num_drafts=4, num_accepted=2),
         _Req(prompt_len=40, num_drafts=2, num_accepted=2),  # all accepted
     ]
-    _run_rejection_scenario(monkeypatch, backend, stale, reqs, ["native-single"] * 3)
+    _run_rejection_scenario(monkeypatch, backend, stale, reqs, [1] * 3)
 
 
 @requires_qaic
@@ -347,7 +358,5 @@ def test_native_paged_attention_mixed_decode_and_verify(monkeypatch, backend, st
         _Req(prompt_len=50, num_drafts=3, num_accepted=1),
         _Req(prompt_len=81, num_drafts=5, num_accepted=0),
     ]
-    mixed = "native-split" if backend == "hmx" else "native-single"
-    _run_rejection_scenario(
-        monkeypatch, backend, stale, reqs, ["native-single", mixed, mixed]
-    )
+    mixed = 2 if backend == "hmx" else 1
+    _run_rejection_scenario(monkeypatch, backend, stale, reqs, [1, mixed, mixed])
