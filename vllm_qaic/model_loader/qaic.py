@@ -1890,7 +1890,10 @@ def get_hf_model(
     # pretrained_extra_args.
     if (
         model_config.dtype == torch.bfloat16
-        and current_platform.get_hw_version() == AIC_HW_VERSION_AI200
+        and current_platform.get_hw_version(
+            current_platform.get_hw_query_device_id(additional_config)
+        )
+        == AIC_HW_VERSION_AI200
     ):
         args["torch_dtype"] = torch.bfloat16
 

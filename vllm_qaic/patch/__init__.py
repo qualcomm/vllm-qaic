@@ -263,6 +263,20 @@
 #    Note:
 #       Imported by QaicPlatform.pre_register_and_update only in PYT mode.
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# ** 16. File: patch_engine_args.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. vllm.engine.arg_utils.EngineArgs.create_model_config
+#    Why:
+#       ModelConfig.__post_init__ resolves dtype="auto" from
+#       current_platform.supported_dtypes, and QAIC's supported dtypes depend
+#       on the AIC hardware version (AI100: no BF16, AI200: BF16). In AoT
+#       mode the device to query comes from additional_config["device_group"],
+#       but the platform only receives additional_config later, in
+#       check_and_update_config, after the dtype is already fixed.
+#    How:
+#       Wrap create_model_config to pass self.additional_config to
+#       QaicPlatform.set_engine_additional_config before building ModelConfig.
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # =================
 
 # NOTE: patch_topk_topp_sampler must stay first; it rebinds a module-level
@@ -280,6 +294,7 @@ import vllm_qaic.patch.patch_gemma4_dtype  # noqa
 import vllm_qaic.patch.patch_fused_moe_activation  # noqa
 import vllm_qaic.patch.patch_fused_moe_sum  # noqa
 import vllm_qaic.patch.patch_fused_moe_align  # noqa
+import vllm_qaic.patch.patch_engine_args  # noqa
 
 import vllm_qaic.envs as qaic_envs
 
