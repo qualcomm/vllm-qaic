@@ -224,8 +224,7 @@ execution modes.
 ### Known Issues
 
 - Prefix caching is not yet supported (planned)
-- PYT mode supports only `ngram` and `suffix` SpD (host-side proposers); it does not support `draft_model`/`eagle`/`mtp`/`dflash` SpD, LoRA, or disaggregated serving
-- Models with linear attention or other recurrent-state layers (e.g. Mamba or gated delta net hybrids) are not supported with SpD in PYT mode: KV-cache rollback on draft rejection does not restore recurrent state
+- PYT mode does not support SpD, LoRA, or disaggregated serving
 - `best_of > 1` is not supported
 
 ### Contributors

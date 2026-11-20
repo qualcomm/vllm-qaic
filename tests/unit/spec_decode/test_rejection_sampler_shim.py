@@ -218,7 +218,6 @@ def test_install_rebinds_only_generate_uniform_probs(monkeypatch):
     import vllm.v1.sample.ops.topk_topp_sampler as topk_topp_module
     import vllm_qaic.v1.sample.rejection_sampler_shim as shim
 
-    monkeypatch.setattr(shim, "_require_qualcomm_triton", lambda: None)
     monkeypatch.setattr(shim, "_shim_installed", False)
     kernel_names = (
         "expand_kernel",
@@ -248,16 +247,15 @@ def test_install_rebinds_only_generate_uniform_probs(monkeypatch):
     assert rejection_sampler.generate_uniform_probs is shim.generate_uniform_probs
 
 
-def test_install_reports_unavailable_backend(monkeypatch):
+def test_require_qualcomm_triton_reports_unavailable_backend(monkeypatch):
     import vllm_qaic.v1.sample.rejection_sampler_shim as shim
 
     triton_backends = ModuleType("triton.backends")
     triton_backends.backends = {}
     monkeypatch.setitem(__import__("sys").modules, "triton.backends", triton_backends)
-    monkeypatch.setattr(shim, "_shim_installed", False)
 
     with pytest.raises(RuntimeError, match="qcom_hexagon_backend"):
-        shim.install()
+        shim.require_qualcomm_triton()
 
 
 # ---------------------------------------------------------------------------
@@ -470,3 +468,332 @@ def test_qaic_rejects_float64_rand(qaic_device):
     # draws fp64 directly on the device.
     with pytest.raises(RuntimeError, match="Unsupported datatype for QAIC"):
         torch.rand(4, dtype=torch.float64, device=qaic_device)
+
+
+# ---------------------------------------------------------------------------
+# End-to-end: upstream ``rejection_sample`` on QAIC vs a PyTorch CPU reference.
+#
+# Upstream has no CPU implementation: its Triton kernels launched on CPU tensors
+# do not compute the right result (the output stays all placeholder ids), so the
+# CPU side is a pure-PyTorch transcription of upstream's semantics. The QAIC
+# side is the real upstream function with the shim installed; only its two
+# noise sources are pinned: ``generate_uniform_probs`` (fixed fp32 uniforms)
+# and the ``q.exponential_()`` draw in ``sample_recovered_tokens``.
+# ---------------------------------------------------------------------------
+
+# Logit offsets that make acceptance decisions insensitive to QAIC-vs-CPU
+# softmax rounding: accepted drafts get the dominant target mass, rejected drafts
+# get ~none, and the fixed uniform 0.5 sits far from either ratio.
+_ACCEPT_LOGIT = 15.0
+_REJECT_LOGIT = -20.0
+_FIXED_UNIFORM = 0.5
+
+
+def _row(drafts, greedy, accepted):
+    assert 0 <= accepted <= drafts
+    return SimpleNamespace(drafts=drafts, greedy=greedy, accepted=accepted)
+
+
+G, R = True, False
+_E2E_CASES = {
+    # name: (rows as (num_drafts, greedy, num_accepted), vocab, use_draft_probs)
+    "all_greedy": (
+        [(3, G, 3), (3, G, 1), (2, G, 0), (1, G, 1)],
+        32000,
+        False,
+    ),
+    "all_random": ([(4, R, 2), (3, R, 0), (2, R, 2), (4, R, 4)], 32000, True),
+    "zero_draft_rows": (
+        [(0, R, 0), (3, R, 1), (0, G, 0), (2, G, 2), (0, R, 0)],
+        32000,
+        True,
+    ),
+    "mixed_greedy_random": (
+        [(3, G, 1), (3, R, 3), (2, G, 2), (4, R, 0)],
+        32000,
+        True,
+    ),
+    "all_accepted_bonus": ([(3, R, 3), (2, G, 2), (4, R, 4)], 32000, True),
+    "partial_rejection_recovered": (
+        [(4, R, 1), (4, R, 2), (3, R, 0)],
+        128256,
+        True,
+    ),
+    "ngram_no_draft_probs": (
+        [(3, R, 1), (3, R, 3), (2, G, 1), (0, R, 0), (4, R, 0)],
+        128256,
+        False,
+    ),
+}
+
+
+def _build_e2e_case(rows, vocab_size, use_draft_probs, seed):
+    rows = [_row(*row) for row in rows]
+    generator = torch.Generator().manual_seed(seed)
+    num_draft_tokens = [row.drafts for row in rows]
+    num_tokens = sum(num_draft_tokens)
+    draft_token_ids = torch.randint(
+        0, vocab_size, (num_tokens,), dtype=torch.int32, generator=generator
+    )
+    target_logits = torch.randn(num_tokens, vocab_size, generator=generator) * 2
+    draft_probs = (
+        torch.softmax(torch.randn(num_tokens, vocab_size, generator=generator), -1)
+        if use_draft_probs
+        else None
+    )
+    # Uniforms for positions past the first rejection are drawn but unused.
+    uniforms = torch.rand(num_tokens, generator=generator).clamp_min(1e-3)
+    greedy_reject_tokens = {}
+    position = 0
+    for row in rows:
+        for offset in range(min(row.accepted + 1, row.drafts)):
+            token = position + offset
+            draft = int(draft_token_ids[token])
+            uniforms[token] = _FIXED_UNIFORM
+            if offset < row.accepted:
+                target_logits[token, draft] = _ACCEPT_LOGIT
+            elif row.greedy:
+                replacement = (draft + 1) % vocab_size
+                target_logits[token, replacement] = _ACCEPT_LOGIT
+                greedy_reject_tokens[token] = replacement
+            else:
+                target_logits[token, draft] = _REJECT_LOGIT
+        position += row.drafts
+    greedy = torch.tensor([row.greedy for row in rows])
+    return SimpleNamespace(
+        rows=rows,
+        vocab_size=vocab_size,
+        num_draft_tokens=num_draft_tokens,
+        num_tokens=num_tokens,
+        max_spec_len=max(num_draft_tokens),
+        cu_num_draft_tokens=torch.tensor(num_draft_tokens).cumsum(0).to(torch.int32),
+        draft_token_ids=draft_token_ids,
+        draft_probs=draft_probs,
+        target_logits=target_logits.contiguous(),
+        bonus_token_ids=torch.randint(
+            0, vocab_size, (len(rows), 1), dtype=torch.int64, generator=generator
+        ),
+        temperature=torch.where(greedy, 0.0, 1.0).to(torch.float32),
+        all_greedy=bool(greedy.all()),
+        all_random=not bool(greedy.any()),
+        uniforms=uniforms,
+        q=torch.empty(len(rows), vocab_size).exponential_(generator=generator),
+        greedy_reject_tokens=greedy_reject_tokens,
+    )
+
+
+def _e2e_sampling_metadata(case, device):
+    from vllm.v1.sample.logits_processor import LogitsProcessors
+    from vllm.v1.sample.metadata import SamplingMetadata
+
+    batch_size = len(case.rows)
+    zeros = torch.zeros(batch_size, device=device)
+    return SamplingMetadata(
+        temperature=None if case.all_greedy else case.temperature.to(device),
+        all_greedy=case.all_greedy,
+        all_random=case.all_random,
+        top_p=None,
+        top_k=None,
+        generators={},
+        max_num_logprobs=None,
+        no_penalties=True,
+        prompt_token_ids=None,
+        frequency_penalties=zeros,
+        presence_penalties=zeros,
+        repetition_penalties=zeros,
+        output_token_ids=[[] for _ in range(batch_size)],
+        allowed_token_ids_mask=None,
+        bad_words_token_ids={},
+        logitsprocs=LogitsProcessors(),
+    )
+
+
+def _reference_rejection_sample(case):
+    """PyTorch CPU transcription of upstream ``rejection_sample``."""
+    target_probs = case.target_logits.softmax(dim=-1, dtype=torch.float32)
+    inv_q = case.q.reciprocal()
+    output = torch.full((len(case.rows), case.max_spec_len + 1), -1, dtype=torch.int32)
+    position = 0
+    for request, row in enumerate(case.rows):
+        rejected = False
+        for offset in range(row.drafts):
+            token = position + offset
+            draft = int(case.draft_token_ids[token])
+            if row.greedy:
+                chosen = int(case.target_logits[token].argmax())
+                accepted = chosen == draft
+            else:
+                draft_prob = (
+                    float(case.draft_probs[token, draft])
+                    if case.draft_probs is not None
+                    else 1.0
+                )
+                accepted = draft_prob > 0 and float(
+                    target_probs[token, draft]
+                ) / draft_prob >= float(case.uniforms[token])
+                if accepted:
+                    chosen = draft
+                else:
+                    if case.draft_probs is not None:
+                        probs = (target_probs[token] - case.draft_probs[token]).clamp(
+                            min=0
+                        )
+                    else:
+                        probs = target_probs[token].clone()
+                        probs[draft] = 0
+                    scores = probs * inv_q[request]
+                    top2 = scores.topk(2).values
+                    # Guard against a near-tie the device could break differently.
+                    assert float(top2[0] - top2[1]) > 1e-4 * float(top2[0])
+                    chosen = int(scores.argmax())
+            output[request, offset] = chosen
+            if not accepted:
+                rejected = True
+                break
+        if not rejected:
+            output[request, row.drafts] = int(case.bonus_token_ids[request, 0])
+        position += row.drafts
+    return output
+
+
+def _expected_from_spec(case, recovered_from=None):
+    """Hand-derived output; rejected random positions read ``recovered_from``."""
+    output = torch.full((len(case.rows), case.max_spec_len + 1), -1, dtype=torch.int32)
+    position = 0
+    for request, row in enumerate(case.rows):
+        output[request, : row.accepted] = case.draft_token_ids[
+            position : position + row.accepted
+        ]
+        if row.accepted == row.drafts:
+            output[request, row.drafts] = int(case.bonus_token_ids[request, 0])
+        elif row.greedy:
+            output[request, row.accepted] = case.greedy_reject_tokens[
+                position + row.accepted
+            ]
+        else:
+            assert recovered_from is not None, "random rejection needs a reference"
+            output[request, row.accepted] = recovered_from[request, row.accepted]
+        position += row.drafts
+    return output
+
+
+def _install_shim_for_test(monkeypatch):
+    """install(), with the upstream binding and install flag restored on exit."""
+    import vllm.v1.sample.rejection_sampler as rejection_sampler
+    import vllm_qaic.v1.sample.rejection_sampler_shim as shim
+
+    monkeypatch.setattr(shim, "_shim_installed", False)
+    monkeypatch.setattr(
+        rejection_sampler,
+        "generate_uniform_probs",
+        rejection_sampler.generate_uniform_probs,
+    )
+    install()
+
+
+def _run_upstream_rejection_sample_on_qaic(case, qaic_device, monkeypatch):
+    import vllm.v1.sample.rejection_sampler as rejection_sampler
+    import vllm_qaic.v1.sample.rejection_sampler_shim as shim
+
+    _install_shim_for_test(monkeypatch)
+    assert rejection_sampler.generate_uniform_probs is shim.generate_uniform_probs
+
+    calls = {"uniform": 0, "exponential": 0}
+
+    def fixed_uniform_probs(num_tokens, num_draft_tokens, generators, device):
+        calls["uniform"] += 1
+        assert num_tokens == case.num_tokens
+        assert list(num_draft_tokens) == case.num_draft_tokens
+        # Same dtype the shim produces on QAIC.
+        return case.uniforms.to(device=device, dtype=torch.float32)
+
+    original_exponential = torch.Tensor.exponential_
+
+    def fixed_exponential(self, *args, **kwargs):
+        if tuple(self.shape) != tuple(case.q.shape):
+            return original_exponential(self, *args, **kwargs)
+        calls["exponential"] += 1
+        assert self.device.type == "qaic"
+        return self.copy_(case.q.to(device=self.device, dtype=self.dtype))
+
+    monkeypatch.setattr(
+        rejection_sampler, "generate_uniform_probs", fixed_uniform_probs
+    )
+    monkeypatch.setattr(torch.Tensor, "exponential_", fixed_exponential)
+
+    to_device = lambda t: None if t is None else t.to(qaic_device)  # noqa: E731
+    output = rejection_sampler.rejection_sample(
+        to_device(case.draft_token_ids),
+        case.num_draft_tokens,
+        case.max_spec_len,
+        to_device(case.cu_num_draft_tokens),
+        to_device(case.draft_probs),
+        to_device(case.target_logits),
+        to_device(case.bonus_token_ids),
+        _e2e_sampling_metadata(case, qaic_device),
+    )
+    assert output.device.type == "qaic"
+    assert output.dtype == torch.int32
+    expected_calls = 0 if case.all_greedy else 1
+    assert calls == {"uniform": expected_calls, "exponential": expected_calls}
+    return output.cpu()
+
+
+@requires_qualcomm_triton
+@pytest.mark.parametrize("case_name", list(_E2E_CASES))
+def test_upstream_rejection_sample_e2e_matches_cpu_reference_on_qaic(
+    qaic_device, monkeypatch, case_name
+):
+    rows, vocab_size, use_draft_probs = _E2E_CASES[case_name]
+    case = _build_e2e_case(rows, vocab_size, use_draft_probs, seed=len(case_name))
+
+    reference = _reference_rejection_sample(case)
+    actual = _run_upstream_rejection_sample_on_qaic(case, qaic_device, monkeypatch)
+
+    assert torch.equal(actual, reference), f"qaic={actual}\ncpu={reference}"
+    # The constructed acceptance pattern was actually realised.
+    assert torch.equal(reference, _expected_from_spec(case, reference))
+    if case_name in ("all_greedy", "all_accepted_bonus"):
+        # Fully hand-computable: no recovered-token sampling involved.
+        assert torch.equal(actual, _expected_from_spec(case))
+    # A recovered token can never equal the rejected draft.
+    position = 0
+    for request, row in enumerate(case.rows):
+        if row.accepted < row.drafts:
+            rejected_draft = int(case.draft_token_ids[position + row.accepted])
+            assert int(actual[request, row.accepted]) != rejected_draft
+        position += row.drafts
+
+
+@requires_qualcomm_triton
+def test_upstream_rejection_sample_unpinned_noise_on_qaic(qaic_device, monkeypatch):
+    """Real fp32 uniforms and exponential noise on QAIC: structural validity."""
+    import vllm.v1.sample.rejection_sampler as rejection_sampler
+
+    _install_shim_for_test(monkeypatch)
+    rows, vocab_size, use_draft_probs = _E2E_CASES["mixed_greedy_random"]
+    case = _build_e2e_case(rows, vocab_size, use_draft_probs, seed=7)
+    to_device = lambda t: None if t is None else t.to(qaic_device)  # noqa: E731
+    output = rejection_sampler.rejection_sample(
+        to_device(case.draft_token_ids),
+        case.num_draft_tokens,
+        case.max_spec_len,
+        to_device(case.cu_num_draft_tokens),
+        to_device(case.draft_probs),
+        to_device(case.target_logits),
+        to_device(case.bonus_token_ids),
+        _e2e_sampling_metadata(case, qaic_device),
+    ).cpu()
+
+    # The logits are built so every decision is insensitive to the uniform
+    # draw (u in (0, 1) vs ratio ~1 or ~0), so the accept pattern is fixed.
+    reference = _reference_rejection_sample(case)
+    for request, row in enumerate(case.rows):
+        assert torch.equal(
+            output[request, : row.accepted], reference[request, : row.accepted]
+        )
+        emitted = output[request, row.accepted]
+        assert 0 <= int(emitted) < vocab_size
+        if row.greedy or row.accepted == row.drafts:
+            assert int(emitted) == int(reference[request, row.accepted])
+        assert bool((output[request, row.accepted + 1 :] == -1).all())
