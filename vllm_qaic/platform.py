@@ -467,14 +467,16 @@ class QaicPlatform(Platform):
             # otherwise the model is run through torch.compile (see
             # _configure_pyt_compilation below).
             device_config.device = torch.device("qaic")
-            # set QAIC_VISIBLE_DEVICES from device_group
-            # if not already set
-            if (
-                os.environ.get(cls.device_control_env_var) is None
-                and "device_group" in additional_config
+            # device_group is AoT-only. PyT selects devices through
+            # QAIC_VISIBLE_DEVICES, which torch_qaic reads when it initializes
+            # (on `import torch`), so setting it here would be too late.
+            if "device_group" in additional_config or "device_group" in (
+                additional_config.get("override_qaic_config") or {}
             ):
-                os.environ[cls.device_control_env_var] = ",".join(
-                    str(d) for d in additional_config["device_group"]
+                logger.warning(
+                    "device_group is ignored in PyT mode; select devices with "
+                    "%s before starting vLLM.",
+                    cls.device_control_env_var,
                 )
 
         # Shorthand used throughout this method
