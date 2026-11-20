@@ -47,6 +47,7 @@ from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
 
+from vllm_qaic.platform import AIC_HW_VERSION_AI200
 from vllm_qaic.utils.qaic_utils import _clean_config, compute_max_decode_tokens
 
 logger = init_logger(__name__)
@@ -1880,13 +1881,16 @@ def get_hf_model(
         args.update(pretrained_extra_args)
         override_qaic_config.pop("pretrained_extra_args")
 
-    # Match QEfficient's native-BF16 inference path explicitly, but only on a
-    # part that has native BF16: the AOT compiler rejects BF16 HMX ops on
-    # AI100. On AI100 — and when the part cannot be determined — leave
-    # torch_dtype as supplied by pretrained_extra_args.
+    # Match QEfficient's native-BF16 inference path explicitly, but only on
+    # AI200: the AOT compiler rejects BF16 HMX ops on AI100. Otherwise — and
+    # when the part cannot be determined — leave torch_dtype as supplied by
+    # pretrained_extra_args.
     if (
         model_config.dtype == torch.bfloat16
-        and current_platform.is_ai100_device() is False
+        and current_platform.get_hw_version(
+            current_platform.get_hw_query_device_id(additional_config)
+        )
+        == AIC_HW_VERSION_AI200
     ):
         args["torch_dtype"] = torch.bfloat16
 
