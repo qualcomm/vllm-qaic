@@ -482,12 +482,14 @@ class QaicPlatform(Platform):
                         "Only 'ngram' and 'suffix' are supported. "
                         "Draft-model SpD requires AOT compilation."
                     )
-                # Upstream keeps one recurrent-state slot per speculative
-                # position and selects it by num_accepted_tokens inside the
-                # mamba/GDN Triton kernels, but only for is_hybrid models, so
-                # attention-free models are unsupported upstream too. For
-                # hybrids the mechanism is inherited but unvalidated on QAIC:
-                # the Mamba2 SSD prefill kernel already fails without SpD.
+                # Upstream keeps k+1 recurrent-state slots per request and
+                # resumes from slot num_accepted_tokens-1, but only for
+                # is_hybrid models, so attention-free models are unsupported
+                # upstream too. For hybrids, vLLM v0.30.0 sends a decode with
+                # zero drafts (common for ngram/suffix) down the non-spec path,
+                # which reads stale slot 0 after a multi-token accept, so greedy
+                # output diverges. Fixed upstream in vllm#56531 (first in
+                # v0.32.0), which keeps zero-draft decodes on the spec path.
                 if model_config.is_hybrid or model_config.is_attention_free:
                     raise ValueError(
                         "Speculative decoding is not supported in eager (PYT) "
