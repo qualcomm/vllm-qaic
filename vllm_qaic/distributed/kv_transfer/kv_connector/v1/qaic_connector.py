@@ -385,6 +385,9 @@ class QaicConnector(KVConnectorBase_V1):
         self.kv_rank = vllm_config.kv_transfer_config.kv_rank
         self.kv_port = vllm_config.kv_transfer_config.kv_port
         self.is_producer = self.kv_role == "kv_producer"
+        self.truncate_prefill_prompt = (
+            self.is_producer and vllm_config.model_config.is_hybrid
+        )
         self.mem_bank = QaicKVCacheBank()
         self.shm_tracker: Queue = Queue()
         self.force_clean_up_threshold = (
@@ -698,10 +701,43 @@ class QaicConnector(KVConnectorBase_V1):
         # NOTE: We assume KV store will not have tokens required by producer.
         # This will change is case of KV sharing
         if self.is_producer:
+            if self.truncate_prefill_prompt:
+                self._truncate_last_prompt_token(request)
             return 0, False
 
         # NOTE: We assume KV store will always have tokens ready in case of consumer.
         return (request.num_prompt_tokens - 1) - num_computed_tokens, False
+
+    @staticmethod
+    def _truncate_last_prompt_token(request: "Request") -> None:
+        """Prefill only N-1 prompt tokens on the producer.
+
+        Hybrid models only. The consumer recomputes the last prompt token.
+        If the producer also computed it, recurrent (GDN) state would apply
+        that token twice.
+        Mirrors upstream NIXL ``_truncate_mamba_request_for_prefill``.
+        """
+        params = request.kv_transfer_params
+        if (
+            params is None
+            or params.get("_p_side_truncated")
+            or request.prompt_token_ids is None
+            or request.num_prompt_tokens <= 1
+        ):
+            return
+        params["_p_side_dropped_token"] = request.prompt_token_ids.pop()
+        request._all_token_ids.pop()
+        request.num_prompt_tokens -= 1
+        request.max_tokens = 1
+        params["_p_side_truncated"] = True
+
+    @staticmethod
+    def _handoff_token_ids(request: "Request") -> list[int]:
+        """Prompt token ids for the hand-off hash, incl. any dropped token."""
+        dropped = (request.kv_transfer_params or {}).get("_p_side_dropped_token")
+        if dropped is None:
+            return request.prompt_token_ids
+        return [*request.prompt_token_ids, dropped]
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
@@ -752,7 +788,9 @@ class QaicConnector(KVConnectorBase_V1):
                 )
                 block_id = new_req.block_ids[0][0]
                 meta.add_request(
-                    token_ids=new_req.prompt_token_ids,
+                    token_ids=self._handoff_token_ids(
+                        self._request_tracker[new_req.req_id].request
+                    ),
                     is_store=self.is_producer and not is_partial_prefill,
                     is_partial_prefill=is_partial_prefill,
                     block_id=block_id,
@@ -782,7 +820,9 @@ class QaicConnector(KVConnectorBase_V1):
                 cached_block_id = self._request_tracker[req_id].block_id
                 assert cached_block_id is not None
                 meta.add_request(
-                    token_ids=self._request_tracker[req_id].request.prompt_token_ids,
+                    token_ids=self._handoff_token_ids(
+                        self._request_tracker[req_id].request
+                    ),
                     is_store=self.is_producer and not is_partial_prefill,
                     is_partial_prefill=is_partial_prefill,
                     block_id=cached_block_id,

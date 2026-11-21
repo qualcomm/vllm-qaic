@@ -85,7 +85,7 @@ class VllmRunner:
         dtype: str = "auto",
         disable_log_stats: bool = True,
         tensor_parallel_size: int = 1,
-        block_size: int = 16 if not torch.xpu.is_available() else 64,
+        block_size: int | None = 16 if not torch.xpu.is_available() else 64,
         enable_chunked_prefill: bool | None = False,
         enforce_eager: bool | None = False,
         # Set this to avoid hanging issue
