@@ -50,6 +50,8 @@ from vllm.v1.sample.sampler import Sampler
 from vllm_qaic.platform import AIC_HW_VERSION_AI200
 from vllm_qaic.utils.qaic_utils import _clean_config, compute_max_decode_tokens
 
+from .m3_kv_layout import attention_cp1_to_cpn, index_cp1_to_cpn
+
 logger = init_logger(__name__)
 
 lock = threading.Lock()
@@ -163,6 +165,14 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             )
 
         self.ctx_len = model_config.max_model_len
+        sparse_attention_config = getattr(
+            model_config.hf_text_config, "sparse_attention_config", None
+        )
+        self.index_block_size = (
+            sparse_attention_config.get("sparse_block_size")
+            if sparse_attention_config
+            else None
+        )
         self.decode_bsz = vllm_config.scheduler_config.max_num_seqs
         self.full_batch_size = vllm_config.scheduler_config.max_num_seqs
         self.prefill_bsz = 1
@@ -452,6 +462,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             cluster_id=cluster_id,
             use_async_scheduling=self.use_async_scheduling,
         )
+        self.kv_reshard_plan = self._build_kv_reshard_plan()
         self.logits_ndim = self.session.get_logits_ndim()
         # Resolve the logits output dtype directly from the QPC binding so the
         # host-side logits buffers match exactly (e.g. float16 for mxfp6/mxint8
@@ -579,6 +590,36 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             binding.size,
         )
 
+    def _build_kv_reshard_plan(self) -> list[dict]:
+        """Classify each decode KV buffer's reshard role once at load time
+        instead of re-deriving it from the name on every _kv_handoff call
+        (name string checks there are in the per-request hot path).
+
+        "index" vs "attention" is decided structurally from the buffer's
+        own compiled shape (num_kv_heads==1 for MiniMax M3's indexer
+        key-only side cache, vs >1 for its paired main-attention buffer --
+        see minimax_hybrid_kv_cache_cp_brief.md), not from its name. This
+        reshard path is M3-specific in practice: _kv_handoff skips every
+        buffer where target_heads == buf.shape[1] (true for any non-CP
+        decode), and true MLA attention is rejected at the platform level
+        (platform.py), so no other model needs a third "mla" role here.
+
+        Named "role" (not "kind") to avoid colliding with the unrelated
+        kv_kind field (FA/LA_CONV/LA_RECURRENT) already in kv_cache_info.
+        """
+        plan = []
+        for i, (name, _) in enumerate(self.session.decode_buff_map):
+            part = name.split(".")[1] if "." in name else "0"
+            layer_num = int(part.split("_")[0])
+            num_kv_heads = self.kv_cache_info[i][0][1]
+            role = (
+                "index"
+                if self.index_block_size is not None and num_kv_heads == 1
+                else "attention"
+            )
+            plan.append({"name": name, "layer_num": layer_num, "role": role})
+        return plan
+
     def _kv_handoff(
         self,
         batch_indices: list[int],
@@ -586,16 +627,44 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
     ):
         for _, bidx in enumerate(batch_indices):
             if kv_caches[bidx] is not None and len(kv_caches[bidx]) > 0:
-                assert len(self.kv_cache_info) == len(kv_caches[bidx]), (
-                    f"KV buffer count mismatch: "
-                    f"expected {len(self.kv_cache_info)} buffers, "
-                    f"got {len(kv_caches[bidx])}"
-                )
                 for buff_idx in range(len(kv_caches[bidx])):
                     buf = kv_caches[bidx][buff_idx]
+                    plan = self.kv_reshard_plan[buff_idx]
+                    role = plan["role"]
                     target_heads = self.kv_cache_info[buff_idx][0][1]
-                    # broadcast MLA buffers across num heads (zero-copy)
-                    if buf.size > 0 and target_heads != buf.shape[1]:
+                    if buf.size == 0 or target_heads == buf.shape[1]:
+                        continue
+                    if role != "mla":
+                        # reshard the CP=1 prefill KV into the
+                        # decode QPC's CP=cp layout (cp derived from the
+                        # head-axis ratio).
+                        cp = target_heads // buf.shape[1]
+                        real_len = buf.shape[2]
+                        head_dim = buf.shape[-1]
+                        if role == "index":
+                            granularity = cp * self.index_block_size
+                        else:
+                            granularity = cp
+                        # CP=1 -> CP=cp reshard requires
+                        # an exact multiple to split evenly across
+                        # cp decode workers (and, for index_key, into whole
+                        # index_block_size blocks).
+                        padded_len = -(-real_len // granularity) * granularity
+                        if padded_len > real_len:
+                            buf = np.pad(
+                                buf, [(0, 0), (0, 0), (0, padded_len - real_len), (0, 0)]
+                            )
+                        if role == "index":
+                            kv_caches[bidx][buff_idx] = index_cp1_to_cpn(
+                                buf, cp, self.index_block_size, padded_len, head_dim
+                            )
+                        else:
+                            kv_heads = buf.shape[1]
+                            kv_caches[bidx][buff_idx] = attention_cp1_to_cpn(
+                                buf, cp, kv_heads, padded_len // cp, head_dim
+                            )
+                    else:
+                        # broadcast MLA buffers across num heads (zero-copy)
                         assert buf.shape[1] == 1, (
                             f"MLA KV head expansion expects num_heads=1 in received "
                             f"buffer, got {buf.shape[1]} (shape={buf.shape})"
@@ -605,11 +674,27 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                         )
 
                 # Update kv cache setDataWith
+                slicing_spec_handle = None
+                if self.session.is_hybrid_kv:
+                    # build a spec from each buffer's own real post-handoff shape/name
+                    buf_dict = dict(
+                        zip(
+                            [p["name"] for p in self.kv_reshard_plan],
+                            kv_caches[bidx],
+                            strict=True,
+                        )
+                    )
+                    slicing_spec_handle = (
+                        self.session.build_slicing_spec_handle_from_buffers(
+                            buf_dict
+                        )
+                    )
                 _ = self.session.set_data_for_kv_handoff(
                     kv_caches[bidx],
                     [("batch_index", bidx), ("ctx_start", 0)],
                     self.session.decode_buff_map,
                     self.decode_execObj_idx or 0,
+                    slicing_spec_handle=slicing_spec_handle,
                 )
         return
 
