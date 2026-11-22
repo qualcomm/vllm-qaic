@@ -87,9 +87,7 @@ _MOE_ACTIVATION_IDS = {
     "relu2_no_mul": 8,
 }
 
-_UNQUANTIZED_FUSED_MOE_HMX_KERNEL = (
-    "multinsp_multithreaded_unquantized_fused_moe_route_compute_hmx"
-)
+_UNQUANTIZED_FUSED_MOE_HMX_KERNEL = "multinsp_multithreaded_unquantized_fused_moe_hmx"
 
 
 def _kernel(name: str):
@@ -148,7 +146,7 @@ def _unquantized_fused_moe_hvx_op(
     apply_router_weight_on_input: bool,
     has_expert_map: bool,
 ) -> Tensor:
-    """Low-level QAIC HVX routed-MoE variant using route_out + reduce."""
+    """Run grouping, HVX compute, and reduction in a single device launch."""
     num_tokens = x.shape[0]
     hidden_size = x.shape[1]
     num_experts = w13_weight.shape[0]
@@ -160,10 +158,10 @@ def _unquantized_fused_moe_hvx_op(
     workers = _NSP_COUNT * _THREAD_COUNT
     route_out = torch.empty((total_routes, hidden_size), dtype=x.dtype, device=x.device)
     expert_route_indices = torch.empty(
-        (total_routes,), dtype=torch.float32, device=x.device
+        (_NSP_COUNT, total_routes), dtype=torch.float32, device=x.device
     )
     expert_offsets = torch.empty(
-        (num_experts + 1,), dtype=torch.float32, device=x.device
+        (_NSP_COUNT, num_experts + 1), dtype=torch.float32, device=x.device
     )
     worker_counts = torch.empty(
         (workers, num_experts), dtype=torch.float32, device=x.device
@@ -171,6 +169,7 @@ def _unquantized_fused_moe_hvx_op(
     worker_offsets = torch.empty(
         (workers, num_experts), dtype=torch.float32, device=x.device
     )
+    stage_status = torch.empty((4, workers), dtype=torch.int32, device=x.device)
     out = torch.empty_like(x)
     params = torch.tensor(
         [
@@ -190,37 +189,8 @@ def _unquantized_fused_moe_hvx_op(
         device=x.device,
     ).contiguous()
 
-    group_count_kernel = _kernel(
-        "multinsp_multithreaded_unquantized_fused_moe_route_group_count"
-    )
-    group_prefix_kernel = _kernel(
-        "multinsp_multithreaded_unquantized_fused_moe_route_group_prefix"
-    )
-    group_fill_kernel = _kernel(
-        "multinsp_multithreaded_unquantized_fused_moe_route_group_fill"
-    )
-    route_kernel = _kernel("multinsp_multithreaded_unquantized_fused_moe_route_compute")
-    reduce_kernel = _kernel("multinsp_multithreaded_unquantized_fused_moe_route_reduce")
-    group_count_kernel[_NSP_COUNT, _THREAD_COUNT](
-        topk_ids,
-        expert_map,
-        worker_counts,
-        params,
-    )
-    group_prefix_kernel[_NSP_COUNT, _THREAD_COUNT](
-        worker_counts,
-        worker_offsets,
-        expert_offsets,
-        params,
-    )
-    group_fill_kernel[_NSP_COUNT, _THREAD_COUNT](
-        topk_ids,
-        expert_map,
-        worker_offsets,
-        expert_route_indices,
-        params,
-    )
-    route_kernel[_NSP_COUNT, _THREAD_COUNT](
+    kernel = _kernel("multinsp_multithreaded_unquantized_fused_moe")
+    kernel[_NSP_COUNT, _THREAD_COUNT](
         x,
         topk_weights,
         topk_ids,
@@ -232,8 +202,11 @@ def _unquantized_fused_moe_hvx_op(
         expert_offsets,
         expert_map,
         params,
+        worker_counts,
+        worker_offsets,
+        out,
+        stage_status,
     )
-    reduce_kernel[_NSP_COUNT, _THREAD_COUNT](route_out, out, params)
     return out
 
 
@@ -253,7 +226,7 @@ def _unquantized_fused_moe_hmx_op(
     apply_router_weight_on_input: bool,
     has_expert_map: bool,
 ) -> Tensor:
-    """Low-level QAIC HMX routed-MoE variant using route_out + reduce."""
+    """Run grouping, HMX compute, and reduction in a single device launch."""
     num_tokens = x.shape[0]
     hidden_size = x.shape[1]
     num_experts = w13_weight.shape[0]
@@ -265,16 +238,19 @@ def _unquantized_fused_moe_hmx_op(
     workers = _NSP_COUNT * _THREAD_COUNT
     route_out = torch.empty((total_routes, hidden_size), dtype=x.dtype, device=x.device)
     expert_route_indices = torch.empty(
-        (total_routes,), dtype=torch.float32, device=x.device
+        (_NSP_COUNT, total_routes), dtype=torch.float32, device=x.device
     )
     expert_offsets = torch.empty(
-        (num_experts + 1,), dtype=torch.float32, device=x.device
+        (_NSP_COUNT, num_experts + 1), dtype=torch.float32, device=x.device
     )
     worker_counts = torch.empty(
         (workers, num_experts), dtype=torch.float32, device=x.device
     )
     worker_offsets = torch.empty(
         (workers, num_experts), dtype=torch.float32, device=x.device
+    )
+    stage_status = torch.empty(
+        (4, _NSP_COUNT * _HMX_THREAD_COUNT), dtype=torch.int32, device=x.device
     )
     out = torch.empty_like(x)
     params = torch.tensor(
@@ -295,37 +271,8 @@ def _unquantized_fused_moe_hmx_op(
         device=x.device,
     ).contiguous()
 
-    group_count_kernel = _kernel(
-        "multinsp_multithreaded_unquantized_fused_moe_route_group_count"
-    )
-    group_prefix_kernel = _kernel(
-        "multinsp_multithreaded_unquantized_fused_moe_route_group_prefix"
-    )
-    group_fill_kernel = _kernel(
-        "multinsp_multithreaded_unquantized_fused_moe_route_group_fill"
-    )
-    route_kernel = _kernel(_UNQUANTIZED_FUSED_MOE_HMX_KERNEL)
-    reduce_kernel = _kernel("multinsp_multithreaded_unquantized_fused_moe_route_reduce")
-    group_count_kernel[_NSP_COUNT, _THREAD_COUNT](
-        topk_ids,
-        expert_map,
-        worker_counts,
-        params,
-    )
-    group_prefix_kernel[_NSP_COUNT, _THREAD_COUNT](
-        worker_counts,
-        worker_offsets,
-        expert_offsets,
-        params,
-    )
-    group_fill_kernel[_NSP_COUNT, _THREAD_COUNT](
-        topk_ids,
-        expert_map,
-        worker_offsets,
-        expert_route_indices,
-        params,
-    )
-    route_kernel[_NSP_COUNT, _HMX_THREAD_COUNT](
+    kernel = _kernel(_UNQUANTIZED_FUSED_MOE_HMX_KERNEL)
+    kernel[_NSP_COUNT, _HMX_THREAD_COUNT](
         x,
         topk_weights,
         topk_ids,
@@ -337,8 +284,11 @@ def _unquantized_fused_moe_hmx_op(
         expert_offsets,
         expert_map,
         params,
+        worker_counts,
+        worker_offsets,
+        out,
+        stage_status,
     )
-    reduce_kernel[_NSP_COUNT, _THREAD_COUNT](route_out, out, params)
     return out
 
 
@@ -801,10 +751,6 @@ def _paged_attention_op(
     denominator without a value row (gpt-oss). ``window_left`` limits each
     query to keys at most that many positions behind it; -1 disables it.
     """
-    query = query.contiguous()
-    if write_cache:
-        key = key.contiguous()
-        value = value.contiguous()
     if (
         block_table.device != query.device
         or block_table.dtype != torch.int32
@@ -835,8 +781,6 @@ def _paged_attention_op(
         or not seq_lens.is_contiguous()
     ):
         seq_lens = seq_lens.to(device=query.device, dtype=torch.int32).contiguous()
-
-    output = torch.empty_like(query)
 
     has_sinks = sinks is not None
     if sinks is not None:
@@ -893,7 +837,35 @@ def _paged_attention_op(
             f"got head_dim={head_dim}. Set QAIC_PAGED_ATTN_BACKEND=hmx."
         )
 
+    def prepare_input(tensor: Tensor, dma: bool = False) -> Tensor:
+        # HMX reads dense heads directly from QKV projection views. Only
+        # materialize layouts that cannot be addressed by the kernel or UDMA.
+        if tensor.is_contiguous():
+            return tensor
+        strides = tensor.stride()
+        if (
+            not use_hmx
+            or strides[-1] != 1
+            or any(s <= 0 or s > 2**31 - 1 for s in strides[:2])
+            or (dma and strides[0] * tensor.element_size() > 65535)
+        ):
+            return tensor.contiguous()
+        return tensor
+
+    query = prepare_input(query)
+    if write_cache:
+        key = prepare_input(key, dma=not is_decode)
+        value = prepare_input(value, dma=not is_decode)
+    # empty_like can preserve a transposed input's layout. Kernel output uses
+    # packed token/head addressing regardless of the input strides.
+    output = torch.empty(query.shape, dtype=query.dtype, device=query.device)
+
     if use_hmx:
+        input_strides = (
+            *query.stride()[:2],
+            *(key.stride()[:2] if write_cache else (1, 1)),
+            *(value.stride()[:2] if write_cache else (1, 1)),
+        )
         if is_decode:
             attn_kernel = (
                 _paged_attention_hmx_decode_kernel
@@ -947,6 +919,7 @@ def _paged_attention_op(
             float(scale),
             *cache_strides,
             *sink_window_args,
+            *input_strides,
         )
     elif use_hmx:
         attn_kernel[_NSP_COUNT, _HMX_THREAD_COUNT](
@@ -972,6 +945,7 @@ def _paged_attention_op(
             float(scale),
             *cache_strides,
             *sink_window_args,
+            *input_strides,
         )
     else:
         attn_kernel[_NSP_COUNT, _THREAD_COUNT](
