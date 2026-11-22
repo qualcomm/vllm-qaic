@@ -9,5 +9,5 @@ Technical documentation for contributors and advanced users working on the vLLM 
 | Section | Description |
 |---------|-------------|
 | [Architecture](architecture.md) | Plugin registration, component hierarchy, execution modes, device topology |
-| [Profiling](profiling.md) | Device-level latency tracing via `VLLM_TORCH_PROFILER_DIR` |
+| [Profiling](profiling.md) | Device-level tracing via `VLLM_TORCH_QAIC_PROFILER_DIR`; host profiling via `--profiler-config` |
 | [Contributing](contributing.md) | Contribution guidelines, licensing, and process |
