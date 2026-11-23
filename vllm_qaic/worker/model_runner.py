@@ -2279,7 +2279,8 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 layer_names = kv_cache_tensor.shared_by
 
             for layer_name in layer_names:
-                # layer_name : layer_{integer}
+                # layer_name : layers.{integer}; the dotted numeric
+                # component is required by connectors that extract layer IDs.
                 layer_idx = self._parse_kv_layer_idx(layer_name)
                 layer_tensors.setdefault(
                     layer_idx,
@@ -2347,7 +2348,10 @@ class QaicModelRunnerAoT(GPUModelRunner):
         kv_cache_spec: dict[str, KVCacheSpec] = {}
         n_layers = self.model_config.get_num_layers(self.parallel_config)
         for i in range(n_layers):
-            layer_name = f"layer_{i}"
+            # Keep the numeric index as a distinct dotted component. Some
+            # KV connectors (e.g. Mooncake) parse indices from module-style
+            # names and reject underscores in ``layer_0``.
+            layer_name = f"layers.{i}"
             kv_cache_spec[layer_name] = FullAttentionSpec(
                 block_size=block_size,
                 num_kv_heads=self.num_kv_heads,
