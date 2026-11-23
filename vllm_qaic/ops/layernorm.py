@@ -16,8 +16,20 @@ from vllm.model_executor.layers.layernorm import (
 
 from vllm_qaic._custom_ops import rms_norm_hexagon as _call_hexagon_rms_norm
 from vllm_qaic.ops._triton_flags import triton_op_enabled
+from vllm.model_executor.determinism.batch_invariant import (
+    rms_norm_batch_invariant,
+)
+
+from vllm.models.minimax_m3.amd.ops.gemma_rmsnorm import (
+    gemma_fused_add_rmsnorm,
+    gemma_rmsnorm,
+)
+from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
+    rmsnorm_fn,
+)
 
 triton_en = triton_op_enabled("RMS_NORM")
+triton_gated_en = triton_op_enabled("RMS_NORM_GATED")
 
 
 class QAicRMSNorm(RMSNorm):
@@ -49,22 +61,16 @@ class QAicRMSNorm(RMSNorm):
         # with has_weight=False gets weight=None (no per-channel multiply).
         weight = self.weight if self.pass_weight else None
         if triton_en:
-            from vllm.model_executor.determinism.batch_invariant import (
-                rms_norm_batch_invariant,
-            )
-
             return rms_norm_batch_invariant(x, weight, self.variance_epsilon)
 
         return F.rms_norm(x, [self.hidden_size], weight, self.variance_epsilon)
 
 
 class QAicGemmaRMSNorm(GemmaRMSNorm):
-    """RMS normalization for Gemma.
+    """RMS normalization for Gemma with an optional Triton path.
 
     Gemma uses a shifted weight convention: the learned parameter represents
-    (gamma - 1), so the effective scale is (1 + weight).  No NSP kernel path
-    here because the weight offset makes it non-trivially different from the
-    standard RMS norm kernel interface.
+    (gamma - 1), so the effective scale is (1 + weight).
     """
 
     def forward_oot(
@@ -72,6 +78,13 @@ class QAicGemmaRMSNorm(GemmaRMSNorm):
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if triton_en:
+            if residual is None:
+                return gemma_rmsnorm(x, self.weight, self.variance_epsilon)
+            return gemma_fused_add_rmsnorm(
+                x, residual, self.weight, self.variance_epsilon
+            )
+
         if residual is not None:
             normed, new_residual = _call_hexagon_rms_norm(
                 residual, x, self.weight, self.variance_epsilon
@@ -85,6 +98,7 @@ class QAicGemmaRMSNorm(GemmaRMSNorm):
 
 class QAicRMSNormGated(RMSNormGated):
     """RMS Normalization with optional gating.
+    Also supports optional gating via Triton.
 
     This is a native PyTorch implementation that supports:
     - Standard RMS normalization
@@ -100,6 +114,18 @@ class QAicRMSNormGated(RMSNormGated):
         # Group norm not handled here; delegate to the parent's native path
         if self.group_size is not None:
             return super().forward_native(x, z)
+
+        if triton_gated_en:
+            return rmsnorm_fn(
+                x,
+                self.weight,
+                self.bias,
+                z=z,
+                eps=self.eps,
+                group_size=self.group_size,
+                norm_before_gate=self.norm_before_gate,
+                activation=self.activation,
+            )
 
         # norm_before_gate=False: gate first, then normalize (Mamba2 / Hawk style)
         if z is not None and not self.norm_before_gate:
