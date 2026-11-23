@@ -28,7 +28,6 @@ Shared Memory Naming:
 
 import atexit
 import gc
-import json
 import os
 import random
 import signal
@@ -77,20 +76,6 @@ VLLM_QAIC_USE_FULL_KV_TRANSFER_ENV = "VLLM_QAIC_USE_FULL_KV_TRANSFER"
 VLLM_QAIC_DISABLE_HANDOFF_ID_ENV = "VLLM_QAIC_DISABLE_HANDOFF_ID"
 
 
-def _serialize_kv_cache_info(kv_cache_info: list[tuple]) -> str:
-    """Encode (shape, dtype, ...) tuples so they can ride the KV-store's
-    generic payload field; the consumer needs this to open the producer's
-    shared-memory block with the shape it was actually created with."""
-    return json.dumps(
-        [[list(info[0]), np.dtype(info[1]).str] for info in kv_cache_info]
-    )
-
-
-def _deserialize_kv_cache_info(payload: str) -> list[tuple]:
-    decoded = json.loads(payload)
-    return [(tuple(shape), np.dtype(dtype_str), 0) for shape, dtype_str in decoded]
-
-
 @dataclass
 class ReqTrackerObj:
     request: "Request"
@@ -111,8 +96,6 @@ class ReqMeta:
     # Keeping List[str] for backward compatibility with QAIC handoff server;
     # even though will store only KV shm name.
     kv_handoff_metadata: list[str] | None = None
-    # Producer's own kv_cache_info, serialized; only set on the producer
-    kv_cache_info_payload: str | None = None
 
     @staticmethod
     def make_meta(
@@ -274,8 +257,13 @@ class ShmBuffer:
             # (e.g. (num_vision_tokens, hidden)). Preserve the shape verbatim.
             return tuple(kv_shape)
         # Recurrent and convolutional state tensors have rank 4, but their
-        # third dimension is not a context dimension. Slice only FA caches.
-        if not use_full_kv_transfer and kv_kind == KVCacheKind.FA and len(kv_shape) > 3:
+        # third dimension is not a context dimension. Slice only attention
+        # caches (FA/MSA/INDEX).
+        if (
+            not use_full_kv_transfer
+            and kv_kind in (KVCacheKind.FA, KVCacheKind.MSA, KVCacheKind.INDEX)
+            and len(kv_shape) > 3
+        ):
             seq_len = min(num_tokens, kv_shape[2])
             return (1, kv_shape[1], seq_len) + kv_shape[3:]
         # Use batch size 1 and keep other dims intact.
@@ -577,6 +565,7 @@ class QaicConnector(KVConnectorBase_V1):
             logger.debug("In connector.start_load_kv, but the kv_cache_info is None")
             return
         kv_cache_info = kwargs["kv_cache_info"]
+        native_kv_cache_info = kwargs.get("native_kv_cache_info", kv_cache_info)
 
         forward_context.additional_kwargs["cleanup_callback"] = self.cleanup_callback
         # Load the KV for each request
@@ -585,7 +574,6 @@ class QaicConnector(KVConnectorBase_V1):
                 continue
             elif request.block_id is not None:
                 kv_shm_buff_name = None
-                storage_kv_cache_info = kv_cache_info
                 # Get kv cache from kv_store
                 if not self.is_producer:
                     resp = self.get_kvcache_from_store(request.token_hash)
@@ -594,21 +582,14 @@ class QaicConnector(KVConnectorBase_V1):
                         "Raw np.ndarray KV exchange not supported yet"
                     )
                     kv_shm_buff_name = resp.payload[0]
-                    if len(resp.payload) > 1:
-                        # Producer's buffers may have a different shape
-                        storage_kv_cache_info = _deserialize_kv_cache_info(
-                            resp.payload[1]
-                        )
                 kv_storage_shm_name, kv_buff = self.mem_bank.get_Storage(
-                    kv_cache_info=storage_kv_cache_info,
+                    kv_cache_info=kv_cache_info
+                    if self.is_producer
+                    else native_kv_cache_info,
                     num_tokens=len(request.token_ids),
                     name=kv_shm_buff_name,
                 )
                 request.kv_handoff_metadata = [kv_storage_shm_name]
-                if self.is_producer:
-                    request.kv_cache_info_payload = _serialize_kv_cache_info(
-                        kv_cache_info
-                    )
                 if self.kv_caches[request.block_id - 1]:
                     logger.warning(
                         "Overwriting KV cache for running request at"
@@ -679,8 +660,6 @@ class QaicConnector(KVConnectorBase_V1):
                 )
 
                 payload = list(request.kv_handoff_metadata)
-                if request.kv_cache_info_payload is not None:
-                    payload.append(request.kv_cache_info_payload)
                 req_pk = QaicKvHandOffPutReq(
                     buff_type=QaicBufferType.SHM,
                     timestamp=time.perf_counter(),

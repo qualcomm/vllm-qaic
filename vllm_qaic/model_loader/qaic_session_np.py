@@ -40,6 +40,8 @@ logger = init_logger(__name__)
 BFLOAT16_STORAGE_DTYPE = np.dtype(np.float16)
 BFLOAT16_TYPE = getattr(aicapi, "BFLOAT16_TYPE", None)
 
+_MINIMAX_M3_DENSE_LAYER_COUNT = 3
+
 
 def float_to_bfloat16_storage(values: Any) -> np.ndarray:
     """Return raw BF16 storage compatible with QEfficient and LRT bindings.
@@ -114,6 +116,7 @@ class QAICInferenceSession:
         stages: int | None = 1,
         cluster_id: str | None = None,
         use_async_scheduling: bool = False,
+        model_type: str | None = None,
     ):
         self.stages: int = stages if stages is not None else 1
         self.cluster_id = cluster_id
@@ -235,6 +238,8 @@ class QAICInferenceSession:
         )
         self.cluster_id = cluster_id
 
+        self._is_minimax_m3 = model_type == "minimax_m3_vl"
+
         self.decode_buff_map = []
         for name in self.input_names:
             if self._is_kv_cache_name(name):
@@ -324,6 +329,14 @@ class QAICInferenceSession:
             return KVCacheKind.LA_CONV
         elif "recurrent" in name:
             return KVCacheKind.LA_RECURRENT
+        elif self._is_minimax_m3:
+            if "index_key" in name:
+                return KVCacheKind.INDEX
+            part = name.split(".")[1] if "." in name else "0"
+            layer_number = int(part.split("_")[0])
+            if layer_number >= _MINIMAX_M3_DENSE_LAYER_COUNT:
+                return KVCacheKind.MSA
+            return KVCacheKind.FA
         else:
             return KVCacheKind.FA
 
@@ -355,7 +368,7 @@ class QAICInferenceSession:
                 size = aic_to_np_dtype_mapping[binding.type]
                 base_name = name.replace("_RetainedState", "")
                 kv_kind = self._classify_kv_binding(name)
-                if kv_kind == KVCacheKind.FA:
+                if kv_kind in (KVCacheKind.FA, KVCacheKind.MSA, KVCacheKind.INDEX):
                     dimspec = _full_attn_dim_spec
                 else:
                     dimspec = _full_state_dim_spec
@@ -635,7 +648,8 @@ class QAICInferenceSession:
             for axis_size in shape[1:-1]:
                 dim_specs.append({"start": 0, "size": axis_size})
             dim_specs.append({"start": 0, "size": shape[-1]})
-            if len(shape) == 4:
+            kv_kind = self._classify_kv_binding(name)
+            if kv_kind in (KVCacheKind.FA, KVCacheKind.MSA, KVCacheKind.INDEX):
                 dim_specs[2]["start"] = "ctx_start"
             buffer_specs.append(
                 {

@@ -1286,6 +1286,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
             else:
                 mm_kwargs_list = None
 
+        native_kv_cache_info = self.native_kv_cache_info  # type: ignore[has-type]
         with (
             set_forward_context(
                 None,
@@ -1296,6 +1297,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
             self.maybe_get_kv_connector_output(
                 scheduler_output,
                 kv_cache_info=self.kv_cache_info,  # type: ignore[has-type]
+                native_kv_cache_info=native_kv_cache_info,
                 defer_save=self.is_async_kv_producer,
             ) as kv_connector_output,
         ):
@@ -1743,6 +1745,9 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 )
         self.kv_cache_info = (
             self.model.kv_cache_info if self.model.disagg_serving_en else None
+        )
+        self.native_kv_cache_info = (
+            self.model.native_kv_cache_info if self.model.disagg_serving_en else None
         )
         kv_transfer_config = self.vllm_config.kv_transfer_config
         if (
