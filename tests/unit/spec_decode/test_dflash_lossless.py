@@ -217,10 +217,11 @@ def test_qwen35_long_greedy_matches_vanilla(moe, with_image, generation_len, see
             num_logits_to_keep=torch.from_numpy(batch_inputs["num_logits_to_keep"]),
         )
         cache = out[4]
-        # Verification may read its suffix, but retained KV may only commit
-        # the previous accepted prefix. Check both full-attention layers.
-        committed = batch_inputs["position_ids"][0, 0, :BLOCK]
-        untouched = ~np.isin(np.arange(CTX), committed[committed >= 0])
+        # Proposal KV may remain: causal masking hides the rejected suffix.
+        # All positions outside this input must remain unchanged in both layers.
+        written = batch_inputs["position_ids"][0, 0]
+        committed = written[:BLOCK]
+        untouched = ~np.isin(np.arange(CTX), written[written >= 0])
         for layer in (1, 3):
             for new, old in zip(cache[layer], before[layer], strict=True):
                 torch.testing.assert_close(

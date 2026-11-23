@@ -148,11 +148,17 @@ def test_compile_only_builds_draft_before_exiting(monkeypatch, dflash, draft_err
 )
 @pytest.mark.parametrize("metadata", ["none", "layers_only", "repo_only", "dflash"])
 @pytest.mark.parametrize("continuous_batching", [None, False, True])
+@pytest.mark.parametrize("nested_override", [False, True])
 @pytest.mark.parametrize(
     "dtype_args", [{}, {"dtype": "float16"}, {"torch_dtype": "float16"}]
 )
 def test_hf_loading_preserves_dtype_and_batching_options(
-    monkeypatch, model_type, metadata, continuous_batching, dtype_args
+    monkeypatch,
+    model_type,
+    metadata,
+    continuous_batching,
+    nested_override,
+    dtype_args,
 ):
     import QEfficient
     from vllm_qaic.model_loader import qaic
@@ -181,9 +187,14 @@ def test_hf_loading_preserves_dtype_and_batching_options(
         qaic_config["target_layer_ids"] = [1, 3]
     if metadata in {"repo_only", "dflash"}:
         qaic_config["dflash_dlm_repo"] = "draft"
-    overrides = {"pretrained_extra_args": dtype_args} if dtype_args else {}
+    overrides = {"pretrained_extra_args": dtype_args.copy()} if dtype_args else {}
     if continuous_batching is not None:
         overrides["continuous_batching"] = continuous_batching
+        if nested_override:
+            overrides["continuous_batching"] = not continuous_batching
+            overrides.setdefault("pretrained_extra_args", {})["continuous_batching"] = (
+                continuous_batching
+            )
     get_hf_model(
         config,
         qaic_config=qaic_config,
@@ -195,6 +206,182 @@ def test_hf_loading_preserves_dtype_and_batching_options(
     assert args["continuous_batching"] is (
         True if continuous_batching is None else continuous_batching
     )
+
+
+@pytest.mark.parametrize("continuous_batching", [False, True])
+@pytest.mark.parametrize("cached", [False, True])
+def test_loader_preserves_explicit_batching_override_when_building(
+    monkeypatch, continuous_batching, cached
+):
+    from vllm_qaic.model_loader import qaic
+
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            is_multimodal_model=False, runner_type="generate", quantization=None
+        ),
+        speculative_config=None,
+        lora_config=None,
+        additional_config={
+            "override_qaic_config": {
+                "pretrained_extra_args": {"continuous_batching": continuous_batching}
+            }
+        },
+    )
+    compiled = SimpleNamespace(
+        qpc_path="cached" if cached else None,
+        qaic_config=None,
+        kv_offload=False,
+        cfg={},
+        compile_only=True,
+    )
+    load = Mock(side_effect=QaicCompilationComplete())
+    monkeypatch.setattr(qaic, "QaicCausalLM", Mock())
+    monkeypatch.setattr(qaic, "_get_qaic_compile_config", Mock(return_value=compiled))
+    monkeypatch.setattr(qaic, "check_qpc_exists", lambda _: True)
+    monkeypatch.setattr(qaic, "get_hf_model", load)
+    with pytest.raises(QaicCompilationComplete):
+        load_qaic_model(config)
+    if cached:
+        load.assert_not_called()
+    else:
+        load.assert_called_once_with(
+            config.model_config, None, None, False, config.additional_config
+        )
+
+
+@pytest.mark.parametrize("runner_type", ["pooling", "generate"])
+@pytest.mark.parametrize("moe", [False, True])
+def test_qwen35_loader_restores_native_config(monkeypatch, tmp_path, runner_type, moe):
+    import QEfficient
+    from transformers.models.auto.configuration_auto import CONFIG_MAPPING
+    from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5Config
+    from vllm.transformers_utils.config import HFConfigParser
+    from vllm.transformers_utils.configs.qwen3_5 import (
+        Qwen3_5Config as VllmQwen35Config,
+    )
+
+    if moe:
+        from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import (
+            Qwen3_5MoeConfig as Qwen3_5Config,
+        )
+        from vllm.transformers_utils.configs.qwen3_5_moe import (
+            Qwen3_5MoeConfig as VllmQwen35Config,
+        )
+
+    native = Qwen3_5Config(tie_word_embeddings=False)
+    native.save_pretrained(tmp_path)
+    # Exercise vLLM's actual registration boundary before the generic loader.
+    monkeypatch.setitem(CONFIG_MAPPING._extra_content, native.model_type, Qwen3_5Config)
+    _, compatibility = HFConfigParser().parse(tmp_path, trust_remote_code=False)
+    assert type(compatibility) is VllmQwen35Config
+    compatibility.text_config.max_position_embeddings = 2048
+    compatibility.tie_word_embeddings = True
+    original = compatibility.to_dict()
+    load = Mock(return_value=object())
+    monkeypatch.setattr(
+        QEfficient.QEFFAutoModelForImageTextToText, "from_pretrained", load
+    )
+    config = SimpleNamespace(
+        hf_config=compatibility,
+        model=str(tmp_path),
+        trust_remote_code=False,
+        revision=None,
+        code_revision=None,
+        is_multimodal_model=True,
+        runner_type=runner_type,
+    )
+    get_hf_model(config, kv_offload=True)
+    restored = load.call_args.kwargs["config"]
+    assert type(restored) is Qwen3_5Config
+    assert type(restored.vision_config) is Qwen3_5Config.sub_configs["vision_config"]
+    assert (
+        restored.vision_config.rope_parameters == native.vision_config.rope_parameters
+    )
+    assert restored.text_config.max_position_embeddings == 2048
+    assert restored.tie_word_embeddings is False
+    assert compatibility.to_dict() == original
+    assert CONFIG_MAPPING[native.model_type] is VllmQwen35Config
+
+
+@pytest.mark.parametrize("vllm_override", [False, True])
+@pytest.mark.parametrize("native_available", [False, True])
+def test_native_config_conversion_preserves_unrelated_registrations(
+    monkeypatch, tmp_path, vllm_override, native_available
+):
+    import QEfficient
+    from transformers import LlamaConfig
+    from transformers.models.auto.configuration_auto import (
+        CONFIG_MAPPING,
+        CONFIG_MAPPING_NAMES,
+    )
+    from vllm_qaic.model_loader import qaic
+
+    class CompatibilityConfig(LlamaConfig):
+        pass
+
+    LlamaConfig(tie_word_embeddings=False).save_pretrained(tmp_path)
+    monkeypatch.setitem(CONFIG_MAPPING._extra_content, "llama", CompatibilityConfig)
+    monkeypatch.setattr(
+        qaic,
+        "_CONFIG_REGISTRY",
+        {"llama": CompatibilityConfig} if vllm_override else {},
+    )
+    if not native_available:
+        monkeypatch.delitem(CONFIG_MAPPING_NAMES, "llama")
+    compatibility = CompatibilityConfig.from_pretrained(tmp_path)
+    compatibility.max_position_embeddings = 2048
+    compatibility.tie_word_embeddings = True
+    original = compatibility.to_dict()
+    load = Mock(return_value=object())
+    monkeypatch.setattr(QEfficient.QEFFAutoModelForCausalLM, "from_pretrained", load)
+    config = SimpleNamespace(
+        hf_config=compatibility,
+        model=str(tmp_path),
+        trust_remote_code=False,
+        revision=None,
+        code_revision=None,
+        is_multimodal_model=False,
+        runner_type="generate",
+    )
+    get_hf_model(config)
+    restored = load.call_args.kwargs["config"]
+    expected = (
+        LlamaConfig if vllm_override and native_available else CompatibilityConfig
+    )
+    assert type(restored) is expected
+    assert restored.max_position_embeddings == 2048
+    assert restored.tie_word_embeddings is False
+    assert compatibility.to_dict() == original
+    assert CONFIG_MAPPING["llama"] is CompatibilityConfig
+
+
+@pytest.mark.parametrize("architecture", ["DFlashDraftModel", "DFlash2DraftModel"])
+def test_shared_loader_preserves_dflash_architecture(
+    monkeypatch, tmp_path, architecture
+):
+    import QEfficient
+    from transformers import Qwen3Config
+    from vllm.transformers_utils.configs.eagle import EAGLEConfig
+
+    native = Qwen3Config(architectures=[architecture])
+    native.save_pretrained(tmp_path)
+    wrapped = EAGLEConfig(model=native, method="dflash", model_type="eagle")
+    load = Mock(return_value=object())
+    monkeypatch.setattr(QEfficient.QEFFAutoModelForCausalLM, "from_pretrained", load)
+    config = SimpleNamespace(
+        hf_config=wrapped,
+        model=str(tmp_path),
+        trust_remote_code=False,
+        revision=None,
+        code_revision=None,
+        is_multimodal_model=False,
+        runner_type="generate",
+    )
+    get_hf_model(config)
+    restored = load.call_args.kwargs["config"]
+    assert type(restored) is Qwen3Config
+    assert restored.architectures == [architecture]
+    assert wrapped.architectures == [architecture]
 
 
 def test_dflash_registry_separates_vlm_from_text_architectures():
@@ -229,11 +416,13 @@ def test_dflash_rejects_unsupported_target_before_loading(cached, role):
     "model_type",
     ["qwen3", "llama", "gemma4", "qwen3_vl", "qwen3_5", "qwen3_5_moe", "gpt_oss"],
 )
-def test_dflash_derivation_validates_target_not_draft(model_type):
+@pytest.mark.parametrize("dflash2", [False, True])
+def test_dflash_derivation_validates_target_not_draft(model_type, dflash2):
     draft = SimpleNamespace(
         model="draft",
         hf_config=SimpleNamespace(
             model_type="dflash",
+            architectures=["DFlash2DraftModel" if dflash2 else "DFlashDraftModel"],
             dflash_config={
                 "block_size": 16,
                 "target_layer_ids": [0, 2],
@@ -255,6 +444,7 @@ def test_dflash_derivation_validates_target_not_draft(model_type):
     _derive_dflash_config(config)
     derived = config.additional_config["dflash_cfg"]
     assert derived["tlm_model_type"] == model_type
-    assert derived["target_layer_ids"] == [1, 3]
+    assert derived["target_layer_ids"] == ([0, 2] if dflash2 else [1, 3])
+    assert derived.get("is_dflash2", False) == dflash2
     _derive_dflash_config(config)
     assert config.additional_config["dflash_cfg"] is derived

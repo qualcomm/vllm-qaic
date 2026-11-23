@@ -77,6 +77,7 @@ def test_subfunction_policy_is_specific_to_dflash_gemma4(
             "tlm_model_type": model_type,
         }
     result = _get_qaic_compile_config(config, "target" if dflash else "default")
+    assert "continuous_batching" not in result.cfg
     assert bool(result.cfg.get("use_onnx_subfunctions")) == (
         dflash and model_type == "gemma4"
     )
@@ -92,4 +93,5 @@ def test_subfunction_policy_is_specific_to_dflash_gemma4(
             assert "vision_batch_size" not in result.cfg
         config.kv_transfer_config = None
         draft = _get_qaic_compile_config(config, "draft")
+        assert "continuous_batching" not in draft.cfg
         assert not draft.cfg.get("use_onnx_subfunctions", False)

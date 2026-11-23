@@ -1446,6 +1446,9 @@ def _derive_dflash_config(vllm_config) -> None:
     if "dflash_cfg" in additional_config:
         return
     dlm_hf = spec_config.draft_model_config.hf_config
+    is_dflash2 = "DFlash2DraftModel" in (getattr(dlm_hf, "architectures", None) or [])
+    if is_dflash2 and getattr(vllm_config, "kv_transfer_config", None):
+        raise ValueError("DFlash2 currently supports non-disaggregated serving only.")
     dflash_section = getattr(dlm_hf, "dflash_config", None)
     if dflash_section is None and hasattr(dlm_hf, "to_dict"):
         dflash_section = dlm_hf.to_dict().get("dflash_config")
@@ -1479,15 +1482,18 @@ def _derive_dflash_config(vllm_config) -> None:
             f"block_size; got prefill_seq_len={tlm_prefill_seq_len}, "
             f"block_size={block_size}."
         )
+    # DFlash2 keeps PR #1472's checkpoint layer-index convention.
+    layer_offset = 0 if is_dflash2 else 1
     additional_config["dflash_cfg"] = {
         "block_size": block_size,
-        # TLM captures hidden states after the layer fires, so ids are +1.
-        "target_layer_ids": [i + 1 for i in target_layer_ids],
+        "target_layer_ids": [i + layer_offset for i in target_layer_ids],
         "mask_token_id": mask_token_id,
         "tlm_repo": spec_config.target_model_config.model,
         "tlm_model_type": spec_config.target_model_config.hf_config.model_type,
         "dlm_repo": spec_config.draft_model_config.model,
     }
+    if is_dflash2:
+        additional_config["dflash_cfg"]["is_dflash2"] = True
 
 
 def load_qaic_model(
@@ -1911,13 +1917,20 @@ def get_hf_model(
     if hf_config.model_type in _CONFIG_REGISTRY or not is_json_serializable(hf_config):
         # If vllm uses a custom model config class,
         # convert it back to the transformers config class
-        from transformers import AutoConfig
+        import transformers
+        from transformers.models.auto.configuration_auto import CONFIG_MAPPING_NAMES
 
-        pretrained_hf_config = AutoConfig.from_pretrained(
+        config_cls = transformers.AutoConfig
+        # AutoConfig may have been overridden by vLLM's compatibility registry.
+        if hf_config.model_type in _CONFIG_REGISTRY:
+            config_name = CONFIG_MAPPING_NAMES.get(hf_config.model_type)
+            if config_name is not None:
+                config_cls = getattr(transformers, config_name)
+        pretrained_hf_config = config_cls.from_pretrained(
             model_config.model,
             trust_remote_code=model_config.trust_remote_code,
         )
-        hf_config = AutoConfig.from_pretrained(
+        hf_config = config_cls.from_pretrained(
             model_config.model,
             trust_remote_code=model_config.trust_remote_code,
             **hf_config.to_dict(),
@@ -2319,6 +2332,11 @@ def _get_qaic_compile_config(
                 qaic_config = {}
             qaic_config["dflash_dlm"] = True
             qaic_config["dflash_tlm_repo"] = dflash_cfg["tlm_repo"]
+            if dflash_cfg.get("is_dflash2"):
+                # Phase one uses the existing argmax proposer, without top-k rescoring.
+                qaic_config["dflash_emit_selector_hidden"] = False
+                cfg["node_precision_info"] = True
+                cfg["use_onnx_subfunctions"] = False
             if is_dflash_vlm:
                 # DFlashDLMTransform copies TLM embeddings into the draft; VLM
                 # checkpoints use this key instead of model.embed_tokens.weight.
@@ -2330,6 +2348,9 @@ def _get_qaic_compile_config(
                 qaic_config = {}
             qaic_config["target_layer_ids"] = dflash_cfg["target_layer_ids"]
             qaic_config["dflash_dlm_repo"] = dflash_cfg["dlm_repo"]
+            if dflash_cfg.get("is_dflash2"):
+                qaic_config["dflash2_checkpoint"] = dflash_cfg["dlm_repo"]
+                qaic_config["dflash_block_size"] = dflash_cfg["block_size"]
             model_type = vllm_config.model_config.hf_config.model_type
             if is_dflash_vlm:
                 # Export Gemma4 decoder blocks as subfunctions

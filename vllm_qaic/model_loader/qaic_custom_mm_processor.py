@@ -92,7 +92,7 @@ from vllm.multimodal.processing.processor import (
 logger = init_logger(__name__)
 # transformers v5.5.4 replaced image_processor.min_pixels / .max_pixels class
 # attributes with a size dict keyed by 'shortest_edge' / 'longest_edge'.
-_TRANSFORMERS_NEW_IMAGE_PROCESSOR = _Version(_transformers_version) == _Version("5.5.4")
+_TRANSFORMERS_NEW_IMAGE_PROCESSOR = _Version(_transformers_version) >= _Version("5.5.4")
 _gemma4_get_placeholder_str = Gemma4ForConditionalGeneration.get_placeholder_str
 # Gemma4 with vllm v0.23 wabts image modality instead of image_embeds
 Gemma4ForConditionalGeneration.get_placeholder_str = classmethod(
@@ -371,9 +371,8 @@ class QaicQwen2VLImageProcessorFast(Qwen2VLImageProcessorFast):
         images are resized to one of the known resolutions compiled into the QPC.
         """
         # Resolve the resampling filter regardless of which name the base class uses.
-        interpolation = kwargs.pop("resample", None) or kwargs.pop(
-            "interpolation", None
-        )
+        filter_name = "resample" if "resample" in kwargs else "interpolation"
+        resize_kwargs = {filter_name: kwargs.pop(filter_name, None)}
         # Group images by size for batched resizing
         grouped_images, grouped_images_index = group_images_by_shape(
             images, disable_grouping=disable_grouping
@@ -400,10 +399,11 @@ class QaicQwen2VLImageProcessorFast(Qwen2VLImageProcessorFast):
                     resized_height, resized_width = select_best_resolution(
                         (resized_height, resized_width), self.resolutions
                     )
-                stacked_images = self.resize(
+                # Bypass Qwen's dynamic resize; the QPC resolution is already selected.
+                stacked_images = super(Qwen2VLImageProcessorFast, self).resize(
                     image=stacked_images,
                     size=SizeDict(height=resized_height, width=resized_width),
-                    interpolation=interpolation,
+                    **resize_kwargs,
                 )
             resized_images_grouped[shape] = stacked_images
         resized_images = reorder_images(resized_images_grouped, grouped_images_index)

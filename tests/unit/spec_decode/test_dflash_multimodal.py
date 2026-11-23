@@ -18,7 +18,11 @@ from vllm_qaic.platform_base import QaicPlatform
 
 @pytest.mark.parametrize("nested_block_size", [False, True])
 @pytest.mark.parametrize("fail_generate", [False, True])
-def test_simple_vlm_example(monkeypatch, nested_block_size, fail_generate):
+@pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe", "qwen3_vl"])
+@pytest.mark.parametrize("custom_options", [False, True])
+def test_simple_vlm_example(
+    monkeypatch, tmp_path, nested_block_size, fail_generate, model_type, custom_options
+):
     from PIL import Image
 
     path = Path(__file__).resolve().parents[3] / "examples/qaic_spd_dflash_vlm.py"
@@ -43,30 +47,99 @@ def test_simple_vlm_example(monkeypatch, nested_block_size, fail_generate):
     ]
     llm = Mock(side_effect=[vision, target])
     monkeypatch.setitem(main.__globals__, "LLM", llm)
-    monkeypatch.setitem(
-        main.__globals__, "AutoConfig", Mock(from_pretrained=Mock(return_value=config))
+    auto_config = Mock(
+        from_pretrained=Mock(
+            side_effect=[SimpleNamespace(model_type=model_type), config]
+        )
     )
+    monkeypatch.setitem(main.__globals__, "AutoConfig", auto_config)
     monkeypatch.setitem(
         main.__globals__,
         "AutoProcessor",
         Mock(from_pretrained=Mock(return_value=processor)),
     )
-    monkeypatch.setitem(
-        main.__globals__, "fetch_image", lambda _: Image.new("RGB", (448, 448))
-    )
+    fetch_image = Mock(return_value=Image.new("RGB", (448, 448)))
+    monkeypatch.setitem(main.__globals__, "fetch_image", fetch_image)
+    argv = []
+    if custom_options:
+        local_image = tmp_path / "image.png"
+        Image.new("RGB", (448, 448)).save(local_image)
+        argv = [
+            "--model",
+            "Qwen/Qwen3.8-27B",
+            "--draft-model",
+            "z-lab/Qwen3.8-27B-DFlash2",
+            "--image",
+            str(local_image),
+            "--question",
+            "What is in the image?",
+            "--tlm-qpc",
+            "/tlm-qpc",
+            "--dlm-qpc",
+            "/dlm-qpc",
+            "--vision-qpc",
+            "/vision-qpc",
+            "--tlm-cores",
+            "8",
+            "--dlm-cores",
+            "4",
+            "--vision-cores",
+            "4",
+            "--enable-thinking",
+        ]
     if fail_generate:
         target.generate.side_effect = RuntimeError("generation failed")
         with pytest.raises(RuntimeError, match="generation failed"):
-            main()
+            main(argv)
     else:
-        main()
+        main(argv)
     vision_config, target_config = [call.kwargs for call in llm.call_args_list]
     assert vision_config["runner"] == "pooling"
-    assert target_config["model"] == "Qwen/Qwen3.5-4B"
+    assert target_config["model"] == (
+        "Qwen/Qwen3.8-27B" if custom_options else "Qwen/Qwen3.5-4B"
+    )
+    assert target_config["speculative_config"]["method"] == "dflash"
+    assert target_config["speculative_config"]["model"] == (
+        "z-lab/Qwen3.8-27B-DFlash2" if custom_options else "z-lab/Qwen3.5-4B-DFlash"
+    )
+    assert [call.args[0] for call in auto_config.from_pretrained.call_args_list] == [
+        target_config["model"],
+        target_config["speculative_config"]["model"],
+    ]
     assert target_config["max_num_seqs"] == 1
     assert target_config["speculative_config"]["num_speculative_tokens"] == 15
-    assert "enable_thinking" not in processor.apply_chat_template.call_args.kwargs
+    assert (
+        processor.apply_chat_template.call_args.kwargs["enable_thinking"]
+        is custom_options
+    )
     assert processor.apply_chat_template.call_args.kwargs["add_generation_prompt"]
+    target_compile = target_config["additional_config"]["override_qaic_config"]
+    draft_compile = target_config["additional_config"]["draft_override_qaic_config"]
+    vision_compile = vision_config["additional_config"]["override_qaic_config"]
+    if model_type in {"qwen3_5", "qwen3_5_moe"}:
+        assert target_compile["pretrained_extra_args"] == {"continuous_batching": False}
+    else:
+        assert "pretrained_extra_args" not in target_compile
+    for compile_config in (draft_compile, vision_compile):
+        assert "pretrained_extra_args" not in compile_config
+    assert draft_compile["prefill_seq_len"] == 16
+    assert target_compile["prefill_seq_len"] == 128
+    for component, compile_config in (
+        ("tlm", target_compile),
+        ("dlm", draft_compile),
+        ("vision", vision_compile),
+    ):
+        assert compile_config["num_cores"] == (
+            4 if custom_options and component != "tlm" else 8
+        )
+        if custom_options:
+            assert compile_config["qpc_path"] == f"/{component}-qpc"
+        else:
+            assert "qpc_path" not in compile_config
+    if custom_options:
+        fetch_image.assert_not_called()
+    else:
+        fetch_image.assert_called_once()
     request = target.generate.call_args.args[0][0]
     assert request["prompt"] == "formatted image prompt"
     assert request["multi_modal_data"]["image"]["image_embeds"] is embeddings
