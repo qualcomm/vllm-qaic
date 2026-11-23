@@ -825,6 +825,7 @@ class QaicWorkerAoT(QaicWorker):
             if self.cache_config.num_gpu_blocks_override
             else self.scheduler_config.max_num_seqs
         ) + 1
+        # adapted from get_uniform_page_size
         page_sizes = set(
             layer.page_size_bytes for layer in self.get_kv_cache_spec().values()
         )
