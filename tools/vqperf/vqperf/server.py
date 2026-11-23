@@ -11,13 +11,12 @@ max-num-seqs and quantization are server-side engine args.
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import os
 import subprocess
 import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 from .config import BenchConfig
@@ -71,6 +70,22 @@ class VllmServer:
     @property
     def base_url(self) -> str:
         return f"http://{self.host}:{self.port}"
+
+    def _get(self, path: str, timeout: float) -> tuple[int, bytes]:
+        """GET ``path`` from this server; returns (status, body).
+
+        Uses ``http.client`` rather than ``urllib`` so the request can only
+        ever be plain HTTP to ``host:port`` -- there is no URL scheme to parse.
+        Raises ``http.client.HTTPException`` or ``OSError`` on transport errors;
+        a non-2xx status is returned, not raised.
+        """
+        conn = http.client.HTTPConnection(self.host, self.port, timeout=timeout)
+        try:
+            conn.request("GET", path)
+            response = conn.getresponse()
+            return response.status, response.read()
+        finally:
+            conn.close()
 
     def _build_env(self) -> dict[str, str]:
         hf_home = self.cache_dir / "hf"
@@ -158,20 +173,20 @@ class VllmServer:
                     f"healthy\nlog: {self.log_path}\n{tail_file(self.log_path)}"
                 )
             try:
-                with urllib.request.urlopen(  # noqa: S310
-                    f"{self.base_url}/health", timeout=10
-                ) as response:
-                    if response.status == 200:
-                        self._check_model()
-                        self.ready_after_s = time.monotonic() - self.started_at
-                        logger.info(
-                            "server ready after %.0fs (%s)",
-                            self.ready_after_s,
-                            self.config.config_id,
-                        )
-                        return
-            except (urllib.error.URLError, OSError, TimeoutError) as exc:
-                last_error = str(exc)
+                status, _ = self._get("/health", timeout=10)
+            except (http.client.HTTPException, OSError) as exc:
+                last_error = str(exc) or type(exc).__name__
+            else:
+                if status == 200:
+                    self._check_model()
+                    self.ready_after_s = time.monotonic() - self.started_at
+                    logger.info(
+                        "server ready after %.0fs (%s)",
+                        self.ready_after_s,
+                        self.config.config_id,
+                    )
+                    return
+                last_error = f"/health returned HTTP {status}"
             time.sleep(3.0)
 
         raise ServerStartError(
@@ -182,11 +197,11 @@ class VllmServer:
 
     def _check_model(self) -> None:
         try:
-            with urllib.request.urlopen(  # noqa: S310
-                f"{self.base_url}/v1/models", timeout=30
-            ) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-        except (urllib.error.URLError, OSError, ValueError) as exc:
+            status, body = self._get("/v1/models", timeout=30)
+            if status != 200:
+                raise ServerStartError(f"/v1/models returned HTTP {status}")
+            payload = json.loads(body.decode("utf-8"))
+        except (http.client.HTTPException, OSError, ValueError) as exc:
             raise ServerStartError(f"/v1/models unreachable: {exc}") from exc
 
         served = [item.get("id", "") for item in payload.get("data", [])]
@@ -197,14 +212,6 @@ class VllmServer:
                 served,
                 self.config.model,
             )
-
-    def post(self, path: str, timeout: float = 120.0) -> int:
-        """POST with an empty body; returns the HTTP status."""
-        request = urllib.request.Request(  # noqa: S310
-            f"{self.base_url}{path}", data=b"", method="POST"
-        )
-        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
-            return int(response.status)
 
     def stop(self) -> None:
         if self.process is None:
