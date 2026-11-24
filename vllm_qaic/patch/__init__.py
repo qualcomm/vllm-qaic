@@ -113,8 +113,9 @@
 #       (linear_batch_invariant) we must patch their `apply` method.
 #    How:
 #       Reassign both `apply` methods to a wrapper that calls
-#       linear_batch_invariant when VLLM_QAIC_TRITON_LINEAR is set, else the
-#       original dispatch_unquantized_gemm path.
+#       linear_batch_invariant for all linear layers when
+#       VLLM_QAIC_TRITON_LINEAR is set; otherwise use the original
+#       dispatch_unquantized_gemm path.
 #    Note:
 #       Imported only when VLLM_QAIC_TRITON_LINEAR is set (see below). Requires
 #       the QAIC platform to implement num_compute_units (matmul_persistent
@@ -163,6 +164,30 @@
 #    Note:
 #       Imported only when VLLM_QAIC_ENABLE_TRITON_ATTN is set, since that
 #       backend is the only caller of this wrapper on QAIC.
+#
+# ** 11. File: patch_fp8_scaled_mm.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. vllm.model_executor.kernels.linear._POSSIBLE_FP8_KERNELS
+#   2. vllm.model_executor.kernels.linear._POSSIBLE_FP8_BLOCK_KERNELS
+#    Why:
+#       choose_scaled_mm_linear_kernel() selects an fp8 linear kernel with
+#       possible_kernels[current_platform._enum]. QAIC's enum is
+#       PlatformEnum.OOT, which is absent from every kernel table in
+#       vllm.model_executor.kernels.linear, so the lookup raises KeyError
+#       before any can_implement() check runs. Registering the kernel class
+#       is not sufficient on its own -- the table needs the OOT key.
+#    How:
+#       Insert PlatformEnum.OOT -> [QaicFP8ScaledMMLinearKernel] into the
+#       non-block fp8 kernel table, and
+#       PlatformEnum.OOT -> [QaicFP8BlockScaledMMLinearKernel] into the
+#       block-scaled table. The two cover the two branches of
+#       Fp8LinearMethod.__init__: per-tensor/per-token/per-channel scales, and
+#       block-quantized scales (e.g. DeepSeek's [128, 128] weight blocks).
+#    Note:
+#       QAIC has no per-group fp8 GEMM to call, so the block kernel honours the
+#       group scales above the device op, by folding them into fp16 operands
+#       before a single fused matmul. That is exact: a block scale is constant
+#       along K within a K-tile, so it hoists out of that tile's partial sum.
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # ** 11. File: patch_gemma4_dtype.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -225,6 +250,19 @@
 #       past the padded total, num_tokens_post_pad set). The wrapper's buffer
 #       allocation and expert_map remapping stay upstream's.
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#
+# ** 15. File: patch_empty_cache.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. torch.accelerator.empty_cache
+#    Why:
+#       Generic cache cleanup assumes PyTorch's CachingDeviceAllocator,
+#       while eager QAIC tensors use qaicrt.
+#    How:
+#       Redirect to torch.qaic.empty_cache when that API is callable and retain
+#       the original function. Apply once; skip when no QAIC allocator exists.
+#    Note:
+#       Imported by QaicPlatform.pre_register_and_update only in PYT mode.
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # =================
 
 # NOTE: patch_topk_topp_sampler must stay first; it rebinds a module-level
@@ -234,7 +272,6 @@ import vllm_qaic.patch.patch_topk_topp_sampler  # noqa
 import vllm_qaic.patch.patch_config  # noqa
 import vllm_qaic.patch.patch_parallel_state  # noqa
 import vllm_qaic.patch.patch_utils  # noqa
-import vllm_qaic.patch.patch_topk_topp_sampler  # noqa
 import vllm_qaic.patch.patch_rejection_sampler  # noqa
 import vllm_qaic.patch.patch_graph_pickler  # noqa
 import vllm_qaic.patch.patch_mem_utils  # noqa
@@ -247,16 +284,18 @@ import vllm_qaic.patch.patch_fused_moe_align  # noqa
 import vllm_qaic.envs as qaic_envs
 
 # The numpy slot-mapping patch bypasses vLLM's Triton slot-mapping kernel. When
-# the in-tree Triton attention backend is enabled (VLLM_QAIC_ENABLE_TRITON_ATTN),
-# the real Triton slot-mapping kernel must stay live to feed slot_mapping into
-# triton_reshape_and_cache_flash, so skip this patch in that mode -- and instead
-# patch that wrapper, whose CUDA compute-capability query raises on QAIC.
+# the in-tree Triton attention backend is selected (the flag is enabled and
+# Triton is installed), the real Triton slot-mapping kernel must stay live to
+# feed slot_mapping into triton_reshape_and_cache_flash, so skip this patch in
+# that mode -- and instead patch that wrapper, whose CUDA compute-capability
+# query raises on QAIC.
 if not qaic_envs.VLLM_QAIC_ENABLE_TRITON_ATTN:
     import vllm_qaic.patch.patch_block_table  # noqa
 else:
     import vllm_qaic.patch.patch_reshape_and_cache  # noqa
 
-# Route the unquantized linear/GEMM family to vLLM's Triton GEMM only when the
-# opt-in flag is set; otherwise leave the default dispatch_unquantized_gemm path.
+# Install the dispatcher when the global linear Triton flag is set.
 if qaic_envs.VLLM_QAIC_TRITON_LINEAR:
     import vllm_qaic.patch.patch_linear  # noqa
+
+import vllm_qaic.patch.patch_fp8_scaled_mm  # noqa

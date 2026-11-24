@@ -55,6 +55,23 @@ DYNAMIC_RESOLUTION_MODELS = [
 # being initialized (it is what imports this module).
 _HAS_TRITON: bool = importlib.util.find_spec("triton") is not None
 
+# AIC hardware versions reported by qaicrt QDevInfo.devData.hwVersion.
+AIC_HW_VERSION_AI100: int = 0x20000
+AIC_HW_VERSION_AI200: int = 0x30200
+_KNOWN_AIC_HW_VERSIONS: dict[int, str] = {
+    AIC_HW_VERSION_AI100: "AI100",
+    AIC_HW_VERSION_AI200: "AI200",
+}
+
+# Model dtypes per AIC hardware version. The first entry is what vLLM picks
+# for dtype="auto" when the checkpoint is fp32 or its dtype is not listed.
+_AIC_HW_SUPPORTED_DTYPES: dict[int, list[torch.dtype]] = {
+    AIC_HW_VERSION_AI100: [torch.float16, torch.float32],
+    AIC_HW_VERSION_AI200: [torch.float16, torch.float32, torch.bfloat16],
+}
+# Used when the hardware version cannot be determined: no native BF16.
+_DEFAULT_SUPPORTED_DTYPES: list[torch.dtype] = [torch.float16, torch.float32]
+
 
 @functools.cache
 def _triton_backend() -> str | None:
@@ -111,13 +128,64 @@ class QaicPlatform(Platform):
     def get_punica_wrapper(cls) -> str:
         return "vllm.lora.punica_wrapper.punica_cpu.PunicaWrapperCPU"
 
+    @staticmethod
+    @functools.cache
+    def get_hw_version(device_id: int = 0) -> int | None:
+        """Return the AIC hardware version of QID ``device_id`` via qaicrt.
+
+        AI100 reports 0x20000 (AIC_HW_VERSION_AI100) and AI200 reports 0x30200
+        (AIC_HW_VERSION_AI200). Queried through qaicrt so it works in both AOT
+        and eager mode. The result is cached per device_id, including None,
+        which means the runtime could not be queried (qaicrt missing or the
+        device unavailable).
+        """
+        try:
+            try:
+                import qaicrt
+            except ModuleNotFoundError as exc:
+                if exc.name != "qaicrt":
+                    raise
+                import platform as _platform
+                import sys
+
+                qaic_sdk_path = f"/opt/qti-aic/dev/lib/{_platform.machine()}"
+                if qaic_sdk_path not in sys.path:
+                    sys.path.append(qaic_sdk_path)
+                import qaicrt
+
+            status, info = qaicrt.Util().getDeviceInfo(device_id)
+            if status != qaicrt.QStatus.QS_SUCCESS:
+                logger.warning(
+                    "get_hw_version: getDeviceInfo(%s) returned %s", device_id, status
+                )
+                return None
+            hw_version = int(info.devData.hwVersion)
+        except Exception as exc:
+            logger.warning("get_hw_version: could not query QID %s: %s", device_id, exc)
+            return None
+
+        if hw_version not in _KNOWN_AIC_HW_VERSIONS:
+            logger.warning(
+                "get_hw_version: unknown AIC hardware version %#x on QID %s",
+                hw_version,
+                device_id,
+            )
+        else:
+            logger.info(
+                "Detected %s (AIC hardware version %#x) on QID %s",
+                _KNOWN_AIC_HW_VERSIONS[hw_version],
+                hw_version,
+                device_id,
+            )
+        return hw_version
+
     @classmethod
     def pre_register_and_update(cls, parser=None) -> None:
         cls.device_type = "qaic"
-        # Adapt the patch here.
-        from vllm_qaic import patch  # noqa: F401
-
+        # Rebind vllm.triton_utils before general patches import upstream
+        # modules that may copy its Triton symbols into their own namespace.
         if not cls.is_aot:
+            import vllm_qaic.patch.patch_empty_cache  # noqa
             import vllm_qaic.patch.patch_qaic_triton_import  # noqa
 
         # gpt_oss_mxfp4 is only supported in eager mode: AOT compilation has
@@ -127,6 +195,8 @@ class QaicPlatform(Platform):
             and QAIC_GPT_OSS_MXFP4_METHOD not in cls.supported_quantization
         ):
             cls.supported_quantization.append(QAIC_GPT_OSS_MXFP4_METHOD)
+        # Adapt the remaining patches after the eager Triton bindings exist.
+        from vllm_qaic import patch  # noqa: F401
 
         if parser is not None:  # For synchronous vLLM engine
             # disable prefix caching as QAIC backend plugin does not support it
@@ -175,8 +245,15 @@ class QaicPlatform(Platform):
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
-        # check_and_update_config restricts native BF16 to AI200 configurations.
-        return [torch.float16, torch.float32, torch.bfloat16]
+        # Read by ModelConfig to resolve dtype="auto", before
+        # check_and_update_config runs. AI100 has no native BF16, so a BF16
+        # checkpoint resolves to FP16 there; AI200 keeps BF16.
+        # Index 0 is vLLM's preferred dtype: fp32 checkpoints are downcast to
+        # it, and unsupported checkpoint dtypes fall back to it.
+        hw_version = self.get_hw_version()
+        if hw_version is None:
+            return list(_DEFAULT_SUPPORTED_DTYPES)
+        return list(_AIC_HW_SUPPORTED_DTYPES.get(hw_version, _DEFAULT_SUPPORTED_DTYPES))
 
     @classmethod
     def is_aot_inference(cls) -> bool:
@@ -211,6 +288,12 @@ class QaicPlatform(Platform):
         return False
 
     @classmethod
+    def support_hybrid_kv_cache(cls) -> bool:
+        """Enable hybrid caches for the upstream eager model runner."""
+        # TODO: Return True unconditionally once AOT supports hybrid KV cache.
+        return not cls.is_aot_inference()
+
+    @classmethod
     @functools.cache
     def get_num_cores(cls, device_id: int = 0) -> int:
         if not cls.is_aot:
@@ -227,46 +310,6 @@ class QaicPlatform(Platform):
         raise NotImplementedError(
             "get_num_hvx_threads is only supported in eager (non-AOT) mode"
         )
-
-    @classmethod
-    @functools.cache
-    def is_ai100_device(cls, device_id: int = 0) -> bool | None:
-        """Return True on AI100, False on non-AI100, None if undetectable.
-
-        AOT only: the AOT compiler rejects a BF16 custom-IO config on AI100, so
-        the QPC build needs to know the part. Eager mode has no QPC compile, so
-        this returns None there and the dtype is left untouched.
-
-        Native BF16 is an AI200-only contract; AI100 reports its PCI device
-        name as "Device a100". Queried through qaicrt because torch_qaic (and
-        get_device_info) is unavailable in AOT. None means the runtime could
-        not be queried — no SDK on the host, or the device is unavailable — so
-        callers should leave the dtype untouched rather than assume a part.
-        """
-        if not cls.is_aot:
-            return None
-        try:
-            try:
-                from qaicrt import QStatus, Util as qaic_util
-            except ImportError:
-                import platform as _platform
-                import sys
-
-                sys.path.append(f"/opt/qti-aic/dev/lib/{_platform.machine()}")
-                from qaicrt import QStatus, Util as qaic_util
-
-            status, dev_info = qaic_util().getDeviceInfo(device_id)
-            if status != QStatus.QS_SUCCESS:
-                logger.warning(
-                    "is_ai100_device: getDeviceInfo(%s) returned %s", device_id, status
-                )
-                return None
-            return "a100" in dev_info.pciInfo.devicename.lower()
-        except Exception as exc:
-            logger.warning(
-                "is_ai100_device: could not query device %s: %s", device_id, exc
-            )
-            return None
 
     @classmethod
     def num_compute_units(cls, device_id: int = 0) -> int:
@@ -395,17 +438,6 @@ class QaicPlatform(Platform):
         model_config = vllm_config.model_config
         scheduler_config = vllm_config.scheduler_config
         cache_config = vllm_config.cache_config
-
-        # Native BF16 is an AI200-only contract; never silently downcast it.
-        # if (
-        #     model_config.dtype == torch.bfloat16
-        #     and override_qaic_config.get("aic_hw_version") != "ai200"
-        # ):
-        #     raise ValueError(
-        #         "QAIC native bfloat16 requires "
-        #         "additional_config.override_qaic_config.aic_hw_version='ai200'. "
-        #         "BF16 must not be converted to float16 on AI100."
-        #     )
 
         assert not (vllm_config.lora_config and vllm_config.speculative_config), (
             "LORA with SPD is not yet supported for QAIC backend"

@@ -412,6 +412,7 @@ COPY --from=release-builder ${VENV} ${VENV}
 COPY --from=release-builder /opt/uv-python /opt/uv-python
 
 ENV PATH="${VENV}/bin:${PATH}" \
+    VIRTUAL_ENV="${VENV}" \
     VLLM_PLUGINS="qaic"
 
 # ===========================================================================
@@ -457,6 +458,7 @@ COPY --from=ci-builder ${VENV} ${VENV}
 COPY --from=ci-builder /opt/uv-python /opt/uv-python
 
 ENV PATH="${VENV}/bin:${PATH}" \
+    VIRTUAL_ENV="${VENV}" \
     VLLM_PLUGINS="qaic"
 
 # ===========================================================================
@@ -544,6 +546,7 @@ COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 ENV PATH="${VENV}/bin:${PATH}" \
+    VIRTUAL_ENV="${VENV}" \
     VLLM_PLUGINS="qaic" \
     VENV="${VENV}"
 
