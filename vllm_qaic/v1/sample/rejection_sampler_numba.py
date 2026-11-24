@@ -5,14 +5,25 @@
 
 """QAIC AOT rejection sampler: Numba replacement for the triton kernels.
 
-On AOT the upstream rejection sampler runs on the host.  Its four
-``@triton.jit`` kernels are module globals of
-``vllm.v1.sample.rejection_sampler`` looked up at call time, so ``install()``
-only replaces those globals with the bit-exact Numba ports from
-``vllm_qaic.v1.sample.numba_rejection_kernels``; the upstream call sites
-(``kernel[grid](...)``) are untouched.  No triton (triton-cpu) install is
-needed: without triton the upstream globals are uncallable placeholders, so
-``install()`` must run before the first speculative-decoding step.
+On AOT the upstream rejection sampler runs on the host.  Since vLLM v0.30,
+``rejection_sample()`` launches its four ``@triton.jit`` kernels through
+``@triton_kernel_dispatcher_with_warmup`` wrappers (``_expand``,
+``_rejection_greedy_sample``, ...) that capture the kernel object at import
+time, so replacing the ``*_kernel`` globals alone no longer has any effect.
+``install()`` therefore replaces both:
+
+* the dispatcher globals (``DISPATCHER_NAMES``) with drop-in callables that
+  take the upstream dispatcher signature, derive the grid and constexpr flags
+  exactly as upstream does, and launch whatever ``*_kernel`` global is
+  current (so the kernels stay swappable, as they were before v0.30); their
+  ``register_warmup()`` is a no-op because Numba needs no Triton warm-up;
+* the ``*_kernel`` globals (``KERNEL_NAMES``) with the bit-exact Numba ports
+  from ``vllm_qaic.v1.sample.numba_rejection_kernels``.
+
+No triton (triton-cpu) install is needed: without triton the upstream kernels
+are uncallable placeholders, so ``install()`` must run before the first
+speculative-decoding step (and before ``RejectionSampler`` is constructed, so
+that its ``register_warmup()`` calls hit the no-op).
 
 Debug-only instrumentation (adds per-launch overhead):
 
@@ -49,6 +60,15 @@ KERNEL_NAMES = (
     "rejection_random_sample_kernel",
     "sample_recovered_tokens_kernel",
 )
+
+# Upstream v0.30 dispatcher name -> the ``*_kernel`` global it launches.
+DISPATCHER_KERNELS = {
+    "_expand": "expand_kernel",
+    "_rejection_greedy_sample": "rejection_greedy_sample_kernel",
+    "_rejection_random_sample": "rejection_random_sample_kernel",
+    "_sample_recovered_tokens": "sample_recovered_tokens_kernel",
+}
+DISPATCHER_NAMES = tuple(DISPATCHER_KERNELS)
 
 _installed = False
 _originals: dict[str, Any] = {}
@@ -243,6 +263,142 @@ class _NumbaKernel:
 
     def __repr__(self) -> str:
         return f"<numba rejection kernel {self.__name__}>"
+
+
+# --------------------------------------------------------------------------
+# Dispatchers (upstream v0.30 ``_rejection_*`` / ``_expand`` signatures)
+# --------------------------------------------------------------------------
+# Each mirrors the grid and constexpr derivation of the matching upstream
+# ``@triton_kernel_dispatcher_with_warmup`` function, then launches the
+# current ``rs.<kernel>`` global with the kernel's positional layout.
+def _kernel(name: str):
+    import vllm.v1.sample.rejection_sampler as rs
+
+    return getattr(rs, name)
+
+
+def _dispatch_expand(output, input, cu_num_tokens, replace_from, replace_to):
+    import vllm.v1.sample.rejection_sampler as rs
+
+    return _kernel("expand_kernel")[(input.shape[0],)](
+        output,
+        input,
+        cu_num_tokens,
+        replace_from,
+        replace_to,
+        MAX_NUM_TOKENS=rs.MAX_SPEC_LEN,
+    )
+
+
+def _dispatch_greedy(
+    output_token_ids,
+    cu_num_draft_tokens,
+    draft_token_ids,
+    target_argmax,
+    bonus_token_ids,
+    is_greedy,
+    max_spec_len,
+    uniform_probs,
+    synthetic_conditional_rates,
+):
+    return _kernel("rejection_greedy_sample_kernel")[(output_token_ids.shape[0],)](
+        output_token_ids,
+        cu_num_draft_tokens,
+        draft_token_ids,
+        target_argmax,
+        bonus_token_ids,
+        is_greedy,
+        max_spec_len,
+        uniform_probs,
+        synthetic_conditional_rates,
+        SYNTHETIC_MODE=synthetic_conditional_rates is not None,
+    )
+
+
+def _dispatch_random(
+    output_token_ids,
+    cu_num_draft_tokens,
+    draft_token_ids,
+    draft_probs,
+    target_probs,
+    bonus_token_ids,
+    recovered_token_ids,
+    uniform_probs,
+    is_greedy,
+    max_spec_len,
+    synthetic_conditional_rates,
+):
+    return _kernel("rejection_random_sample_kernel")[(output_token_ids.shape[0],)](
+        output_token_ids,
+        cu_num_draft_tokens,
+        draft_token_ids,
+        draft_probs,
+        target_probs,
+        bonus_token_ids,
+        recovered_token_ids,
+        uniform_probs,
+        is_greedy,
+        max_spec_len,
+        target_probs.shape[1],
+        synthetic_conditional_rates,
+        NO_DRAFT_PROBS=draft_probs is None,
+        SYNTHETIC_MODE=synthetic_conditional_rates is not None,
+    )
+
+
+def _dispatch_recovered(
+    output_token_ids,
+    cu_num_draft_tokens,
+    draft_token_ids,
+    draft_probs,
+    target_probs,
+    inv_q,
+    *,
+    max_spec_len,
+):
+    grid = (cu_num_draft_tokens.shape[0], max_spec_len)
+    return _kernel("sample_recovered_tokens_kernel")[grid](
+        output_token_ids,
+        cu_num_draft_tokens,
+        draft_token_ids,
+        draft_probs,
+        target_probs,
+        inv_q,
+        target_probs.shape[1],
+        BLOCK_SIZE=8192,
+        NO_DRAFT_PROBS=draft_probs is None,
+        USE_FP64_GUMBEL=inv_q.dtype == torch.float64,
+    )
+
+
+class _NumbaDispatcher:
+    """Drop-in for an upstream ``triton_kernel_dispatcher_with_warmup``."""
+
+    def __init__(self, name: str, fn):
+        self.__name__ = name
+        self._fn = fn
+
+    def __call__(self, *args, **kwargs):
+        return self._fn(*args, **kwargs)
+
+    def register_warmup(self, *args, **kwargs) -> None:
+        # Numba kernels are compiled by prewarm(); there is no Triton warm-up.
+        return None
+
+    @property
+    def kernel(self):
+        return _kernel(DISPATCHER_KERNELS[self.__name__])
+
+    def __repr__(self) -> str:
+        return f"<numba rejection dispatcher {self.__name__}>"
+
+
+_DISPATCH_FNS = {
+    "_expand": _dispatch_expand,
+    "_rejection_greedy_sample": _dispatch_greedy,
+    "_rejection_random_sample": _dispatch_random,
+    "_sample_recovered_tokens": _dispatch_recovered,
+}
 
 
 _NUMBA_FNS = {
@@ -442,7 +598,14 @@ def install() -> str:
             f"numba version), but it could not be loaded: {e}"
         ) from e
 
-    _originals.update({n: getattr(rs, n) for n in KERNEL_NAMES})
+    missing = [n for n in DISPATCHER_NAMES if not hasattr(rs, n)]
+    if missing:
+        raise RuntimeError(
+            "QAIC AOT rejection sampler: vllm.v1.sample.rejection_sampler has no "
+            f"{missing}; this vllm-qaic release targets the vLLM v0.30 dispatcher "
+            "layout (see scripts/utility.sh VLLM_VERSION)."
+        )
+    _originals.update({n: getattr(rs, n) for n in KERNEL_NAMES + DISPATCHER_NAMES})
     kernels: dict[str, Any] = {n: _NumbaKernel(n, _NUMBA_FNS[n]) for n in KERNEL_NAMES}
     detail = ", ".join(f"{k}={v}" for k, v in info.items())
 
@@ -454,13 +617,15 @@ def install() -> str:
         detail += f", counters={instr.counters_dir}"
     for n, k in kernels.items():
         setattr(rs, n, k)
+    for n in DISPATCHER_NAMES:
+        setattr(rs, n, _NumbaDispatcher(n, _DISPATCH_FNS[n]))
     _installed = True
     logger.info("AOT rejection sampler backend: %s (%s)", NUMBA_IMPL, detail)
     return NUMBA_IMPL
 
 
 def uninstall() -> None:
-    """Restore the upstream kernels (tests only)."""
+    """Restore the upstream kernels and dispatchers (tests only)."""
     global _installed, _instrumentation, _original_forward
     if not _installed:
         return

@@ -359,6 +359,29 @@ class QaicPlatform(Platform):
         pass
 
     @classmethod
+    def _check_aot_speculative_config(cls, vllm_config: VllmConfig) -> None:
+        speculative_config = vllm_config.speculative_config
+        assert speculative_config is not None
+        if speculative_config.uses_dynamic_speculative_decoding():
+            # The decode QPCs are compiled for a fixed num_speculative_tokens.
+            raise ValueError(
+                "Dynamic speculative decoding "
+                "(num_speculative_tokens_per_batch_size) is not supported on "
+                "QAIC backend."
+            )
+        scheduler_config = vllm_config.scheduler_config
+        if scheduler_config.async_scheduling:
+            # AOT SpD only supports synchronous scheduling: the runner does not
+            # apply upstream's async draft-count corrections. vLLM >= 0.30 also
+            # enables async by default for draft_model and dflash.
+            logger.warning_once(
+                "QAIC AOT speculative decoding (%s) does not support async "
+                "scheduling; Falling back to non-async scheduling.",
+                speculative_config.method,
+            )
+            scheduler_config.async_scheduling = False
+
+    @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         if _HAS_TRITON and not cls.is_aot:
             if "QAIC_NUM_CORES" not in os.environ:
@@ -494,6 +517,9 @@ class QaicPlatform(Platform):
                     "Falling back to non-async scheduling."
                 )
                 scheduler_config.async_scheduling = False
+
+        if cls.is_aot and vllm_config.speculative_config is not None:
+            cls._check_aot_speculative_config(vllm_config)
 
         cache_config = vllm_config.cache_config
         if cache_config:

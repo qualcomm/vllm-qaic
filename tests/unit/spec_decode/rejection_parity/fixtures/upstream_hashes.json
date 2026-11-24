@@ -8,19 +8,23 @@
   "vllm.v1.spec_decode.utils:unconditional_to_conditional_rates": "2f32289fdac87fb8314c5e8d978f5320d4f90b4a993ad1659e1174a9d4a1b8c7"
  },
  "hashes": {
-  "RejectionSampler.__init__": "9b776a7b9f0a99db785b90f540bba453f1d079ef4ad07f6deae7a9a4af46ace4",
+  "RejectionSampler.__init__": "00505726c2dede5a69a655a12a2db4a9042a8ea19a1dedce9b9a1ca8151cc64f",
   "RejectionSampler.forward": "1598edd8c623898feb42ad70b19e64bd8f3060d082b310f1d7d033523e05a57d",
+  "_expand": "1ad5dbcbbc94061ea43aa0fb73977f47f94e7b67c01ccc16e26a6ead2459d318",
+  "_rejection_greedy_sample": "3710ba814387398ff586e81f105070e2fee0befe1d229616d45542edface76ac",
+  "_rejection_random_sample": "2cd2281ed154f9a628ae463548f25d1cb16b752ad90680d4b0dbd6b66f1902de",
+  "_sample_recovered_tokens": "aa0d5729d237f71ed0cf94a99295ddb4810de9c705dd8114a5c7d4c21137864e",
   "apply_sampling_constraints": "5ccbdb5f0d22d88a9955455c22b818d0018f1e8c6a3c195ec4a2d36ffece3a0a",
-  "expand_batch_to_tokens": "4a72e2584485d3ec940526d745e126073fc094f435fc880a90e8a5bbb38728cb",
-  "expand_kernel": "a97200e5f1ba11474ef8acb75d5754a300b6a65d9da6c8e8133149a37167b62d",
+  "expand_batch_to_tokens": "b7eb18afe98e09e3901b83e9f32a662808adaadf98423fe8b6720c318b3025d0",
+  "expand_kernel": "572fbe24d4b13dde89ab18616177f8f8970954c9586abe771a690b94e9f33e94",
   "generate_uniform_probs": "f3e8fbcf4f6e8332bbe61141fad916087b61256f4dada65663d274b48e27524b",
-  "rejection_greedy_sample_kernel": "e90dc60a00fd5fec7ca054d56e3999af17eee052a641a940a70c5e0461956759",
-  "rejection_random_sample_kernel": "eca4d91b2b5b9edaa261daa4847f7a693856485370138c66e8bea0bf492de10e",
-  "rejection_sample": "35d7236c81a06800520691e8eb79014b33653e05ce5e982901fdb68ea003a1ea",
-  "sample_recovered_tokens": "8b6fff2684f22ad31a09eedc1d898540e888071e64413fdbba070e2868236cfb",
-  "sample_recovered_tokens_kernel": "abc87547ef846951be8a645649f748a8e32326aba95ac33767da613690617ebd"
+  "rejection_greedy_sample_kernel": "9cd5a8f8fe5a065937797b59a1fede6aadb711391d3288a09fc7ffa65cfc5551",
+  "rejection_random_sample_kernel": "63a939862a8810443cdd667248e16b8aba6c33e0f921812b5b6a34cc597d2bad",
+  "rejection_sample": "adadcc804bccf89cc3568b637d14b90480f903d0a5de417719200ad6a284c747",
+  "sample_recovered_tokens": "a9661935216650b56990382b6400f6b030c8441a734a613a9f6acfb0012c3412",
+  "sample_recovered_tokens_kernel": "9e97ef63150738fd34ed15323b425b3e1d0fcbedbac50ec56cade13202ef8d7d"
  },
  "module": "vllm.v1.sample.rejection_sampler",
  "normalization": "rstrip lines; textwrap.dedent; strip blank edges; segment = first decorator .. end of def (ast)",
- "vllm_version": "0.23.0+empty"
+ "vllm_version": "0.30.0+empty"
 }

@@ -42,6 +42,17 @@ KERNEL_NAMES = (
     "sample_recovered_tokens_kernel",
 )
 
+# v0.30 ``rejection_sample()`` launches through these dispatcher globals, which
+# capture their Triton kernel at import; swapping only KERNEL_NAMES has no
+# effect on the upstream helpers.  End-to-end comparisons swap ALL_NAMES.
+DISPATCHER_NAMES = (
+    "_expand",
+    "_rejection_greedy_sample",
+    "_rejection_random_sample",
+    "_sample_recovered_tokens",
+)
+ALL_NAMES = KERNEL_NAMES + DISPATCHER_NAMES
+
 PROD_MODULE = "vllm_qaic.v1.sample.rejection_sampler_numba"
 
 # Upstream greedy kernel + SYNTHETIC_MODE + int64 draft ids does not compile on
@@ -50,13 +61,13 @@ KNOWN_TRITON_SYNTHETIC_INT64 = "inconsistent types int64 and int32"
 
 
 def _capture_originals() -> dict[str, Any]:
-    kernels = {name: getattr(rs, name) for name in KERNEL_NAMES}
+    kernels = {name: getattr(rs, name) for name in ALL_NAMES}
     try:
         from vllm_qaic.v1.sample import rejection_sampler_numba as rsn
 
         if rsn._installed:
             kernels.update(
-                {n: rsn._originals[n] for n in KERNEL_NAMES if n in rsn._originals}
+                {n: rsn._originals[n] for n in ALL_NAMES if n in rsn._originals}
             )
     except ImportError:
         pass
@@ -71,17 +82,26 @@ def assert_triton_originals(check_globals: bool = True) -> None:
     from triton.runtime.jit import JITFunction
 
     bad = {
-        n: type(k).__name__
-        for n, k in ORIGINAL_KERNELS.items()
-        if not isinstance(k, JITFunction)
+        n: type(ORIGINAL_KERNELS[n]).__name__
+        for n in KERNEL_NAMES
+        if not isinstance(ORIGINAL_KERNELS[n], JITFunction)
     }
+    # Each upstream dispatcher "_foo" must wrap the captured "foo_kernel".
+    bad.update(
+        {
+            n: "dispatcher does not wrap the upstream kernel"
+            for n in DISPATCHER_NAMES
+            if getattr(ORIGINAL_KERNELS[n], "kernel", None)
+            is not ORIGINAL_KERNELS[n.lstrip("_") + "_kernel"]
+        }
+    )
     if bad:
         raise RuntimeError(
             "upstream rejection-sampler kernels are not triton JITFunctions "
             f"(captured after a Numba install, or vLLM TritonPlaceholder): {bad}"
         )
     if check_globals:
-        stale = [n for n in KERNEL_NAMES if getattr(rs, n) is not ORIGINAL_KERNELS[n]]
+        stale = [n for n in ALL_NAMES if getattr(rs, n) is not ORIGINAL_KERNELS[n]]
         if stale:
             raise RuntimeError(
                 "vllm.v1.sample.rejection_sampler globals were left replaced by "
@@ -113,11 +133,11 @@ def production_wrappers() -> dict[str, Any] | None:
     try:
         impl = mod.install()
         assert impl == "numba", impl
-        wrappers = {name: getattr(rs, name) for name in KERNEL_NAMES}
+        wrappers = {name: getattr(rs, name) for name in ALL_NAMES}
     finally:
         if not was_installed:
             mod.uninstall()
-    leaked = [n for n in KERNEL_NAMES if wrappers[n] is ORIGINAL_KERNELS[n]]
+    leaked = [n for n in ALL_NAMES if wrappers[n] is ORIGINAL_KERNELS[n]]
     if leaked:
         raise RuntimeError(f"{PROD_MODULE}.install() left upstream kernels: {leaked}")
     _WRAPPER_CACHE.update(wrappers)

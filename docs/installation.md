@@ -298,7 +298,7 @@ All `ARG`s are global (declared before the first `FROM`) and re-declared inside 
 | `TORCH_VERSION_AOT` | `2.13.0+cpu` | CPU torch version for AOT |
 | `TORCHVISION_VERSION_AOT` | `0.28.0+cpu` | torchvision version for AOT |
 | `TRITON_CPU` | `0` | Set to `1` to build the optional triton-cpu backend (Numba/Triton rejection-sampler parity tests only; not needed for AOT SpD) |
-| `TRITON_CPU_COMMIT` | `e60f448f8f197073b75d6d3e77347414a5db3ee7` | Pinned triton-cpu commit hash |
+| `TRITON_CPU_COMMIT` | `274d157b94b244d61d69d26e27b8c897d61e75fb` | Pinned triton-cpu commit hash |
 | `TRITON_CPU_COMPILE_MAX_JOBS` | `4` | Parallel build jobs for triton-cpu compilation |
 | `VLLM_BUILD_RUST` | `1` | Set to `1` to build vLLM's experimental Rust OpenAI frontend (`vllm-rs`) |
 | `VLLM_QAIC_GIT_REF` | `main` | `release` target: vllm-qaic git tag/branch to clone |
@@ -537,7 +537,7 @@ All version constants are defined in [`scripts/utility.sh`](../scripts/utility.s
 | `VLLM_TARGET_DEVICE_AOT` | `empty` | vLLM build target for AOT mode |
 | `VLLM_TARGET_DEVICE_PYT` | `empty` | vLLM build target for PYT mode |
 | `TRITON_CPU` | `0` | Set to `1` to build the optional triton-cpu backend (parity tests only; not needed for AOT SpD) |
-| `TRITON_CPU_COMMIT` | `e60f448f...` | Pinned triton-cpu commit hash |
+| `TRITON_CPU_COMMIT` | `274d157b...` | Pinned triton-cpu commit hash |
 | `TRITON_CPU_SRC` | `<repo>/.build/triton-cpu` | Clone destination for triton-cpu source |
 | `TRITON_CPU_COMPILE_MAX_JOBS` | `4` | Parallel build jobs for triton-cpu compilation |
 | `TRITON_CPU_SKIP_DISK_CHECK`¹ | `0` | Set to `1` to skip the 10 GB disk-space pre-flight check |

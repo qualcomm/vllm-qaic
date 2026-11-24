@@ -32,6 +32,7 @@ def runner_config():
             speculative_config.num_speculative_tokens = num_speculative_tokens
             speculative_config.uses_draft_model.return_value = method == "draft_model"
             speculative_config.use_dflash.return_value = method == "dflash"
+            speculative_config.uses_dynamic_speculative_decoding.return_value = False
         kv_transfer_config = None
         if role is not None:
             kv_transfer_config = SimpleNamespace(kv_role=role)
@@ -149,6 +150,209 @@ def test_determine_active_k_uses_single_specialization():
     runner = SimpleNamespace(decode_ks=[3], num_decodes=0)
 
     assert QaicModelRunnerAoT._determine_active_k(runner, None) == 3
+
+
+def _scheduler_output(new, cached, resumed, num_scheduled, spec):
+    from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
+
+    cached_reqs = CachedRequestData.make_empty()
+    cached_reqs.req_ids = list(cached)
+    cached_reqs.resumed_req_ids = set(resumed)
+    return SchedulerOutput(
+        scheduled_new_reqs=[SimpleNamespace(req_id=r) for r in new],
+        scheduled_cached_reqs=cached_reqs,
+        num_scheduled_tokens=num_scheduled,
+        total_num_scheduled_tokens=sum(num_scheduled.values()),
+        scheduled_spec_decode_tokens=spec,
+        scheduled_encoder_inputs={},
+        num_common_prefix_blocks=[0],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+
+
+def test_strip_waiting_spec_padding_unpads_new_and_resumed_requests():
+    # vLLM >= 0.30 pads a waiting request with one remaining token (consumer
+    # after KV transfer) to 1 + K tokens with -1 drafts. Only requests from the
+    # waiting queue are stripped; running requests keep whatever drafts they
+    # were scheduled with.
+    spec = {
+        "new": [-1, -1, -1],
+        "resumed": [-1, -1, -1],
+        "running": [5, 6, 7],
+        "running_all_pad": [-1, -1, -1],
+    }
+    num_scheduled = {"new": 4, "resumed": 4, "running": 4, "running_all_pad": 4}
+    original = _scheduler_output(
+        ["new"],
+        ["resumed", "running", "running_all_pad"],
+        ["resumed"],
+        num_scheduled,
+        spec,
+    )
+
+    out = QaicModelRunnerAoT._strip_waiting_spec_padding(original)
+
+    assert out.num_scheduled_tokens == {
+        "new": 1,
+        "resumed": 1,
+        "running": 4,
+        "running_all_pad": 4,
+    }
+    assert out.total_num_scheduled_tokens == 10
+    assert out.scheduled_spec_decode_tokens == {
+        "running": [5, 6, 7],
+        "running_all_pad": [-1, -1, -1],
+    }
+    # The scheduler's own object is untouched (shared in-process); it rolls
+    # back the three padded drafts as rejected.
+    assert original.num_scheduled_tokens == num_scheduled
+    assert original.total_num_scheduled_tokens == 16
+    assert set(original.scheduled_spec_decode_tokens) == set(spec)
+
+    # Without padding the scheduler output is passed through as is.
+    unpadded = _scheduler_output(
+        ["new"], ["running"], [], {"new": 25, "running": 4}, {"running": [1, 2, 3]}
+    )
+    assert QaicModelRunnerAoT._strip_waiting_spec_padding(unpadded) is unpadded
+
+
+def test_execute_model_runs_on_stripped_scheduler_output():
+    # The strip must be applied before the runner reads the scheduler output.
+    import contextlib
+
+    class _Stop(Exception):
+        pass
+
+    def _update_states(scheduler_output):
+        raise _Stop(scheduler_output)
+
+    runner = object.__new__(QaicModelRunnerAoT)
+    runner.execute_model_state = None
+    runner.model = SimpleNamespace(is_vision_encoder=False)
+    runner.synchronize_input_prep = contextlib.nullcontext
+    runner._update_states = _update_states
+    padded = _scheduler_output(["new"], [], [], {"new": 4}, {"new": [-1, -1, -1]})
+
+    with pytest.raises(_Stop) as stop:
+        runner.execute_model(padded)
+
+    (seen,) = stop.value.args
+    assert seen.num_scheduled_tokens == {"new": 1}
+    assert seen.scheduled_spec_decode_tokens == {}
+
+
+def test_grammar_bitmask_skips_stripped_padding_rows():
+    # The scheduler builds 1 + K bitmask rows for the padded request; after the
+    # strip it has one logit row, so later requests must keep their own masks.
+    pytest.importorskip("xgrammar")
+    from vllm.v1.core.sched.output import GrammarOutput
+    from vllm.v1.structured_output.utils import apply_grammar_bitmask
+
+    out = QaicModelRunnerAoT._strip_waiting_spec_padding(
+        _scheduler_output(
+            ["padded"],
+            ["other"],
+            [],
+            {"padded": 4, "other": 2},
+            {"padded": [-1, -1, -1], "other": [7]},
+        )
+    )
+    # Each scheduler row allows a single token: padded 1..4, other 10..11.
+    allowed = [1, 2, 3, 4, 10, 11]
+    bitmask = np.array([[1 << t] for t in allowed], dtype=np.int32)
+    grammar_output = GrammarOutput(["padded", "other"], bitmask)
+    logits = torch.zeros(3, 32)
+
+    apply_grammar_bitmask(
+        out,
+        QaicModelRunnerAoT._unpad_grammar_output(out, grammar_output),
+        SimpleNamespace(req_ids=["padded", "other"]),
+        logits,
+    )
+
+    assert torch.isfinite(logits).sum(dim=1).tolist() == [1, 1, 1]
+    assert logits.argmax(dim=1).tolist() == [1, 10, 11]
+
+    # Without stripped padding the bitmask is passed through as is.
+    unpadded = _scheduler_output([], ["r"], [], {"r": 2}, {"r": [7]})
+    unpadded_grammar = GrammarOutput(["r"], bitmask[:2])
+    assert (
+        QaicModelRunnerAoT._unpad_grammar_output(unpadded, unpadded_grammar)
+        is unpadded_grammar
+    )
+
+
+@pytest.mark.parametrize("role", ["kv_consumer", "kv_producer"])
+def test_connector_meta_ignores_waiting_spec_padding(role):
+    # The padded drafts must not count as prompt tokens: otherwise the
+    # consumer's first step is flagged as a partial prefill, the request stays
+    # tracked and the next step reloads an already consumed KV handoff.
+    from vllm_qaic.distributed.kv_transfer.kv_connector.v1.qaic_connector import (
+        QaicConnector,
+        ReqTrackerObj,
+    )
+
+    prompt = list(range(8))
+    connector = object.__new__(QaicConnector)
+    connector.is_producer = role == "kv_producer"
+    connector.disable_handoff_id = True
+    connector._request_tracker = {
+        r: ReqTrackerObj(
+            SimpleNamespace(
+                prompt_token_ids=prompt, num_prompt_tokens=8, kv_transfer_params=None
+            )
+        )
+        for r in ("padded", "chunk")
+    }
+    out = _scheduler_output(
+        ["padded", "chunk"], [], [], {"padded": 4, "chunk": 4}, {"padded": [-1] * 3}
+    )
+    out.scheduled_new_reqs = [
+        SimpleNamespace(
+            req_id="padded",
+            num_computed_tokens=7,
+            prompt_token_ids=prompt,
+            block_ids=[[1]],
+        ),
+        # A genuine prefill chunk stays partial.
+        SimpleNamespace(
+            req_id="chunk",
+            num_computed_tokens=0,
+            prompt_token_ids=prompt,
+            block_ids=[[2]],
+        ),
+    ]
+
+    meta = connector.build_connector_meta(out)
+
+    padded, chunk = meta.requests
+    assert not padded.is_prefill_partial
+    assert padded.is_store == connector.is_producer
+    assert chunk.is_prefill_partial and not chunk.is_store
+    assert set(connector._request_tracker) == {"chunk"}
+
+    # Next step: the chunked request finishes its prompt with no drafts, and a
+    # padded request resumed after preemption (cached branch) is complete too.
+    connector._request_tracker["resumed"] = ReqTrackerObj(
+        SimpleNamespace(
+            prompt_token_ids=prompt, num_prompt_tokens=8, kv_transfer_params=None
+        ),
+        block_id=3,
+    )
+    out = _scheduler_output(
+        [],
+        ["chunk", "resumed"],
+        ["resumed"],
+        {"chunk": 4, "resumed": 4},
+        {"resumed": [-1] * 3},
+    )
+    out.scheduled_cached_reqs.num_computed_tokens = [4, 7]
+    done, resumed = connector.build_connector_meta(out).requests
+    assert not done.is_prefill_partial
+    assert not resumed.is_prefill_partial
+    assert resumed.is_store == connector.is_producer
+    assert connector._request_tracker == {}
 
 
 @pytest.mark.parametrize(
