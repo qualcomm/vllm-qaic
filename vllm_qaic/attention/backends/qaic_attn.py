@@ -190,10 +190,10 @@ class QAicAttentionMetadataBuilder(AttentionMetadataBuilder[QAicAttentionMetadat
             # Decoder, need reorder and truncate
             assert self.reorder_batch_threshold
             (
-                num_decodes,
-                num_prefills,
+                _num_decodes,
+                _num_prefills,
                 num_decode_tokens,
-                num_prefill_tokens,
+                _num_prefill_tokens,
             ) = split_decodes_and_prefills(
                 common_attn_metadata,
                 decode_threshold=self.reorder_batch_threshold,
@@ -414,7 +414,12 @@ class QAicAttentionBackendImpl(AttentionImpl):
 
         try:
             from vllm_qaic import _custom_ops as qaic_ops
-        except Exception:
+        except Exception as e:
+            logger.warning_once(
+                "QAIC native paged attention unavailable (%s); "
+                "falling back to SDPA attention.",
+                e,
+            )
             return False
 
         native_key = key[:num_actual_tokens] if key is not None else None
@@ -593,13 +598,26 @@ class QAicAttentionBackendImpl(AttentionImpl):
                 else:
                     kv_k, kv_v, cached = self._kv_cache[req_id]
 
-                # Fresh prefill: num_new == seq_len means this is a full context fill.
-                if num_new == seq_len:
-                    cached = 0
+                # Place newly produced tokens at their logical positions in the
+                # post-step sequence. This supports speculative-decoding
+                # rejection/rollback where seq_len can move backwards and we
+                # must overwrite stale KV tail entries instead of append-only.
+                write_start = seq_len - num_new
+                if write_start < 0:
+                    raise ValueError(
+                        f"Invalid decode metadata for request {req_id}: "
+                        f"seq_len={seq_len}, num_new={num_new}"
+                    )
+                if write_start > cached:
+                    raise ValueError(
+                        f"Non-contiguous KV update for request {req_id}: "
+                        f"write_start={write_start}, cached={cached}, "
+                        f"seq_len={seq_len}, num_new={num_new}"
+                    )
 
-                kv_k[cached : cached + num_new] = k_i
-                kv_v[cached : cached + num_new] = v_i
-                new_cached = cached + num_new
+                kv_k[write_start:seq_len] = k_i
+                kv_v[write_start:seq_len] = v_i
+                new_cached = seq_len
                 self._kv_cache[req_id] = (kv_k, kv_v, new_cached)
             else:
                 # KV sharing: read existing cache without updating.

@@ -9,40 +9,14 @@ import pytest
 import torch
 
 from tests.unit.ops.moe_test_utils import requires_qaic
+from tests.unit.ops.paged_attention_test_utils import lbnhc_kv_cache, ref_attention
 
 H, HKV, D, B = 8, 2, 64, 16
 NUM_BLOCKS = 64
 
 
 def _lbnhc_cache(device):
-    # What vLLM's create_kv_cache_views hands forward(): a [Nb, H, B, 2D] view
-    # of token-major [Nb, B, H, 2D] pages, split into K and V halves.
-    kv = torch.zeros(NUM_BLOCKS, B, HKV, 2 * D, dtype=torch.float16, device=device)
-    return kv.permute(0, 2, 1, 3).split(D, dim=-1)
-
-
-def _ref(q, k_full, v_full, q_lens, seq_lens, scale, sinks, window_left):
-    """q: [T, H, D]; k_full/v_full: per-request [seq_len, HKV, D]."""
-    out, t = [], 0
-    for q_len, seq_len, k, v in zip(q_lens, seq_lens, k_full, v_full, strict=True):
-        qi = q[t : t + q_len].float().movedim(0, 1)  # [H, Lq, D]
-        t += q_len
-        k = k.float().repeat_interleave(H // HKV, dim=1).movedim(0, 1)
-        v = v.float().repeat_interleave(H // HKV, dim=1).movedim(0, 1)
-        scores = qi @ k.transpose(-1, -2) * scale
-        q_pos = torch.arange(seq_len - q_len, seq_len).unsqueeze(1)
-        k_pos = torch.arange(seq_len).unsqueeze(0)
-        mask = k_pos <= q_pos
-        if window_left >= 0:
-            mask &= (q_pos - k_pos) <= window_left
-        scores = scores.masked_fill(~mask, float("-inf"))
-        if sinks is not None:
-            sink = sinks.float().view(-1, 1, 1).expand(H, q_len, 1)
-            probs = torch.softmax(torch.cat([scores, sink], -1), -1)[..., :seq_len]
-        else:
-            probs = torch.softmax(scores, -1)
-        out.append((probs @ v).movedim(1, 0))
-    return torch.cat(out)
+    return lbnhc_kv_cache(NUM_BLOCKS, B, HKV, D, device).split(D, dim=-1)
 
 
 def _input_views(q, k, v, layout, device):
@@ -140,7 +114,9 @@ def _make_inputs(
         None if sinks is None else sinks.to(dev),
         window_left,
     )
-    expected = _ref(q, k_full, v_full, q_lens, seq_lens, scale, sinks, window_left)
+    expected = ref_attention(
+        q, k_full, v_full, q_lens, seq_lens, scale, sinks, window_left
+    )
     return inputs, expected, k_full, v_full, block_table
 
 

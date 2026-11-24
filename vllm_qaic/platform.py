@@ -479,15 +479,46 @@ class QaicPlatform(Platform):
 
         if not cls.is_aot:
             # TODO: Re-enable JIT warmup once QAIC JIT support is fully onboarded.
+            # Note: upstream's rejection-sampler warmup declares fp64 uniforms,
+            # which QAIC does not support.
             vllm_config.kernel_config.enable_jit_warmup = False
             assert vllm_config.kv_transfer_config is None, (
                 "QAIC eager mode does not support disaggregated serving"
             )
             if vllm_config.speculative_config:
-                raise ValueError(
-                    "Speculative decoding (SpD) is not supported in eager "
-                    "mode on QAIC. SpD requires AOT (non-eager) compilation."
+                _method = vllm_config.speculative_config.method
+                if _method not in {"ngram", "suffix"}:
+                    raise ValueError(
+                        f"Speculative decoding method {_method!r} is not "
+                        "supported in eager (PYT) mode on QAIC. "
+                        "Only 'ngram' and 'suffix' are supported. "
+                        "Draft-model SpD requires AOT compilation."
+                    )
+                # Upstream keeps k+1 recurrent-state slots per request and
+                # resumes from slot num_accepted_tokens-1, but only for
+                # is_hybrid models, so attention-free models are unsupported
+                # upstream too. For hybrids, vLLM v0.30.0 sends a decode with
+                # zero drafts (common for ngram/suffix) down the non-spec path,
+                # which reads stale slot 0 after a multi-token accept, so greedy
+                # output diverges. Fixed upstream in vllm#56531 (first in
+                # v0.32.0), which keeps zero-draft decodes on the spec path.
+                if model_config.is_hybrid or model_config.is_attention_free:
+                    raise ValueError(
+                        "Speculative decoding is not supported in eager (PYT) "
+                        "mode on QAIC for hybrid or attention-free (recurrent "
+                        "state) models: recurrent-state speculative decoding "
+                        "is not validated on QAIC."
+                    )
+                if model_config.use_fp64_gumbel:
+                    raise ValueError(
+                        "use_fp64_gumbel is not supported with speculative "
+                        "decoding in eager (PYT) mode: QAIC has no float64."
+                    )
+                from vllm_qaic.v1.sample.rejection_sampler_shim import (
+                    require_qualcomm_triton,
                 )
+
+                require_qualcomm_triton()
             if scheduler_config.async_scheduling:
                 logger.warning_once(
                     "QAIC eager mode does not support async scheduling; "
