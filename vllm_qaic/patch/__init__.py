@@ -91,6 +91,30 @@
 #       main process before fork) is sufficient.
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #
+# ** 6. File: patch_qaic_triton_import.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. vllm.triton_utils.HAS_TRITON / triton / tl / tldevice
+#    Why:
+#       Triton is required to run kernels on the QAIC Triton Backend, but
+#       upstream's HAS_TRITON check can end up False even when a usable
+#       Triton install is present (e.g. its Triton-CPU-backend check reads
+#       `importlib.metadata.version("vllm")`, which raises when vllm is
+#       installed under a different distribution name).
+#    How:
+#       Re-import triton and check for QAIC Triton Backend in
+#       triton.backends.backends; if found, re-enable HAS_TRITON and rebind
+#       triton/tl/tldevice on vllm.triton_utils to the real modules. Import
+#       triton_kernels during QAIC startup and report its actual availability,
+#       independently of which model is selected.
+#    Note:
+#       Must run before any vllm module does
+#       `from vllm.triton_utils import ...`, since that binds triton/tl/
+#       HAS_TRITON into the importing module's own namespace at that
+#       moment. Applied here (during pre_register_and_update) is early
+#       enough, since all such imports live under model_executor/layers/
+#       and v1/worker/, which only load during model/worker construction.
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#
 # ** 7. File: patch_mooncake_connector.py **
 #   1. vllm.distributed.kv_transfer.kv_connector.v1.mooncake.
 #      mooncake_connector.MooncakeConnectorWorker.__init__
@@ -262,6 +286,22 @@
 #       the original function. Apply once; skip when no QAIC allocator exists.
 #    Note:
 #       Imported by QaicPlatform.pre_register_and_update only in PYT mode.
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#
+# ** 16. File: patch_oai_triton_experts.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. vllm.model_executor.layers.fused_moe.experts.
+#        gpt_oss_triton_kernels_moe.OAITritonExperts._make_routing_data / apply
+#    Why:
+#       The upstream wrappers require BF16 activations and allocate int16
+#       routing IDs and int64 remapping output, which are unsuitable for QAIC.
+#    How:
+#       Replace both methods with QAIC wrappers using the model's activation
+#       dtype and int32 indices. Reuse upstream's matmul_ogs kernels, fused
+#       SwiGLU, workspace storage and routing-weight reduction.
+#    Note:
+#       Imported by QaicTritonGptOssMxfp4MoEMethod after triton_kernels is
+#       validated, when VLLM_QAIC_TRITON_FUSED_MOE selects GPT-OSS Triton.
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # =================
 

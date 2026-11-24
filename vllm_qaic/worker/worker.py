@@ -58,6 +58,7 @@ from vllm.v1.worker.gpu_worker import (
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import WorkerBase
 from vllm.v1.worker.worker_base import CompilationTimes
+from vllm.v1.worker.workspace import init_workspace_manager
 
 from vllm_qaic.worker.model_runner import (
     QaicModelRunnerAoT,
@@ -344,6 +345,12 @@ class QaicWorkerPyt(QaicWorker):
         set_random_seed(self.model_config.seed)
 
         self._configure_thread_parallelism()
+
+        # Modular fused-MoE kernels allocate their temporary activation
+        # buffers through vLLM's process-local WorkspaceManager. CUDA and XPU
+        # workers initialize it during init_device(); do the same for QAIC
+        # eager execution before constructing the model runner.
+        init_workspace_manager(self.device)
 
         # Construct the model runner
         self.model_runner: QaicModelRunnerPyt = QaicModelRunnerPyt(
