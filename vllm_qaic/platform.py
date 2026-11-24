@@ -29,10 +29,23 @@ from .utils import (
 )
 
 try:
-    import torch_qaic
     import torch_qaic.qaic as qaic
 except ImportError:
     qaic = PlaceholderModule("qaic")
+
+try:
+    import qaicrt
+except ModuleNotFoundError as exc:
+    if exc.name != "qaicrt":
+        raise
+
+    import platform
+    import sys
+
+    qaic_sdk_path = f"/opt/qti-aic/dev/lib/{platform.machine()}"
+    if qaic_sdk_path not in sys.path:
+        sys.path.append(qaic_sdk_path)
+    import qaicrt
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -161,23 +174,9 @@ class QaicPlatform(Platform):
         AI100 reports 0x20000 (AIC_HW_VERSION_AI100) and AI200 reports 0x30200
         (AIC_HW_VERSION_AI200). Queried through qaicrt so it works in both AOT
         and eager mode. The result is cached per device_id, including None,
-        which means the runtime could not be queried (qaicrt missing or the
-        device unavailable).
+        which means the runtime query failed or the device was unavailable.
         """
         try:
-            try:
-                import qaicrt
-            except ModuleNotFoundError as exc:
-                if exc.name != "qaicrt":
-                    raise
-                import platform as _platform
-                import sys
-
-                qaic_sdk_path = f"/opt/qti-aic/dev/lib/{_platform.machine()}"
-                if qaic_sdk_path not in sys.path:
-                    sys.path.append(qaic_sdk_path)
-                import qaicrt
-
             status, info = qaicrt.Util().getDeviceInfo(device_id)
             if status != qaicrt.QStatus.QS_SUCCESS:
                 logger.warning(
@@ -375,20 +374,26 @@ class QaicPlatform(Platform):
     @classmethod
     @functools.cache
     def get_num_cores(cls, device_id: int = 0) -> int:
-        if not cls.is_aot:
-            return torch_qaic.qaic.get_device_info(device_id).num_cores
-        raise NotImplementedError(
-            "get_num_cores is only supported in eager (non-AOT) mode"
-        )
+        status, info = qaicrt.Util().getDeviceInfo(device_id)
+        if status != qaicrt.QStatus.QS_SUCCESS:
+            raise RuntimeError(
+                f"QAIC device info query failed for QID {device_id}: {status}"
+            )
+        return info.devData.resourceInfo.nspTotal
 
     @classmethod
-    @functools.cache
     def get_num_hvx_threads(cls, device_id: int = 0) -> int:
-        if not cls.is_aot:
-            return torch_qaic.qaic.get_device_info(device_id).per_core_hvx_thread_count
-        raise NotImplementedError(
-            "get_num_hvx_threads is only supported in eager (non-AOT) mode"
-        )
+        """Return the number of HVX threads per NSP core based on the device.
+
+        AIC version: AI100 : 0x20000 has 4 HVX threads per NSP core
+        AIC version: AI200 : 0x30200 has 8 HVX threads per NSP core
+        """
+        hw_version = cls.get_hw_version(device_id)
+        if hw_version == AIC_HW_VERSION_AI100:
+            return 4
+        if hw_version == AIC_HW_VERSION_AI200:
+            return 8
+        raise RuntimeError(f"Unsupported AIC version {hw_version} for QID {device_id}")
 
     @classmethod
     def num_compute_units(cls, device_id: int = 0) -> int:
@@ -434,6 +439,13 @@ class QaicPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        if _HAS_TRITON and not cls.is_aot:
+            if "QAIC_NUM_CORES" not in os.environ:
+                os.environ.setdefault("QAIC_NUM_CORES", str(cls.get_num_cores()))
+            if "QAIC_NUM_THREADS" not in os.environ:
+                os.environ.setdefault(
+                    "QAIC_NUM_THREADS", str(cls.get_num_hvx_threads())
+                )
         additional_config = vllm_config.additional_config
         device_config = vllm_config.device_config
         if additional_config:
@@ -570,16 +582,52 @@ class QaicPlatform(Platform):
                 cache_config.enable_prefix_caching = False
             else:
                 if cache_config.enable_prefix_caching:
-                    cache_config.enable_prefix_caching = False
                     cache_config.mamba_block_size = (
                         model_config.max_model_len
                     )  # reset to "no-op" default
                     cache_config.mamba_cache_mode = "none"  # reset to disabled
-                    logger.warning_once(
-                        "Prefix caching is not yet supported on v1 Engine. "
-                        "Will automatically disable it."
-                    )
-                cache_config.block_size = model_config.max_model_len  # ctx_len
+                    # vLLM sets this flag to true if block_size is an engine param
+                    if cache_config.user_specified_block_size:
+                        # Set kv_block_size/prefill_seq_len to user-defined block_size
+                        # vLLM input arguments get a higher priority
+                        if vllm_config.kv_transfer_config:
+                            override_qaic_config["kv_block_size"] = (
+                                cache_config.block_size
+                            )
+                        else:
+                            override_qaic_config["prefill_seq_len"] = (
+                                cache_config.block_size
+                            )
+                    else:
+                        # If block_size is not set, use kv_block_size/prefill_seq_len
+                        if vllm_config.kv_transfer_config:
+                            assert (
+                                override_qaic_config.get("kv_block_size") is not None
+                            ), (
+                                "kv_block_size must be set when prefix caching "
+                                "is enabled"
+                            )
+                            cache_config.block_size = override_qaic_config.get(
+                                "kv_block_size"
+                            )
+                        else:
+                            if override_qaic_config.get("prefill_seq_len") is not None:
+                                cache_config.block_size = override_qaic_config.get(
+                                    "prefill_seq_len"
+                                )
+                            else:
+                                # Keep vLLM's default when neither size is provided.
+                                override_qaic_config["prefill_seq_len"] = (
+                                    cache_config.block_size
+                                )
+                else:
+                    cache_config.block_size = model_config.max_model_len  # ctx_len
+            from vllm.utils.math_utils import cdiv
+
+            cache_config.num_gpu_blocks_override = (
+                cdiv(model_config.max_model_len, cache_config.block_size)
+                * scheduler_config.max_num_seqs
+            ) + 1
 
         if cls.is_aot:
             if model_config.hf_config.model_type == "whisper":

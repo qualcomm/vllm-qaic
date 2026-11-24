@@ -58,6 +58,7 @@ from vllm.v1.worker.gpu_worker import (
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import WorkerBase
 from vllm.v1.worker.worker_base import CompilationTimes
+from vllm.v1.worker.workspace import init_workspace_manager
 
 from vllm_qaic.worker.model_runner import (
     QaicModelRunnerAoT,
@@ -344,6 +345,12 @@ class QaicWorkerPyt(QaicWorker):
         set_random_seed(self.model_config.seed)
 
         self._configure_thread_parallelism()
+
+        # Modular fused-MoE kernels allocate their temporary activation
+        # buffers through vLLM's process-local WorkspaceManager. CUDA and XPU
+        # workers initialize it during init_device(); do the same for QAIC
+        # eager execution before constructing the model runner.
+        init_workspace_manager(self.device)
 
         # Construct the model runner
         self.model_runner: QaicModelRunnerPyt = QaicModelRunnerPyt(
@@ -820,11 +827,10 @@ class QaicWorkerAoT(QaicWorker):
         pass
 
     def determine_available_memory(self) -> int:
-        num_gpu_blocks = (
-            self.cache_config.num_gpu_blocks_override
-            if self.cache_config.num_gpu_blocks_override
-            else self.scheduler_config.max_num_seqs
-        ) + 1
+        if self.cache_config.num_gpu_blocks_override:
+            num_gpu_blocks = self.cache_config.num_gpu_blocks_override
+        else:
+            num_gpu_blocks = self.scheduler_config.max_num_seqs + 1
         # adapted from get_uniform_page_size
         page_sizes = set(
             layer.page_size_bytes for layer in self.get_kv_cache_spec().values()
