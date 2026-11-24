@@ -503,16 +503,52 @@ class QaicPlatform(Platform):
                 cache_config.enable_prefix_caching = False
             else:
                 if cache_config.enable_prefix_caching:
-                    cache_config.enable_prefix_caching = False
                     cache_config.mamba_block_size = (
                         model_config.max_model_len
                     )  # reset to "no-op" default
                     cache_config.mamba_cache_mode = "none"  # reset to disabled
-                    logger.warning_once(
-                        "Prefix caching is not yet supported on v1 Engine. "
-                        "Will automatically disable it."
-                    )
-                cache_config.block_size = model_config.max_model_len  # ctx_len
+                    # vLLM sets this flag to true if block_size is an engine param
+                    if cache_config.user_specified_block_size:
+                        # Set kv_block_size/prefill_seq_len to user-defined block_size
+                        # vLLM input arguments get a higher priority
+                        if vllm_config.kv_transfer_config:
+                            override_qaic_config["kv_block_size"] = (
+                                cache_config.block_size
+                            )
+                        else:
+                            override_qaic_config["prefill_seq_len"] = (
+                                cache_config.block_size
+                            )
+                    else:
+                        # If block_size is not set, use kv_block_size/prefill_seq_len
+                        if vllm_config.kv_transfer_config:
+                            assert (
+                                override_qaic_config.get("kv_block_size") is not None
+                            ), (
+                                "kv_block_size must be set when prefix caching "
+                                "is enabled"
+                            )
+                            cache_config.block_size = override_qaic_config.get(
+                                "kv_block_size"
+                            )
+                        else:
+                            if override_qaic_config.get("prefill_seq_len") is not None:
+                                cache_config.block_size = override_qaic_config.get(
+                                    "prefill_seq_len"
+                                )
+                            else:
+                                # Keep vLLM's default when neither size is provided.
+                                override_qaic_config["prefill_seq_len"] = (
+                                    cache_config.block_size
+                                )
+                else:
+                    cache_config.block_size = model_config.max_model_len  # ctx_len
+            from vllm.utils.math_utils import cdiv
+
+            cache_config.num_gpu_blocks_override = (
+                cdiv(model_config.max_model_len, cache_config.block_size)
+                * scheduler_config.max_num_seqs
+            ) + 1
 
         if cls.is_aot:
             if model_config.hf_config.model_type == "whisper":
