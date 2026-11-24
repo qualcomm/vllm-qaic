@@ -23,12 +23,13 @@ def register_qaic_customop():
     # plugin and fork
     from .gemma4_router import register_qaic_gemma4_router
     from .grouped_topk_router import register_qaic_grouped_topk_router
-    from .activation import QAicSiluAndMul
+    from .activation import QAicSiluAndMul, register_qaic_silu_and_mul
     from .layernorm import (
         QAicGemmaRMSNorm,
         QAicRMSNorm,
         QAicRMSNormGated,
     )
+    from .quant_fp8 import QAicQuantFP8
     from .topk_router import register_qaic_topk_router
     from .unquantized_fused_moe_method import (
         QAicUnquantizedFusedMoEMethod,
@@ -44,6 +45,7 @@ def register_qaic_customop():
     register_qaic_topk_router()
     register_qaic_grouped_topk_router()
     register_qaic_gemma4_router()
+    register_qaic_silu_and_mul()
 
     CustomOp.register_oot(
         _decorated_op_cls=QAicUnquantizedFusedMoEMethod,
@@ -53,6 +55,7 @@ def register_qaic_customop():
     CustomOp.register_oot(_decorated_op_cls=QAicGemmaRMSNorm, name="GemmaRMSNorm")
     CustomOp.register_oot(_decorated_op_cls=QAicRMSNormGated, name="RMSNormGated")
     CustomOp.register_oot(_decorated_op_cls=QAicSiluAndMul, name="SiluAndMul")
+    CustomOp.register_oot(_decorated_op_cls=QAicQuantFP8, name="QuantFP8")
     CustomOp.register_oot(
         _decorated_op_cls=QAicMMEncoderAttention, name="MMEncoderAttention"
     )

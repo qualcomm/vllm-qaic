@@ -87,9 +87,7 @@ _MOE_ACTIVATION_IDS = {
     "relu2_no_mul": 8,
 }
 
-_UNQUANTIZED_FUSED_MOE_HMX_KERNEL = (
-    "multinsp_multithreaded_unquantized_fused_moe_route_compute_hmx"
-)
+_UNQUANTIZED_FUSED_MOE_HMX_KERNEL = "multinsp_multithreaded_unquantized_fused_moe_hmx"
 
 
 def _kernel(name: str):
@@ -148,7 +146,7 @@ def _unquantized_fused_moe_hvx_op(
     apply_router_weight_on_input: bool,
     has_expert_map: bool,
 ) -> Tensor:
-    """Low-level QAIC HVX routed-MoE variant using route_out + reduce."""
+    """Run grouping, HVX compute, and reduction in a single device launch."""
     num_tokens = x.shape[0]
     hidden_size = x.shape[1]
     num_experts = w13_weight.shape[0]
@@ -160,10 +158,10 @@ def _unquantized_fused_moe_hvx_op(
     workers = _NSP_COUNT * _THREAD_COUNT
     route_out = torch.empty((total_routes, hidden_size), dtype=x.dtype, device=x.device)
     expert_route_indices = torch.empty(
-        (total_routes,), dtype=torch.float32, device=x.device
+        (_NSP_COUNT, total_routes), dtype=torch.float32, device=x.device
     )
     expert_offsets = torch.empty(
-        (num_experts + 1,), dtype=torch.float32, device=x.device
+        (_NSP_COUNT, num_experts + 1), dtype=torch.float32, device=x.device
     )
     worker_counts = torch.empty(
         (workers, num_experts), dtype=torch.float32, device=x.device
@@ -171,6 +169,7 @@ def _unquantized_fused_moe_hvx_op(
     worker_offsets = torch.empty(
         (workers, num_experts), dtype=torch.float32, device=x.device
     )
+    stage_status = torch.empty((4, workers), dtype=torch.int32, device=x.device)
     out = torch.empty_like(x)
     params = torch.tensor(
         [
@@ -190,37 +189,8 @@ def _unquantized_fused_moe_hvx_op(
         device=x.device,
     ).contiguous()
 
-    group_count_kernel = _kernel(
-        "multinsp_multithreaded_unquantized_fused_moe_route_group_count"
-    )
-    group_prefix_kernel = _kernel(
-        "multinsp_multithreaded_unquantized_fused_moe_route_group_prefix"
-    )
-    group_fill_kernel = _kernel(
-        "multinsp_multithreaded_unquantized_fused_moe_route_group_fill"
-    )
-    route_kernel = _kernel("multinsp_multithreaded_unquantized_fused_moe_route_compute")
-    reduce_kernel = _kernel("multinsp_multithreaded_unquantized_fused_moe_route_reduce")
-    group_count_kernel[_NSP_COUNT, _THREAD_COUNT](
-        topk_ids,
-        expert_map,
-        worker_counts,
-        params,
-    )
-    group_prefix_kernel[_NSP_COUNT, _THREAD_COUNT](
-        worker_counts,
-        worker_offsets,
-        expert_offsets,
-        params,
-    )
-    group_fill_kernel[_NSP_COUNT, _THREAD_COUNT](
-        topk_ids,
-        expert_map,
-        worker_offsets,
-        expert_route_indices,
-        params,
-    )
-    route_kernel[_NSP_COUNT, _THREAD_COUNT](
+    kernel = _kernel("multinsp_multithreaded_unquantized_fused_moe")
+    kernel[_NSP_COUNT, _THREAD_COUNT](
         x,
         topk_weights,
         topk_ids,
@@ -232,8 +202,11 @@ def _unquantized_fused_moe_hvx_op(
         expert_offsets,
         expert_map,
         params,
+        worker_counts,
+        worker_offsets,
+        out,
+        stage_status,
     )
-    reduce_kernel[_NSP_COUNT, _THREAD_COUNT](route_out, out, params)
     return out
 
 
@@ -253,7 +226,7 @@ def _unquantized_fused_moe_hmx_op(
     apply_router_weight_on_input: bool,
     has_expert_map: bool,
 ) -> Tensor:
-    """Low-level QAIC HMX routed-MoE variant using route_out + reduce."""
+    """Run grouping, HMX compute, and reduction in a single device launch."""
     num_tokens = x.shape[0]
     hidden_size = x.shape[1]
     num_experts = w13_weight.shape[0]
@@ -265,16 +238,19 @@ def _unquantized_fused_moe_hmx_op(
     workers = _NSP_COUNT * _THREAD_COUNT
     route_out = torch.empty((total_routes, hidden_size), dtype=x.dtype, device=x.device)
     expert_route_indices = torch.empty(
-        (total_routes,), dtype=torch.float32, device=x.device
+        (_NSP_COUNT, total_routes), dtype=torch.float32, device=x.device
     )
     expert_offsets = torch.empty(
-        (num_experts + 1,), dtype=torch.float32, device=x.device
+        (_NSP_COUNT, num_experts + 1), dtype=torch.float32, device=x.device
     )
     worker_counts = torch.empty(
         (workers, num_experts), dtype=torch.float32, device=x.device
     )
     worker_offsets = torch.empty(
         (workers, num_experts), dtype=torch.float32, device=x.device
+    )
+    stage_status = torch.empty(
+        (4, _NSP_COUNT * _HMX_THREAD_COUNT), dtype=torch.int32, device=x.device
     )
     out = torch.empty_like(x)
     params = torch.tensor(
@@ -295,37 +271,8 @@ def _unquantized_fused_moe_hmx_op(
         device=x.device,
     ).contiguous()
 
-    group_count_kernel = _kernel(
-        "multinsp_multithreaded_unquantized_fused_moe_route_group_count"
-    )
-    group_prefix_kernel = _kernel(
-        "multinsp_multithreaded_unquantized_fused_moe_route_group_prefix"
-    )
-    group_fill_kernel = _kernel(
-        "multinsp_multithreaded_unquantized_fused_moe_route_group_fill"
-    )
-    route_kernel = _kernel(_UNQUANTIZED_FUSED_MOE_HMX_KERNEL)
-    reduce_kernel = _kernel("multinsp_multithreaded_unquantized_fused_moe_route_reduce")
-    group_count_kernel[_NSP_COUNT, _THREAD_COUNT](
-        topk_ids,
-        expert_map,
-        worker_counts,
-        params,
-    )
-    group_prefix_kernel[_NSP_COUNT, _THREAD_COUNT](
-        worker_counts,
-        worker_offsets,
-        expert_offsets,
-        params,
-    )
-    group_fill_kernel[_NSP_COUNT, _THREAD_COUNT](
-        topk_ids,
-        expert_map,
-        worker_offsets,
-        expert_route_indices,
-        params,
-    )
-    route_kernel[_NSP_COUNT, _HMX_THREAD_COUNT](
+    kernel = _kernel(_UNQUANTIZED_FUSED_MOE_HMX_KERNEL)
+    kernel[_NSP_COUNT, _HMX_THREAD_COUNT](
         x,
         topk_weights,
         topk_ids,
@@ -337,8 +284,11 @@ def _unquantized_fused_moe_hmx_op(
         expert_offsets,
         expert_map,
         params,
+        worker_counts,
+        worker_offsets,
+        out,
+        stage_status,
     )
-    reduce_kernel[_NSP_COUNT, _THREAD_COUNT](route_out, out, params)
     return out
 
 
@@ -801,10 +751,6 @@ def _paged_attention_op(
     denominator without a value row (gpt-oss). ``window_left`` limits each
     query to keys at most that many positions behind it; -1 disables it.
     """
-    query = query.contiguous()
-    if write_cache:
-        key = key.contiguous()
-        value = value.contiguous()
     if (
         block_table.device != query.device
         or block_table.dtype != torch.int32
@@ -835,8 +781,6 @@ def _paged_attention_op(
         or not seq_lens.is_contiguous()
     ):
         seq_lens = seq_lens.to(device=query.device, dtype=torch.int32).contiguous()
-
-    output = torch.empty_like(query)
 
     has_sinks = sinks is not None
     if sinks is not None:
@@ -893,7 +837,35 @@ def _paged_attention_op(
             f"got head_dim={head_dim}. Set QAIC_PAGED_ATTN_BACKEND=hmx."
         )
 
+    def prepare_input(tensor: Tensor, dma: bool = False) -> Tensor:
+        # HMX reads dense heads directly from QKV projection views. Only
+        # materialize layouts that cannot be addressed by the kernel or UDMA.
+        if tensor.is_contiguous():
+            return tensor
+        strides = tensor.stride()
+        if (
+            not use_hmx
+            or strides[-1] != 1
+            or any(s <= 0 or s > 2**31 - 1 for s in strides[:2])
+            or (dma and strides[0] * tensor.element_size() > 65535)
+        ):
+            return tensor.contiguous()
+        return tensor
+
+    query = prepare_input(query)
+    if write_cache:
+        key = prepare_input(key, dma=not is_decode)
+        value = prepare_input(value, dma=not is_decode)
+    # empty_like can preserve a transposed input's layout. Kernel output uses
+    # packed token/head addressing regardless of the input strides.
+    output = torch.empty(query.shape, dtype=query.dtype, device=query.device)
+
     if use_hmx:
+        input_strides = (
+            *query.stride()[:2],
+            *(key.stride()[:2] if write_cache else (1, 1)),
+            *(value.stride()[:2] if write_cache else (1, 1)),
+        )
         if is_decode:
             attn_kernel = (
                 _paged_attention_hmx_decode_kernel
@@ -947,6 +919,7 @@ def _paged_attention_op(
             float(scale),
             *cache_strides,
             *sink_window_args,
+            *input_strides,
         )
     elif use_hmx:
         attn_kernel[_NSP_COUNT, _HMX_THREAD_COUNT](
@@ -972,6 +945,7 @@ def _paged_attention_op(
             float(scale),
             *cache_strides,
             *sink_window_args,
+            *input_strides,
         )
     else:
         attn_kernel[_NSP_COUNT, _THREAD_COUNT](
@@ -1072,3 +1046,103 @@ def gemma4_topk(
         per_expert_scale = per_expert_scale.contiguous()
 
     return _gemma4_topk_router_op(x, per_expert_scale, topk)
+
+
+# ---------------------------------------------------------------------------
+# Block-scaled FP8 GEMM
+# ---------------------------------------------------------------------------
+
+# Must match the QAIC_FP8_DTYPE_* defines in
+# csrc/fp8_block_scaled_mm/kernel.cpp.
+FP8_DTYPE_ID_E4M3FN = 0
+FP8_DTYPE_ID_E4M3FNUZ = 1
+
+_FP8_DTYPE_IDS = {
+    torch.float8_e4m3fn: FP8_DTYPE_ID_E4M3FN,
+    torch.float8_e4m3fnuz: FP8_DTYPE_ID_E4M3FNUZ,
+}
+
+
+def fp8_dtype_id(dtype: torch.dtype) -> int:
+    """Map an fp8 torch dtype to the kernel's dtype-id parameter."""
+    try:
+        return _FP8_DTYPE_IDS[dtype]
+    except KeyError:
+        raise ValueError(
+            f"Unsupported fp8 dtype for the QAIC kernel: {dtype}"
+        ) from None
+
+
+@torch.library.custom_op(
+    "qaic::fp8_block_scaled_mm", mutates_args=(), device_types="qaic"
+)
+def fp8_block_scaled_mm(
+    A: Tensor,
+    B: Tensor,
+    As: Tensor,
+    Bs: Tensor,
+    block_n: int,
+    block_k: int,
+    fp8_dtype: int,
+) -> Tensor:
+    """Fused block-scaled FP8 GEMM: ``(As # A) @ (Bs # B).T`` in one pass.
+
+    ``#`` is block dequantization.  The kernel forms each K block's raw
+    fp8 x fp8 dot product, scales it once by ``As[m, kb] * Bs[n / block_n, kb]``
+    (the scale is constant along K within a block, so it hoists out of the inner
+    sum), and accumulates the scaled contributions in fp32 -- which makes the
+    result exact with respect to the fp8 operands.
+
+    Prefer ``vllm_qaic.ops.fp8_block_scaled_mm.fp8_block_scaled_mm()``, which
+    checks eligibility and normalises the scale grids before dispatching here.
+
+    Args:
+        A: Activation, ``[M, K]`` fp8, contiguous.
+        B: Weight, ``[N, K]`` fp8, contiguous (not pre-transposed).
+        As: Activation scales, ``[M, K // block_k]`` fp32, contiguous.
+        Bs: Weight scales, ``[cdiv(N, block_n), K // block_k]`` fp32, contiguous.
+        block_n: Weight scale block extent along N.
+        block_k: Scale block extent along K.  Must be a multiple of 128, and
+            must divide K.
+        fp8_dtype: Kernel dtype id -- ``FP8_DTYPE_ID_E4M3FN`` or
+            ``FP8_DTYPE_ID_E4M3FNUZ``.
+
+    Returns:
+        ``[M, N]`` fp32.  The caller adds bias and casts to the output dtype.
+    """
+    m, k = A.shape
+    n = B.shape[0]
+    out = torch.empty((m, n), dtype=torch.float32, device=A.device)
+
+    # Tensors first, then scalars -- the dispatcher rejects any scalar that
+    # precedes a tensor. Order matches the kernel's documented pointer array.
+    kernel = _kernel("multinsp_multithreaded_fp8_block_scaled_mm")
+    kernel[_NSP_COUNT, _THREAD_COUNT](
+        A,
+        B,
+        As,
+        Bs,
+        out,
+        m,
+        n,
+        k,
+        block_n,
+        block_k,
+        fp8_dtype,
+    )
+    return out
+
+
+@fp8_block_scaled_mm.register_fake
+def _fp8_block_scaled_mm_fake(
+    A: Tensor,
+    B: Tensor,
+    As: Tensor,
+    Bs: Tensor,
+    block_n: int,
+    block_k: int,
+    fp8_dtype: int,
+) -> Tensor:
+    # Unlike the router ops, this one sits inside a linear layer that vLLM
+    # compiles, so tracing needs a meta implementation.
+    return A.new_empty((A.shape[0], B.shape[0]), dtype=torch.float32)
