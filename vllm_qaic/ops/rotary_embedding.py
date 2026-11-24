@@ -74,6 +74,10 @@ class QAicApplyRotaryEmb(ApplyRotaryEmb):
             x = x.to(torch.float32)
             cos = cos.to(torch.float32)
             sin = sin.to(torch.float32)
+        # The op gives wrong results for a non-contiguous multi-head input,
+        # e.g. the ``query[..., :rotary_dim]`` view of partial-rotary models.
+        if not x.is_contiguous():
+            x = x.contiguous()
         out = torch.ops.qaic.rotary_embedding(x, cos, sin, is_neox_style)
 
         if enable_fp32_compute:
