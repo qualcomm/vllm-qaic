@@ -605,12 +605,14 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
     ):
         for _, bidx in enumerate(batch_indices):
             if kv_caches[bidx] is not None and len(kv_caches[bidx]) > 0:
+                resharded = False
                 for buff_idx in range(len(kv_caches[bidx])):
                     buf = kv_caches[bidx][buff_idx]
                     kv_kind = self.kv_cache_info[buff_idx][3]
                     target_heads = self.kv_cache_info[buff_idx][0][1]
                     if buf.size == 0 or target_heads == buf.shape[1]:
                         continue
+                    resharded = True
                     # reshard the CP=1 prefill KV into the
                     # decode QPC's CP=cp layout (cp derived from the
                     # head-axis ratio).
@@ -649,7 +651,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
 
                 # Update kv cache setDataWith
                 slicing_spec_handle = None
-                if self.session.is_hybrid_kv:
+                if resharded:
                     # build a spec from each buffer's own real post-handoff shape/name
                     buf_dict = dict(
                         zip(

@@ -659,14 +659,13 @@ class QaicConnector(KVConnectorBase_V1):
                     "KV Handoff metadata is needed to save KV to connector"
                 )
 
-                payload = list(request.kv_handoff_metadata)
                 req_pk = QaicKvHandOffPutReq(
                     buff_type=QaicBufferType.SHM,
                     timestamp=time.perf_counter(),
                     key_hash=request.token_hash,
                     rank=self.kv_rank,
-                    payload=payload,
-                    num_buff=len(payload),
+                    payload=request.kv_handoff_metadata,
+                    num_buff=1,
                 )
                 self.send_kv_cache_to_store(req_pk)
         return
