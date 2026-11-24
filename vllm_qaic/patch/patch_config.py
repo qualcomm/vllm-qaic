@@ -102,7 +102,7 @@ class QaicVllmConfig(VllmConfig):
         pp_size = self.parallel_config.pipeline_parallel_size
         if self.scheduler_config.async_scheduling:
             # QAIC prefill runs its pipeline stages on-device, so pp_size is 1.
-            # The kv producer needs max_num_seqs + 1 concurrent batches to
+            # The kv producer needs stages + 1 concurrent batches to
             # fill all the stages.
             override_qaic_config = (self.additional_config or {}).get(
                 "override_qaic_config"
@@ -111,8 +111,9 @@ class QaicVllmConfig(VllmConfig):
                 self.kv_transfer_config
                 and self.kv_transfer_config.kv_role == "kv_producer"
             )
-            if is_kv_producer and int(override_qaic_config.get("stages", 1)) > 1:
-                return self.scheduler_config.max_num_seqs + 1
+            stages = int(override_qaic_config.get("stages", 1))
+            if is_kv_producer and stages > 1:
+                return stages + 1
             if self.use_v2_model_runner:
                 return pp_size + 1
             # V1 Model Runner does not fully support async scheduling with PP.
