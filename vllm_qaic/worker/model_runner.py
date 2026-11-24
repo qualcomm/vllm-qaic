@@ -1481,7 +1481,8 @@ class QaicModelRunnerAoT(GPUModelRunner):
                     len(prefill_req_ids),
                     dtype=prefill_block_ids.dtype,
                 )
-                self._reserve_prefill_bank(prefill_block_ids, prefill_req_ids)
+                if self._kv_connector_name == "NixlConnector":
+                    self._reserve_prefill_bank(prefill_block_ids, prefill_req_ids)
                 # Nixl:Pull uses QPC slots mapped to physical kv blocks
                 # QaicConnector retains the original block-index contract
                 prefill_batch_indices = (
@@ -2274,9 +2275,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
             # vLLM 0.30 represents the layer covered by a KV cache
             # allocation in layers. Older KVCacheTensor used "shared_by"
             # for this field
-            layer_names = getattr(kv_cache_tensor, "layers", None)
-            if layer_names is None:
-                layer_names = kv_cache_tensor.shared_by
+            layer_names = kv_cache_tensor.layers
 
             for layer_name in layer_names:
                 # layer_name : layers.{integer}; the dotted numeric
@@ -2315,7 +2314,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
             self.kv_caches[qpc_slot] = self._kv_caches_by_physical_block[physical_block]
 
         self.prefill_bank = (
-            QaicPrefillBank(num_blocks) if self._uses_prefill_bank() else None
+            QaicPrefillBank(2 * num_blocks) if self._uses_prefill_bank() else None
         )
 
         return kv_cache_layers
@@ -2396,7 +2395,8 @@ class QaicModelRunnerAoT(GPUModelRunner):
         # wait_for_save() has no metadata arguments in the vLLM connector API
         # used by NIXL.  The cache information belongs to save_kv_layer();
         # forwarding it here makes NixlBaseConnector raise TypeError.
-        kv_connector.wait_for_save()
+        if wait_for_save:
+            kv_connector.wait_for_save()
         output.finished_sending, output.finished_recving = kv_connector.get_finished(
             finished_req_ids
         )

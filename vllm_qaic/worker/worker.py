@@ -734,14 +734,6 @@ class QaicWorkerAoT(QaicWorker):
     def _expected_num_gpu_blocks(self) -> int:
         if self.cache_config.num_gpu_blocks_override:
             return self.cache_config.num_gpu_blocks_override
-        kv_transfer_config = self.vllm_config.kv_transfer_config
-        if (
-            kv_transfer_config is not None
-            and kv_transfer_config.kv_connector == "NixlConnector"
-            and kv_transfer_config.kv_role == "kv_producer"
-        ):
-            return 1 * self.scheduler_config.max_num_seqs + 1
-
         return self.scheduler_config.max_num_seqs + 1
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:

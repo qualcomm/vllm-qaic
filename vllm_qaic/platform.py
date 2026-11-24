@@ -385,7 +385,8 @@ class QaicPlatform(Platform):
 
     @classmethod
     def set_device(cls, device: torch.device):
-        # Not Implemented for aot
+        # Not Implemented for aot but Nixl/UCX initialisation calls this method as
+        # UCX might disable NVLINK in case of CUDA if this parameter is not set
         if isinstance(qaic, PlaceholderModule):
             return
         # for eager mode
