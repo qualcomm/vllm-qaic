@@ -168,6 +168,12 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         # Keep borrowed [1, vocab] penalty rows alive until decode completes.
         self._ods_handoff_buffers: list[np.ndarray] = []
         self.include_sampler = override_qaic_config.get("aic_include_sampler", False)
+        self.include_guided_decoding = bool(
+            self.include_sampler
+            and override_qaic_config.get("aic_include_guided_decoding", False)
+        )
+        self.token_bitmask_width: int | None = None
+        self.token_bitmask_dtype: np.dtype | None = None
         self.return_pdfs = bool(
             self.include_sampler and override_qaic_config.get("aic_return_pdfs", False)
         )
@@ -177,13 +183,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 int(override_qaic_config.get("max_top_k_ids", 512)),
                 self.vocab_size,
             )
-            if vllm_config.speculative_config:
-                raise ValueError("ODS does not support speculative decoding.")
-            if (
-                vllm_config.kv_transfer_config
-                and vllm_config.kv_transfer_config.kv_role != "kv_consumer"
-            ):
-                raise ValueError("ODS disaggregated serving requires kv_consumer role.")
         if vllm_config.speculative_config:
             self.num_spec_tokens = vllm_config.speculative_config.num_speculative_tokens
         self.max_decode_tokens = compute_max_decode_tokens(
@@ -353,15 +352,16 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         next_token: dict[str, Any] | None = None,
     ) -> SamplerOutput | None:
         if self.include_sampler:
-            assert isinstance(next_token, dict), "ODS sampling requires token outputs"
-            tokens = next_token["next_tokens"]
+            # ODS callers always pass the output dict when include_sampler is set.
+            ods_outputs = cast(dict[str, Any], next_token)
+            tokens = ods_outputs["next_tokens"]
             # Retain ordered chunk buffers; the final chunk wins for each row.
-            for row, source in next_token.pop("_prefill_sources", []):
+            for row, source in ods_outputs.pop("_prefill_sources", []):
                 tokens[row, : source.shape[1], :] = source
 
             if self.return_pdfs:
-                probs = next_token["probs"]
-                for row, source in next_token.pop("_prefill_probs_sources", []):
+                probs = ods_outputs["probs"]
+                for row, source in ods_outputs.pop("_prefill_probs_sources", []):
                     probs[row, : source.shape[1], :] = source
             else:
                 probs = None
@@ -508,6 +508,15 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             cluster_id=cluster_id,
             use_async_scheduling=self.use_async_scheduling,
         )
+
+        if self.include_guided_decoding:
+            # Mask width and dtype come from the QPC's token_bitmasks binding.
+            binding = cast(
+                tuple[list, np.dtype, int],
+                self.get_io_shape_and_dtype("token_bitmasks"),
+            )
+            dims, self.token_bitmask_dtype, _ = binding
+            self.token_bitmask_width = int(dims[-1])
 
         # ODS QPCs do not expose logits; use a dummy 3D shape for bookkeeping.
         self.logits_ndim = 3 if self.include_sampler else self.session.get_logits_ndim()
@@ -660,7 +669,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         penalty_token_ids: list[tuple[list[int], list[int]]] | None = None,
     ):
         decode_index = self.decode_execObj_idx
-        assert decode_index is not None
         if self.include_sampler:
             if penalty_token_ids is None or len(penalty_token_ids) != len(
                 batch_indices
@@ -951,8 +959,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             if mm_kwargs_list and (mm_kwargs := mm_kwargs_list[i]):
                 chunk_inputs.update(mm_kwargs)
             if self.include_sampler:
-                assert sampling_params is not None
-                chunk_inputs.update(sampling_params)
+                chunk_inputs.update(cast(dict[str, np.ndarray], sampling_params))
                 # Prefill handles one request per call; select its sampler row.
                 for key in (
                     "temperatures",
@@ -966,6 +973,10 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 chunk_inputs["random_numbers"] = chunk_inputs["random_numbers"][
                     i : i + 1
                 ]
+                if self.include_guided_decoding:
+                    chunk_inputs["token_bitmasks"] = chunk_inputs["token_bitmasks"][
+                        i : i + 1
+                    ]
             # chunk the request
             n_chunks: int = iids.shape[-1] // self.prefill_seq_len
 
@@ -1059,7 +1070,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                         ).append(
                             (
                                 prefill_output_offset + i,
-                                chunk_inputs["next_tokens"].copy(),
+                                chunk_inputs["next_tokens"],
                             )
                         )
                         if self.return_pdfs:
@@ -1068,7 +1079,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                             ).append(
                                 (
                                     prefill_output_offset + i,
-                                    chunk_inputs["probs"].copy(),
+                                    chunk_inputs["probs"],
                                 )
                             )
                 else:
@@ -1151,13 +1162,13 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         if self.is_spec_decode_target_model:
             batch_inputs.update(self.decode_num_logits_buffer_by_k[current_k])
         if self.include_sampler:
-            assert sampling_params is not None
-            assert self.decode_next_tokens is not None
-            batch_inputs.update(sampling_params)
-            batch_inputs["next_tokens"] = self.decode_next_tokens["next_tokens"]
+            ods_params = cast(dict[str, np.ndarray], sampling_params)
+            ods_outputs = cast(dict[str, np.ndarray], self.decode_next_tokens)
+            batch_inputs.update(ods_params)
+            batch_inputs["next_tokens"] = ods_outputs["next_tokens"]
             if self.return_pdfs:
-                batch_inputs["probs"] = self.decode_next_tokens["probs"]
-            batch_inputs["last_accepted_output_tokens"] = sampling_params.get(
+                batch_inputs["probs"] = ods_outputs["probs"]
+            batch_inputs["last_accepted_output_tokens"] = ods_params.get(
                 "last_accepted_output_tokens", batch_inputs["input_ids"]
             )
 
@@ -2498,13 +2509,6 @@ def _get_qaic_compile_config(
             return_pdfs = qaic_config.get("return_pdfs")
             max_top_k_ids = qaic_config.get("max_top_k_ids", 512)
             include_guided_decoding = qaic_config.get("include_guided_decoding")
-    if include_sampler:
-        if include_guided_decoding:
-            raise ValueError("Guided decoding is not supported with ODS.")
-        if vllm_config.speculative_config:
-            raise ValueError("ODS does not support speculative decoding.")
-        if kv_role not in (None, "kv_consumer"):
-            raise ValueError("ODS disaggregated serving requires kv_consumer role.")
     # Check CCL is enabled
     if (
         "ccl_enabled" in cfg

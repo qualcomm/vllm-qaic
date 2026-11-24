@@ -141,6 +141,7 @@ def query_server(
     headers: dict = None,
     stream=False,
     timeout=120,
+    structured_outputs: dict | None = None,
 ) -> requests.Response:
     if is_valid_ipv6_address(host):
         host = f"[{host}]"
@@ -154,6 +155,8 @@ def query_server(
     }
     if not skip_special_tokens:
         data_json["skip_special_tokens"] = False
+    if structured_outputs is not None:
+        data_json["structured_outputs"] = structured_outputs
     if api_endpoint == "/v1/chat/completions":
         data_json["messages"] = user_input
     elif api_endpoint == "/v1/completions":

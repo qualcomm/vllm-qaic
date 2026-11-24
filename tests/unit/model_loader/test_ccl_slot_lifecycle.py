@@ -63,6 +63,7 @@ def make_model(monkeypatch):
         model = SimpleNamespace(
             full_batch_size=4,
             include_sampler=False,
+            include_guided_decoding=False,
             use_async_scheduling=async_scheduling,
             prefill_bsz=1,
             decode_bsz=4,

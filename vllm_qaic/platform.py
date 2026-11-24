@@ -566,15 +566,28 @@ class QaicPlatform(Platform):
             cls._configure_pyt_compilation(vllm_config)
 
         on_device_sampling_en = override_qaic_config.get("aic_include_sampler", False)
-        if isinstance(on_device_sampling_en, str):
-            on_device_sampling_en = on_device_sampling_en.lower() in [
-                "true",
-                "1",
-            ]
 
         assert not (on_device_sampling_en and vllm_config.speculative_config), (
             "SPD with On-device sampling is not yet supported for QAIC backend"
         )
+        guided_decoding_en = override_qaic_config.get(
+            "aic_include_guided_decoding", False
+        )
+        if (
+            on_device_sampling_en
+            and guided_decoding_en
+            and scheduler_config.async_scheduling
+        ):
+            logger.warning_once(
+                "Guided decoding with on-device sampling requires synchronous "
+                "scheduling; falling back to non-async scheduling."
+            )
+            scheduler_config.async_scheduling = False
+        if on_device_sampling_en:
+            assert not (
+                vllm_config.kv_transfer_config
+                and vllm_config.kv_transfer_config.kv_role != "kv_consumer"
+            ), "On-device sampling with disaggregated serving requires kv_consumer role"
 
         # Disaggregated prefill/decode is supported standalone for now
         if vllm_config.kv_transfer_config:
@@ -596,16 +609,6 @@ class QaicPlatform(Platform):
                 "Prefix caching with KV-role 'kv_consumer' or 'kv_both' not "
                 "yet supported for QAIC backend"
             )
-            if (
-                on_device_sampling_en
-                and vllm_config.kv_transfer_config.kv_role == "kv_producer"
-            ):
-                logger.warning_once(
-                    "On-device sampling with Disaggregated serving is only "
-                    "supported in Decode cluster with no support for "
-                    "repetition penalty"
-                )
-
             if vllm_config.kv_transfer_config.kv_role == "kv_producer":
                 stages = int(override_qaic_config.get("stages"))
                 assert not scheduler_config.async_scheduling or (

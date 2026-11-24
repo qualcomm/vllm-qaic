@@ -5,9 +5,9 @@
 
 # QAIC on-device sampling example. Serve equivalent:
 #   vllm serve TinyLlama/TinyLlama-1.1B-Chat-v1.0 --max-model-len 256 \
-#     --max-num-seqs 2 --long-prefill-token-threshold 128 \
-#     --quantization mxfp6 --kv-cache-dtype mxint8 --additional-config \
-#     '{"override_qaic_config":{"aic_include_sampler":true,"max_top_k_ids":64}}'
+#     --max-num-seqs 2 --quantization mxfp6 --kv-cache-dtype mxint8 \
+#     --additional-config '{"override_qaic_config": {"prefill_seq_len": 128,
+#     "aic_include_sampler": true, "max_top_k_ids": 64}}'
 
 import gc
 
@@ -23,9 +23,12 @@ def run() -> None:
         max_model_len=256,
         quantization="mxfp6",
         kv_cache_dtype="mxint8",
-        long_prefill_token_threshold=128,
         additional_config={
-            "override_qaic_config": {"aic_include_sampler": True, "max_top_k_ids": 64}
+            "override_qaic_config": {
+                "aic_include_sampler": True,
+                "max_top_k_ids": 64,
+                "prefill_seq_len": 128,
+            }
         },
     )
     prompts = [
