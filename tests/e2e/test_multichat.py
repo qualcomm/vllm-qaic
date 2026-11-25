@@ -80,12 +80,24 @@ def _run_multichat(
 
 
 @pytest.mark.qaic_test_config(
-    model_name="meta-llama/Llama-3.1-8B-Instruct",
-    seq_len=32,
-    ctx_len=1024,
-    decode_bsz=16,
-    dtype="mxfp6",
-    kv_dtype="mxint8",
+    {
+        "aot": dict(
+            model_name="meta-llama/Llama-3.1-8B-Instruct",
+            seq_len=32,
+            ctx_len=1024,
+            decode_bsz=16,
+            dtype="mxfp6",
+            kv_dtype="mxint8",
+        ),
+        "eager": dict(
+            model_name="meta-llama/Llama-3.1-8B-Instruct",
+            seq_len=32,
+            ctx_len=1024,
+            decode_bsz=16,
+            dtype=None,
+            kv_dtype="auto",
+        ),
+    }
 )
 def test_multichat_correctness(
     make_runner, device_group, decode_bsz, seq_len, ctx_len, sharegpt_prompts

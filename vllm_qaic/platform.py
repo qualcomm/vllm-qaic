@@ -549,8 +549,6 @@ class QaicPlatform(Platform):
         if cache_config:
             if not cls.is_aot:
                 cache_config.block_size = 16
-                # FIXME remove below hard-coding once PagedAttention is enabled
-                cache_config.enable_prefix_caching = False
             else:
                 if cache_config.enable_prefix_caching:
                     cache_config.mamba_block_size = (
