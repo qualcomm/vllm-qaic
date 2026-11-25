@@ -372,6 +372,9 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
 
     def get_num_kv_blocks_per_batch(self):
         block_table_idx = self.session.binding_index_map["block_table"]
+        if not self.session.allowed_shapes:
+            # Single-specialization QPCs store fixed shapes in the bindings.
+            return self.session.bindings[block_table_idx].dims[1]
         return self.session.allowed_shapes[0][block_table_idx][1][1]
 
     def _decode_ks_from_session(self) -> list[int]:
