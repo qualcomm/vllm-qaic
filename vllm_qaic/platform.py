@@ -9,6 +9,7 @@ import importlib
 import importlib.util
 import json
 import os
+import regex as re
 from typing import TYPE_CHECKING
 
 import torch
@@ -87,6 +88,27 @@ _AIC_HW_SUPPORTED_DTYPES: dict[int, list[torch.dtype]] = {
 _DEFAULT_SUPPORTED_DTYPES: list[torch.dtype] = [torch.float16, torch.float32]
 
 
+def _first_device_id(value) -> int | None:
+    """Return the first QID of a device_group/device_ids/device_id value.
+
+    Accepts the same shapes as qaic_utils._clean_config: an int, a list of
+    ints or numeric strings, or a string such as "[0,1]" or "0,1".
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        match = re.search(r"\d+", value)
+        return int(match.group()) if match else None
+    if isinstance(value, (list, tuple)) and value:
+        try:
+            return int(value[0])
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
 @functools.cache
 def _triton_backend() -> str | None:
     """Return the installed Triton backend: "qcom_hexagon_backend", "cpu" or None.
@@ -137,6 +159,9 @@ class QaicPlatform(Platform):
     worker_cls_pkg_root = "vllm_qaic.worker.worker"
     worker_cls = worker_cls_pkg_root + "." + worker_cls_name
     device_communicator_cls = "vllm_qaic.distributed.communicator.QAicCommunicator"
+    # EngineArgs.additional_config, captured by patch_engine_args before
+    # ModelConfig is built so supported_dtypes can pick the target device.
+    _engine_additional_config: dict | None = None
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
@@ -178,6 +203,60 @@ class QaicPlatform(Platform):
                 device_id,
             )
         return hw_version
+
+    @classmethod
+    def set_engine_additional_config(cls, additional_config) -> None:
+        """Record EngineArgs.additional_config ahead of ModelConfig creation.
+
+        Called by patch_engine_args. A JSON/Python-literal string is parsed
+        the same way check_and_update_config does; anything unparsable is
+        dropped here and left for check_and_update_config to reject.
+        """
+        cfg = additional_config
+        if isinstance(cfg, str):
+            try:
+                cfg = json.loads(cfg)
+            except json.JSONDecodeError:
+                try:
+                    cfg = ast.literal_eval(cfg)
+                except (ValueError, SyntaxError):
+                    cfg = None
+        cls._engine_additional_config = cfg if isinstance(cfg, dict) else None
+
+    @classmethod
+    def get_hw_query_device_id(cls, additional_config: dict | None = None) -> int:
+        """Return the qaicrt QID whose hardware version decides model dtypes.
+
+        QIDs are those qaicrt sees in this process: when QAIC_VISIBLE_DEVICES
+        is set, qaicrt renumbers the visible devices from 0.
+
+        PyT ignores device_group; torch_qaic's qaic:0 is the first visible
+        device, i.e. QID 0. AoT loads the QPC on device_group, which already
+        holds QIDs in that space, so this is its first entry, taking
+        override_qaic_config over the top-level additional_config (as the
+        worker does), else QID 0.
+
+        additional_config defaults to the one captured from EngineArgs.
+        """
+        if not cls.is_aot:
+            return 0
+        cfg = additional_config
+        if cfg is None:
+            cfg = cls._engine_additional_config or {}
+        override = cfg.get("override_qaic_config")
+        if not isinstance(override, dict):
+            override = {}
+        candidates = [
+            override.get(key) for key in ("device_group", "device_ids", "device_id")
+        ]
+        candidates.append(cfg.get("device_group"))
+        for value in candidates:
+            if value is None:
+                continue
+            device_id = _first_device_id(value)
+            if device_id is not None:
+                return device_id
+        return 0
 
     @classmethod
     def pre_register_and_update(cls, parser=None) -> None:
@@ -250,7 +329,7 @@ class QaicPlatform(Platform):
         # checkpoint resolves to FP16 there; AI200 keeps BF16.
         # Index 0 is vLLM's preferred dtype: fp32 checkpoints are downcast to
         # it, and unsupported checkpoint dtypes fall back to it.
-        hw_version = self.get_hw_version()
+        hw_version = self.get_hw_version(self.get_hw_query_device_id())
         if hw_version is None:
             return list(_DEFAULT_SUPPORTED_DTYPES)
         return list(_AIC_HW_SUPPORTED_DTYPES.get(hw_version, _DEFAULT_SUPPORTED_DTYPES))
@@ -458,14 +537,16 @@ class QaicPlatform(Platform):
             # otherwise the model is run through torch.compile (see
             # _configure_pyt_compilation below).
             device_config.device = torch.device("qaic")
-            # set QAIC_VISIBLE_DEVICES from device_group
-            # if not already set
-            if (
-                os.environ.get(cls.device_control_env_var) is None
-                and "device_group" in additional_config
+            # device_group is AoT-only. PyT selects devices through
+            # QAIC_VISIBLE_DEVICES, which torch_qaic reads when it initializes
+            # (on `import torch`), so setting it here would be too late.
+            if "device_group" in additional_config or "device_group" in (
+                additional_config.get("override_qaic_config") or {}
             ):
-                os.environ[cls.device_control_env_var] = ",".join(
-                    str(d) for d in additional_config["device_group"]
+                logger.warning(
+                    "device_group is ignored in PyT mode; select devices with "
+                    "%s before starting vLLM.",
+                    cls.device_control_env_var,
                 )
 
         # Shorthand used throughout this method

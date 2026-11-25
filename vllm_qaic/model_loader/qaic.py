@@ -7,6 +7,7 @@
 
 import json
 import os
+import regex as re
 import threading
 import time
 from collections import deque
@@ -115,10 +116,11 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     act_fn=None,  # softmax not applied; raw logits returned
                 ),
             }
-            # "embed&token_classify" is BGE-M3 specific (upstream vLLM only registers it for
-            # BgeM3EmbeddingModel). vLLM's ModelConfig.get_pooling_task() gives it priority over
-            # "embed", so advertising it for every model makes the OpenAI server skip the
-            # /v1/embeddings endpoint (HTTP 501) unless --pooler-config '{"task": "embed"}' is passed.
+            # "embed&token_classify" is BGE-M3 specific (upstream vLLM only registers
+            # it for BgeM3EmbeddingModel). vLLM's ModelConfig.get_pooling_task() gives
+            # it priority over "embed", so advertising it for every model makes the
+            # OpenAI server skip the /v1/embeddings endpoint (HTTP 501) unless
+            # --pooler-config '{"task": "embed"}' is passed.
             if "BgeM3EmbeddingModel" in (model_config.architectures or []):
                 poolers["embed&token_classify"] = BgeM3Pooler(
                     token_classify_pooler=_token_classify_pooler,
@@ -1790,7 +1792,6 @@ single_qpc_config = {
     "qpc_path": os.environ.get("VLLM_QAIC_QPC_PATH", None),
     "mos": os.environ.get("VLLM_QAIC_MOS", None),
     "aic_enable_depth_first": os.environ.get("VLLM_QAIC_DFS_EN", None),
-    "device_group": os.environ.get(current_platform.device_control_env_var, None),
     "num_cores": os.environ.get("VLLM_QAIC_NUM_CORES", None),
     "compiler_args": os.environ.get("VLLM_QAIC_COMPILER_ARGS", None),
 }
@@ -1954,7 +1955,10 @@ def get_hf_model(
     # pretrained_extra_args.
     if (
         model_config.dtype == torch.bfloat16
-        and current_platform.get_hw_version() == AIC_HW_VERSION_AI200
+        and current_platform.get_hw_version(
+            current_platform.get_hw_query_device_id(additional_config)
+        )
+        == AIC_HW_VERSION_AI200
     ):
         args["torch_dtype"] = torch.bfloat16
 
@@ -2142,6 +2146,19 @@ def _get_qaic_compile_config(
     cfg.pop("weight_free", None)
     # update through environment variable
     cfg.update(_clean_config(QAIC_DEVICE_CONFIG[speculative_model_type]))
+    # QAIC_VISIBLE_DEVICES selects the devices qaicrt sees and renumbers them
+    # from 0, so device_group holds QIDs in that renumbered space. Without a
+    # device_group, use every visible device. Draft/target speculative models
+    # take their QIDs from VLLM_QAIC_SPEC_{DRAFT,TARGET}_QID instead.
+    if cfg["device_group"] is None and speculative_model_type not in (
+        "draft",
+        "target",
+    ):
+        visible = os.environ.get(current_platform.device_control_env_var, "")
+        num_visible = len(re.findall(r"\d+", visible))
+        if num_visible:
+            cfg["device_group"] = list(range(num_visible))
+            cfg["num_devices"] = num_visible
     if speculative_model_type == "draft":
         # The draft model is never disaggregated: it always runs its own
         # prefill inline (see qaic_draft_model.py's propose()), so it needs
