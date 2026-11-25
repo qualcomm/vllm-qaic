@@ -669,13 +669,6 @@ class QaicPlatform(Platform):
                 "Only ngram, suffix, and draft_model based SPD types are "
                 "supported with Disaggregated serving for QAIC backend"
             )
-            assert not (
-                vllm_config.kv_transfer_config.kv_role != "kv_producer"
-                and vllm_config.cache_config.enable_prefix_caching
-            ), (
-                "Prefix caching with KV-role 'kv_consumer' or 'kv_both' not "
-                "yet supported for QAIC backend"
-            )
             if (
                 on_device_sampling_en
                 and vllm_config.kv_transfer_config.kv_role == "kv_producer"

@@ -287,7 +287,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 )
                 return pending_prefill_exec_queue
             else:
-                self._kv_handoff(batch_indices, kv_caches)
+                self._kv_handoff(batch_indices, kv_caches, block_table)
         else:
             with lock:  # TODO: Re-evaluate if needed for MultiProcExecutor
                 if is_prompt:
@@ -606,8 +606,9 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         self,
         batch_indices: list[int],
         kv_caches: list[list[np.ndarray]],
+        block_table: np.ndarray | None = None,
     ):
-        for _, bidx in enumerate(batch_indices):
+        for row, bidx in enumerate(batch_indices):
             if kv_caches[bidx] is not None and len(kv_caches[bidx]) > 0:
                 assert len(self.kv_cache_info) == len(kv_caches[bidx]), (
                     f"KV buffer count mismatch: "
@@ -627,6 +628,11 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                             buf, (buf.shape[0], target_heads) + buf.shape[2:]
                         )
 
+                if block_table is not None:
+                    # Paged QPC: block_table[row] lists this request's physical pages.
+                    self._kv_handoff_paged(kv_caches[bidx], block_table[row])
+                    continue
+
                 # Update kv cache setDataWith
                 _ = self.session.set_data_for_kv_handoff(
                     kv_caches[bidx],
@@ -635,6 +641,31 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     self.decode_execObj_idx or 0,
                 )
         return
+
+    def _kv_handoff_paged(
+        self,
+        kv_buffers: list[np.ndarray],
+        block_table_row: np.ndarray,
+    ) -> None:
+        """DMA one request's KV into the paged device pool, one DMA per page."""
+
+        pool_pages, _, block_size = self.kv_cache_info[0][0][:3]
+        seq_len = kv_buffers[0].shape[2]
+        pages = [int(p) for p in block_table_row if p >= 0]
+
+        for page_idx, phys_page in enumerate(pages):
+            lo = page_idx * block_size
+            hi = min(lo + block_size, seq_len)
+            # Contiguous copies: the runtime must not receive strided views.
+            page_buffers = [
+                np.ascontiguousarray(buf[:, :, lo:hi]) for buf in kv_buffers
+            ]
+            _ = self.session.set_data_for_kv_handoff(
+                page_buffers,
+                [("batch_index", phys_page), ("ctx_start", 0)],
+                self.session.decode_buff_map,
+                self.decode_execObj_idx or 0,
+            )
 
     def _run_pipeline_prefill(
         self,

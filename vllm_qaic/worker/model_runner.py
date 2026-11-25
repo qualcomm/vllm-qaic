@@ -1246,14 +1246,26 @@ class QaicModelRunnerAoT(GPUModelRunner):
                     if not self.is_kv_consumer
                     else self.positions_np[:num_scheduled_tokens]
                 )
+            # Rows executed through the decode QPC; must match decode_input_ids.
+            # A kv_consumer runs every request through decode, including ones the
+            # reorder classifies as prefill (num_computed < num_prompt), so this
+            # cannot be self.num_decodes (that gave a (0, 4) block_table and
+            # _run_decode failed with "could not broadcast (0,4) into (1,4)").
+            num_decode_rows = self._num_decode_rows_to_pad(self.input_batch.num_reqs)
+            paged_kv = "block_table" in self.model.session.input_names
             decode_block_ids: np.ndarray = (
                 self.batch_indices[: self.num_decodes]
                 if not self.is_kv_consumer
                 else self.batch_indices[:num_scheduled_tokens]
             )
-            if "block_table" in self.model.session.input_names:
-                decode_block_table: np.ndarray = self.block_table[: self.num_decodes]
-                decode_slot_ids: np.ndarray = self.slot_id[: self.num_decodes]
+            if paged_kv and self.is_kv_consumer:
+                # Paged KV: batch_index is the decode row and the KV location comes
+                # from block_table. batch_indices holds each request's first physical
+                # page, which is not a batch row (e.g. page 1 with batch size 1).
+                decode_block_ids = np.arange(num_decode_rows, dtype=np.int64)
+            if paged_kv:
+                decode_block_table: np.ndarray = self.block_table[:num_decode_rows]
+                decode_slot_ids: np.ndarray = self.slot_id[:num_decode_rows]
             else:
                 decode_block_table, decode_slot_ids = None, None
 
@@ -1339,7 +1351,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
             prefill_lora_ids = None
             if self.lora_config:
                 req_lora_mapping = self.input_batch.request_lora_mapping[:num_reqs]
-                decode_lora_ids = req_lora_mapping[: self.num_decodes].astype(np.int64)
+                decode_lora_ids = req_lora_mapping[:num_decode_rows].astype(np.int64)
                 prefill_lora_ids = req_lora_mapping[self.num_decodes :].astype(np.int64)
 
             _dflash_prefill = (
@@ -2066,6 +2078,11 @@ class QaicModelRunnerAoT(GPUModelRunner):
         """
         self.kv_cache_config = kv_cache_config
         if has_kv_transfer_group():
+            # The transfer mailbox is indexed by physical KV block id - 1 (see
+            # connector.start_load_kv), so it must cover the whole block pool,
+            # not just max_num_seqs. Resize it in place: the connector keeps a
+            # reference to this list.
+            self.kv_caches[:] = [[] for _ in range(kv_cache_config.num_blocks)]
             get_kv_transfer_group().register_kv_caches(self.kv_caches)
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
