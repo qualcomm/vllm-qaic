@@ -22,6 +22,15 @@ if TYPE_CHECKING:
         SharedExperts,
     )
 from vllm_qaic.ops._triton_flags import triton_op_enabled
+from vllm.model_executor.layers.fused_moe.activation import (
+    MoEActivation,
+)
+from vllm.model_executor.layers.fused_moe.config import (
+    biased_moe_quant_config,
+)
+from vllm.model_executor.layers.fused_moe.fused_moe import (
+    fused_experts,
+)
 
 triton_en = triton_op_enabled("FUSED_MOE")
 
@@ -62,16 +71,6 @@ class QAicUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # already be one; from_str rejects enums, so only strings are parsed).
         # Flag off -> the QAIC NSP path below, bit-for-bit.
         if triton_en:
-            from vllm.model_executor.layers.fused_moe.activation import (
-                MoEActivation,
-            )
-            from vllm.model_executor.layers.fused_moe.config import (
-                biased_moe_quant_config,
-            )
-            from vllm.model_executor.layers.fused_moe.fused_moe import (
-                fused_experts,
-            )
-
             quant_config = (
                 biased_moe_quant_config(layer.w13_bias, layer.w2_bias)
                 if self.moe.has_bias

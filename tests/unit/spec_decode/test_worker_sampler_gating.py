@@ -15,6 +15,7 @@ import torch
 
 import vllm_qaic.v1.sample as sample_package
 import vllm_qaic.worker.worker as worker_module
+from vllm_qaic.model_loader.qaic import QaicCausalLM
 from vllm_qaic.worker.model_runner import (
     QaicModelRunnerAoT,
     _producer_placeholder_tokens,
@@ -398,3 +399,32 @@ def test_ods_consumer_accepted_tokens_refresh_in_place():
     decode, _ = runner._prepare_ods_sampling_params()
     assert decode["last_accepted_output_tokens"] is accepted
     assert accepted.tolist() == [[13], [14], [sentinel]]
+
+
+@pytest.mark.parametrize("is_prompt, route", [(True, "prefill"), (False, "decode")])
+def test_forward_keeps_sampling_and_paged_inputs(is_prompt, route):
+    calls = []
+    model = SimpleNamespace(
+        is_pooling_model=False,
+        is_multimodal_model=False,
+        disagg_producer_en=False,
+        disagg_serving_en=False,
+        _run_prefill=lambda *a, **kw: calls.append(("prefill", kw)),
+        _run_decode=lambda *a, **kw: calls.append(("decode", kw)),
+    )
+    sampling, table, slots = {}, np.zeros((1, 2)), np.zeros(1)
+    QaicCausalLM.forward(
+        model,
+        [],
+        [],
+        [],
+        is_prompt,
+        sampling_params=sampling,
+        block_table=table,
+        slot_id=slots,
+    )
+    assert len(calls) == 1 and calls[0][0] == route
+    kwargs = calls[0][1]
+    assert kwargs["sampling_params"] is sampling
+    assert kwargs["block_table"] is table
+    assert kwargs["slot_id"] is slots
