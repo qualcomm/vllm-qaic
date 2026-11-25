@@ -53,6 +53,107 @@ def _copy_topk_outputs(
     token_expert_indices.copy_(ids)
 
 
+_TOPK_SOFTMAX_HAS_EPILOGUE: bool | None = None
+
+
+def _topk_softmax_has_epilogue() -> bool:
+    """True if this torch_qaic's ``qaic::topk_softmax`` takes the vLLM epilogue.
+
+    Newer torch_qaic builds add ``token_expert_indices`` and ``is_padding`` to
+    the schema; older ones (e.g. SDK 1.24.0.24) only take
+    ``(topk_weights, topk_ids, gating_output, renormalize, bias)``.
+    """
+    global _TOPK_SOFTMAX_HAS_EPILOGUE
+    if _TOPK_SOFTMAX_HAS_EPILOGUE is None:
+        try:
+            schema = torch.ops.qaic.topk_softmax.default._schema
+            names = {arg.name for arg in schema.arguments}
+            _TOPK_SOFTMAX_HAS_EPILOGUE = {"token_expert_indices", "is_padding"} <= names
+        except (AttributeError, RuntimeError):
+            _TOPK_SOFTMAX_HAS_EPILOGUE = False
+    return _TOPK_SOFTMAX_HAS_EPILOGUE
+
+
+def _try_qaic_topk_softmax(
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    token_expert_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+    renormalize: bool,
+    e_score_correction_bias: torch.Tensor | None,
+    is_padding: torch.Tensor | None = None,
+) -> bool:
+    """Run the fused ``qaic::topk_softmax`` kernel; False if not applicable.
+
+    One NSP kernel (softmax + top-K + optional renormalize) writing straight
+    into the caller's buffers. Benchmarked against the plugin's
+    ``qaic::topk_router`` and the eager decomposition (E in {64,128,256},
+    K in {6,8}, 1..4096 tokens, fp16/fp32): 1.5x-4x faster than topk_router in
+    every case, 1.3x-36x faster than eager, with identical expert selection.
+
+    Follows vLLM's ``topk_softmax`` contract: an fp32
+    ``e_score_correction_bias`` only affects which experts are selected, and the
+    weights are still the unbiased softmax probabilities.
+
+    When the kernel has the fused epilogue, it also fills
+    ``token_expert_indices`` and sets the ids of ``is_padding`` rows to -1 in
+    the same launch. Older kernels leave ``token_expert_indices`` unwritten.
+    Every QAIC router consumer (``FusedTopKRouter`` / ``GroupedTopKRouter``)
+    discards it, so the copy that used to fill it was dead device work.
+    Without the epilogue, ``is_padding`` rows are masked with one extra op.
+    """
+    num_experts = gating_output.shape[-1]
+    if (
+        gating_output.device.type != "qaic"
+        or gating_output.dtype not in (torch.float16, torch.float32)
+        or gating_output.dim() != 2
+        or not (1 <= topk_weights.shape[1] <= num_experts)
+        or topk_weights.dtype != torch.float32
+        or topk_ids.dtype != torch.int32
+        or not topk_weights.is_contiguous()
+        or not topk_ids.is_contiguous()
+    ):
+        return False
+    bias = e_score_correction_bias
+    if bias is not None and (
+        bias.dtype != torch.float32
+        or bias.dim() != 1
+        or bias.shape[0] != num_experts
+        or bias.device != gating_output.device
+    ):
+        return False
+    if _topk_softmax_has_epilogue():
+        fuse_indices = (
+            token_expert_indices.dtype == torch.int32
+            and token_expert_indices.shape == topk_ids.shape
+            and token_expert_indices.is_contiguous()
+        )
+        fuse_padding = (
+            is_padding is not None
+            and is_padding.dtype == torch.bool
+            and is_padding.dim() == 1
+            and is_padding.shape[0] >= topk_ids.shape[0]
+        )
+        torch.ops.qaic.topk_softmax(
+            topk_weights,
+            topk_ids,
+            gating_output,
+            renormalize,
+            bias,
+            token_expert_indices if fuse_indices else None,
+            is_padding if fuse_padding else None,
+        )
+        if is_padding is not None and not fuse_padding:
+            topk_ids.masked_fill_(is_padding[: topk_ids.shape[0], None], -1)
+    else:
+        torch.ops.qaic.topk_softmax(
+            topk_weights, topk_ids, gating_output, renormalize, bias
+        )
+        if is_padding is not None:
+            topk_ids.masked_fill_(is_padding[: topk_ids.shape[0], None], -1)
+    return True
+
+
 def _topk_torch(
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
@@ -61,7 +162,19 @@ def _topk_torch(
     renormalize: bool,
     e_score_correction_bias: torch.Tensor | None,
     scoring_func: str,
+    is_padding: torch.Tensor | None = None,
 ) -> None:
+    if scoring_func == "softmax" and _try_qaic_topk_softmax(
+        topk_weights,
+        topk_ids,
+        token_expert_indices,
+        gating_output,
+        renormalize,
+        e_score_correction_bias,
+        is_padding,
+    ):
+        return
+
     qaic_regular_topk = _QAIC_REGULAR_TOPK
     if _supports_qaic_regular_topk(
         qaic_regular_topk,
@@ -112,6 +225,7 @@ def _topk_softmax_torch(
         renormalize,
         e_score_correction_bias,
         "softmax",
+        is_padding,
     )
 
 

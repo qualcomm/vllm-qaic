@@ -32,12 +32,26 @@ triton_en = triton_op_enabled("RMS_NORM")
 triton_gated_en = triton_op_enabled("RMS_NORM_GATED")
 
 
-class QAicRMSNorm(RMSNorm):
-    """RMSNorm with a fast-path to the Hexagon NSP fused add+norm kernel.
+def _fused_add_rms_norm_supported(
+    x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor
+) -> bool:
+    """qaic::add_rms_norm needs fp32/fp16/bf16 tensors sharing one dtype."""
+    return (
+        x.dtype in (torch.float16, torch.bfloat16, torch.float32)
+        and x.dtype == residual.dtype == weight.dtype
+        and x.shape == residual.shape
+        and x.shape[-1] == weight.shape[0]
+    )
 
-    When `residual` is provided the kernel fuses the residual add and the
-    RMS normalization into a single NSP dispatch, avoiding a round-trip to
-    DDR between the two ops.
+
+class QAicRMSNorm(RMSNorm):
+    """RMSNorm with a fast-path to the fused NSP add+norm kernel.
+
+    When `residual` is provided ``torch.ops.qaic.add_rms_norm`` fuses the
+    residual add and the RMS normalization into a single NSP dispatch,
+    avoiding a round-trip to DDR between the two ops. The ``rms_norm_hexagon``
+    kernel remains as the fallback for configurations the
+    fused op does not cover.
 
     When ``VLLM_QAIC_TRITON_RMS_NORM`` is set the no-residual path instead
     dispatches to vLLM's Triton ``rms_norm_batch_invariant`` kernel. The
@@ -52,6 +66,20 @@ class QAicRMSNorm(RMSNorm):
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if residual is not None:
+            if (
+                self.has_weight
+                and self.variance_size_override is None
+                and _fused_add_rms_norm_supported(x, residual, self.weight)
+            ):
+                normed, new_residual = torch.ops.qaic.add_rms_norm(
+                    x,
+                    [x.shape[-1]],
+                    self.weight,
+                    self.variance_epsilon,
+                    residual,
+                    False,
+                )
+                return normed, new_residual
             normed, new_residual = _call_hexagon_rms_norm(
                 residual, x, self.weight, self.variance_epsilon
             )
@@ -86,10 +114,12 @@ class QAicGemmaRMSNorm(GemmaRMSNorm):
             )
 
         if residual is not None:
-            normed, new_residual = _call_hexagon_rms_norm(
-                residual, x, self.weight, self.variance_epsilon
-            )
-            return normed, new_residual
+            if _fused_add_rms_norm_supported(x, residual, self.weight):
+                normed, new_residual = torch.ops.qaic.add_rms_norm(
+                    x, [x.shape[-1]], self.weight, self.variance_epsilon, residual, True
+                )
+                return normed, new_residual
+            return self.forward_native(x, residual)
 
         return F.rms_norm(
             x, self.weight.shape, 1.0 + self.weight, self.variance_epsilon
