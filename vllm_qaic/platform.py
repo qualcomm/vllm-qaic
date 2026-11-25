@@ -10,6 +10,8 @@ import importlib.util
 import json
 import os
 import regex as re
+import subprocess
+import sys
 from typing import TYPE_CHECKING
 
 import torch
@@ -33,14 +35,16 @@ try:
 except ImportError:
     qaic = PlaceholderModule("qaic")
 
+# Imported here so the SDK fallback path lands on sys.path for the other
+# modules that import qaicrt. Device queries from this module go through
+# _query_qaic_device_info instead (see there for why).
 try:
-    import qaicrt
+    import qaicrt  # noqa: F401
 except ModuleNotFoundError as exc:
     if exc.name != "qaicrt":
         raise
 
     import platform
-    import sys
 
     qaic_sdk_path = f"/opt/qti-aic/dev/lib/{platform.machine()}"
     if qaic_sdk_path not in sys.path:
@@ -85,6 +89,85 @@ _AIC_HW_SUPPORTED_DTYPES: dict[int, list[torch.dtype]] = {
 }
 # Used when the hardware version cannot be determined: no native BF16.
 _DEFAULT_SUPPORTED_DTYPES: list[torch.dtype] = [torch.float16, torch.float32]
+
+# Run in a separate interpreter by _query_qaic_device_info. argv: QID, then the
+# directory the parent imported qaicrt from.
+_QAIC_DEVICE_INFO_SCRIPT = """
+import json
+import sys
+
+sys.path.insert(0, sys.argv[2])
+try:
+    import qaicrt
+
+    status, info = qaicrt.Util().getDeviceInfo(int(sys.argv[1]))
+    if status != qaicrt.QStatus.QS_SUCCESS:
+        out = {"error": f"getDeviceInfo returned {status}"}
+    else:
+        out = {
+            "hw_version": int(info.devData.hwVersion),
+            "nsp_total": int(info.devData.resourceInfo.nspTotal),
+        }
+except Exception as exc:
+    out = {"error": f"{type(exc).__name__}: {exc}"}
+print(json.dumps(out), flush=True)
+"""
+_QAIC_DEVICE_INFO_TIMEOUT_S = 60
+
+
+@functools.cache
+def _query_qaic_device_info(device_id: int) -> dict[str, int]:
+    """Return {"hw_version", "nsp_total"} for QID ``device_id``.
+
+    qaicrt.Util().getDeviceInfo() opens the device node and keeps it open for
+    the life of the process; qaicrt has no API to close it. vLLM forks
+    EngineCore from this process, and the child then reuses the inherited
+    handle instead of opening its own. NSPs that EngineCore reserves through
+    that handle are only released when the last reference to it is closed, so
+    the parent keeps them pinned after EngineCore exits and the next engine on
+    that device fails with QAIC_ERROR_NSP_ALLOC_FAILED.
+
+    Running the query in a short-lived interpreter keeps the handle out of this
+    process: it is closed when the child exits. A plain subprocess is used
+    rather than multiprocessing spawn, which would re-import the caller's
+    __main__. The child inherits the environment, so QAIC_VISIBLE_DEVICES
+    numbering matches this process. Successful results are cached per QID;
+    failures raise RuntimeError and are not cached.
+    """
+    qaicrt_dir = os.path.dirname(os.path.abspath(qaicrt.__file__))
+    cmd = [sys.executable, "-c", _QAIC_DEVICE_INFO_SCRIPT, str(device_id), qaicrt_dir]
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=_QAIC_DEVICE_INFO_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(
+            f"QAIC device info query for QID {device_id}: {exc}"
+        ) from exc
+
+    lines = proc.stdout.strip().splitlines()
+    try:
+        result = json.loads(lines[-1]) if lines else None
+    except json.JSONDecodeError:
+        result = None
+    if proc.returncode != 0 or not isinstance(result, dict):
+        stderr_tail = proc.stderr.strip()[-500:]
+        raise RuntimeError(
+            f"QAIC device info query for QID {device_id} exited with "
+            f"{proc.returncode}: {stderr_tail or proc.stdout.strip()[-500:]}"
+        )
+    if "error" in result:
+        raise RuntimeError(
+            f"QAIC device info query for QID {device_id} failed: {result['error']}"
+        )
+    return {
+        "hw_version": int(result["hw_version"]),
+        "nsp_total": int(result["nsp_total"]),
+    }
 
 
 def _first_device_id(value) -> int | None:
@@ -172,18 +255,13 @@ class QaicPlatform(Platform):
         """Return the AIC hardware version of QID ``device_id`` via qaicrt.
 
         AI100 reports 0x20000 (AIC_HW_VERSION_AI100) and AI200 reports 0x30200
-        (AIC_HW_VERSION_AI200). Queried through qaicrt so it works in both AOT
-        and eager mode. The result is cached per device_id, including None,
-        which means the runtime query failed or the device was unavailable.
+        (AIC_HW_VERSION_AI200). Queried through qaicrt, in a short-lived
+        subprocess (see _query_qaic_device_info), so it works in both AOT and
+        eager mode. The result is cached per device_id, including None, which
+        means the runtime query failed or the device was unavailable.
         """
         try:
-            status, info = qaicrt.Util().getDeviceInfo(device_id)
-            if status != qaicrt.QStatus.QS_SUCCESS:
-                logger.warning(
-                    "get_hw_version: getDeviceInfo(%s) returned %s", device_id, status
-                )
-                return None
-            hw_version = int(info.devData.hwVersion)
+            hw_version = _query_qaic_device_info(device_id)["hw_version"]
         except Exception as exc:
             logger.warning("get_hw_version: could not query QID %s: %s", device_id, exc)
             return None
@@ -374,12 +452,7 @@ class QaicPlatform(Platform):
     @classmethod
     @functools.cache
     def get_num_cores(cls, device_id: int = 0) -> int:
-        status, info = qaicrt.Util().getDeviceInfo(device_id)
-        if status != qaicrt.QStatus.QS_SUCCESS:
-            raise RuntimeError(
-                f"QAIC device info query failed for QID {device_id}: {status}"
-            )
-        return info.devData.resourceInfo.nspTotal
+        return _query_qaic_device_info(device_id)["nsp_total"]
 
     @classmethod
     def get_num_hvx_threads(cls, device_id: int = 0) -> int:
