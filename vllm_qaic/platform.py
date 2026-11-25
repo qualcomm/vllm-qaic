@@ -15,6 +15,7 @@ import torch
 
 from vllm_qaic.logger import init_logger
 from vllm.platforms import Platform, PlatformEnum
+from vllm.platforms.interface import CpuArchEnum
 from vllm.utils.import_utils import PlaceholderModule
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -263,6 +264,54 @@ class QaicPlatform(Platform):
         return "qaic"
 
     @classmethod
+    def discover_numa_topology(cls) -> list[list[int]]:
+        """Discover NUMA topology for NIXL KV-load worker placement."""
+        sys_node = "/sys/devices/system/node"
+        sys_cpu = "/sys/devices/system/cpu"
+        if not (os.path.exists(sys_node) and os.path.exists(sys_cpu)):
+            return []
+
+        use_highest_sibling = cls.get_cpu_architecture() == CpuArchEnum.X86
+        try:
+            nodes = os.listdir(sys_node)
+        except OSError:
+            return []
+        core_groups: list[list[int]] = []
+        for node in nodes:
+            if not node.startswith("node") or not node[4:].isdigit():
+                continue
+            node_path = f"{sys_node}/{node}"
+            seen_phys: set[int] = set()
+            try:
+                cpus = os.listdir(node_path)
+            except OSError:
+                continue
+            for cpu in cpus:
+                if not cpu.startswith("cpu") or not cpu[3:].isdigit():
+                    continue
+                cpu_id = int(cpu[3:])
+                path = f"{sys_cpu}/cpu{cpu_id}/topology/thread_siblings_list"
+                try:
+                    with open(path) as f:
+                        siblings: list[int] = []
+                        for part in f.read().strip().split(","):
+                            if "-" in part:
+                                start, end = map(int, part.split("-"))
+                                siblings.extend(range(start, end + 1))
+                            else:
+                                siblings.append(int(part))
+                except (OSError, ValueError):
+                    siblings = [cpu_id]
+                if not siblings:
+                    siblings = [cpu_id]
+                phys = max(siblings) if use_highest_sibling else min(siblings)
+                seen_phys.add(phys)
+
+            if seen_phys:
+                core_groups.append(list(seen_phys))
+        return core_groups
+
+    @classmethod
     def get_device_uuid(cls, device_id: int = 0) -> str:
         # Not Implemented for aot
         if isinstance(qaic, PlaceholderModule):
@@ -336,9 +385,10 @@ class QaicPlatform(Platform):
 
     @classmethod
     def set_device(cls, device: torch.device):
-        # Not Implemented for aot
+        # Not Implemented for aot but Nixl/UCX initialisation calls this method as
+        # UCX might disable NVLINK in case of CUDA if this parameter is not set
         if isinstance(qaic, PlaceholderModule):
-            raise NotImplementedError
+            return
         # for eager mode
         qaic.set_device(device)
 
