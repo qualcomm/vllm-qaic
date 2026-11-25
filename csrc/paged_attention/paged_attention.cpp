@@ -370,7 +370,7 @@ static inline bool hmx_choose_prefill_tile(int32_t gqa, int32_t head_dim,
 
 static inline bool hmx_choose_decode_tile(int32_t gqa, int32_t head_dim,
                                           int32_t num_reqs, int32_t max_seq_len,
-                                          int32_t block_size,
+                                          int32_t block_size, bool windowed,
                                           uint64_t vtcm_size,
                                           HmxPagedAttentionTile* tile) {
   static const int32_t req_candidates[] = {16, 8, 4, 2, 1};
@@ -411,12 +411,15 @@ static inline bool hmx_choose_decode_tile(int32_t gqa, int32_t head_dim,
           (ki > 0 && kv_block == aligned_seq_len)) {
         continue;
       }
-      // submit_decode_v_dma emits one handle per physical cache-block
-      // fragment. Keeping KV tiles block-aligned makes this bound exact for
-      // every tile and prevents a grouped decode from overrunning its fixed
-      // handle arrays before the first matmul is launched.
-      if (kv_block % block_size != 0 ||
-          (int64_t)req_block * (kv_block / block_size) > kMaxDmaHandles) {
+      // A DMA handle covers one physical page fragment. Tiles may split
+      // pages, and sliding windows may start inside a page. Bound the worst
+      // starting offset instead of requiring tiles to be page multiples.
+      const int32_t page_fragments =
+          !windowed && kv_block % block_size == 0
+              ? kv_block / block_size
+              : 1 + (kv_block - 1) / block_size +
+                    ((kv_block - 1) % block_size != 0);
+      if ((int64_t)req_block * page_fragments > kMaxDmaHandles) {
         continue;
       }
       const int64_t rows64 = (int64_t)req_block * (int64_t)gqa;
@@ -1837,7 +1840,8 @@ static inline int32_t paged_attention_hmx_decode(
 
   HmxPagedAttentionTile tile = {};
   if (!hmx_choose_decode_tile(gqa, head_dim, num_reqs, global_max_seq_len,
-                              block_size, (uint64_t)vtcm_size, &tile)) {
+                              block_size, sink_window.window_left >= 0,
+                              (uint64_t)vtcm_size, &tile)) {
     return JIT_DEV_ERROR_INVALID_PARAMETER;
   }
   const int32_t kv_block_tile = tile.kv_block;
