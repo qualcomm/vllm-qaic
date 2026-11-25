@@ -149,6 +149,7 @@ class ShmBuffer:
         create: bool = True,
         use_full_kv_transfer: bool = False,
         preserve_shape: bool = False,
+        preserve_context_length: bool = False,
     ):
         """
         A shared memory buffer implementation, wrapper over shared_memory.SharedMemory
@@ -162,6 +163,7 @@ class ShmBuffer:
         self.list_of_np_buff = []
         self.cleanup_done = False
         self.preserve_shape = preserve_shape
+        self.preserve_context_length = preserve_context_length
         if not isinstance(kv_cache_info, list):
             raise ValueError("shape must be a list")
 
@@ -176,6 +178,7 @@ class ShmBuffer:
                 num_tokens,
                 kv_kind,
                 self.preserve_shape,
+                self.preserve_context_length,
             )
             _bytes_of_buffer = 1
             for dim in _kv_shape:
@@ -239,23 +242,31 @@ class ShmBuffer:
                     num_tokens,
                     kv_kind,
                     self.preserve_shape,
+                    self.preserve_context_length,
                 )
                 self.list_of_np_buff.append(
                     np.ndarray(_kv_shape, dtype=kv_type, buffer=buff)
                 )
 
+    @staticmethod
     def _get_kv_shape(
-        self,
         use_full_kv_transfer: bool,
         kv_shape: tuple,
         num_tokens: int,
         kv_kind: KVCacheKind,
         preserve_shape: bool = False,
+        preserve_context_length: bool = False,
     ) -> tuple:
         if preserve_shape:
             # EC embeddings are fixed-size per image; dim0 is NOT a batch dim
             # (e.g. (num_vision_tokens, hidden)). Preserve the shape verbatim.
             return tuple(kv_shape)
+        # A paged QPC exposes a KV pool shaped as
+        # (num_physical_pages, heads, block_size, ...). The SHM handoff still
+        # represents one complete request, so its context dimension must not
+        # be capped to the pool's block_size.
+        if preserve_context_length and kv_kind == KVCacheKind.FA and len(kv_shape) > 3:
+            return (1, kv_shape[1], num_tokens) + kv_shape[3:]
         # Recurrent and convolutional state tensors have rank 4, but their
         # third dimension is not a context dimension. Slice only FA caches.
         if not use_full_kv_transfer and kv_kind == KVCacheKind.FA and len(kv_shape) > 3:
@@ -300,6 +311,9 @@ class QaicKVCacheBank:
         )
         # EC connector sets this True so ShmBuffer preserves embedding shape.
         self.preserve_shape = False
+        # Paged KV pools expose block_size in dim 2, whereas a handoff buffer
+        # needs the full request context in that dimension.
+        self.preserve_context_length = False
 
     def get_Storage(
         self, kv_cache_info: list, num_tokens: int, name: str | None = None
@@ -318,6 +332,7 @@ class QaicKVCacheBank:
             create=create,
             use_full_kv_transfer=self.use_full_kv_transfer,
             preserve_shape=self.preserve_shape,
+            preserve_context_length=self.preserve_context_length,
         )
         self.MemBank[shm.name] = shm
         return shm.name, shm.list_of_np_buff
@@ -389,6 +404,12 @@ class QaicConnector(KVConnectorBase_V1):
             self.is_producer and vllm_config.model_config.is_hybrid
         )
         self.mem_bank = QaicKVCacheBank()
+        # Prefix caching compiles QAIC with a paged KV pool. Keep the shared
+        # memory transfer in per-request context layout; _kv_handoff_paged
+        # splits it into physical blocks before DMA.
+        self.mem_bank.preserve_context_length = bool(
+            vllm_config.cache_config.enable_prefix_caching
+        )
         self.shm_tracker: Queue = Queue()
         self.force_clean_up_threshold = (
             FORCE_CLEAN_UP_MULTIPLIER * vllm_config.scheduler_config.max_num_seqs
