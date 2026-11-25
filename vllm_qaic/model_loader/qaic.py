@@ -115,10 +115,11 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     act_fn=None,  # softmax not applied; raw logits returned
                 ),
             }
-            # "embed&token_classify" is BGE-M3 specific (upstream vLLM only registers it for
-            # BgeM3EmbeddingModel). vLLM's ModelConfig.get_pooling_task() gives it priority over
-            # "embed", so advertising it for every model makes the OpenAI server skip the
-            # /v1/embeddings endpoint (HTTP 501) unless --pooler-config '{"task": "embed"}' is passed.
+            # "embed&token_classify" is BGE-M3 specific (upstream vLLM only registers
+            # it for BgeM3EmbeddingModel). vLLM's ModelConfig.get_pooling_task() gives
+            # it priority over "embed", so advertising it for every model makes the
+            # OpenAI server skip the /v1/embeddings endpoint (HTTP 501) unless
+            # --pooler-config '{"task": "embed"}' is passed.
             if "BgeM3EmbeddingModel" in (model_config.architectures or []):
                 poolers["embed&token_classify"] = BgeM3Pooler(
                     token_classify_pooler=_token_classify_pooler,
@@ -1954,7 +1955,10 @@ def get_hf_model(
     # pretrained_extra_args.
     if (
         model_config.dtype == torch.bfloat16
-        and current_platform.get_hw_version() == AIC_HW_VERSION_AI200
+        and current_platform.get_hw_version(
+            current_platform.get_hw_query_device_id(additional_config)
+        )
+        == AIC_HW_VERSION_AI200
     ):
         args["torch_dtype"] = torch.bfloat16
 

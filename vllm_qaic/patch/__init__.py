@@ -28,6 +28,7 @@
 #       limits the batch queue to 2, leaving most of the stages idle.
 #     How:
 #       Extend VllmConfig and update max_concurrent_batches.
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #
 # ** 2. File: patch_parallel_state.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -36,6 +37,7 @@
 #       For QAIC in AOT mode, the torch device should be `cpu` instead of `qaic`.
 #     How:
 #       Extend GroupCoordinator and update __init__.
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #
 # ** 3. File: patch_utils.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -64,12 +66,25 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. vllm.v1.sample.ops.topk_topp_sampler.apply_top_k_top_p
 #    Why:
-#       AOT sampling uses host CPU tensors while the active platform is QAIC.
-#       The upstream selector can choose Triton for that combination, but AOT
-#       cannot provide the compute-unit query used to size that launch.
+#       Upstream selects the Triton top-k/top-p kernel implicitly, from
+#       HAS_TRITON plus a CUDA-tuned batch-size heuristic (Triton at batch >= 8,
+#       PyTorch sort below). On QAIC HAS_TRITON is force-enabled by
+#       patch_qaic_triton_import, so the Triton sampler kernel is selected with
+#       no way to opt out and no way to exercise it below batch 8.
 #    How:
-#       At plugin import time, replace the selector with upstream's PyTorch
-#       implementation. The replacement is AOT-only; PYT keeps its behavior.
+#       Replace apply_top_k_top_p with a version gated solely on
+#       VLLM_QAIC_TRITON_TOPK_TOPP (resolved at import via triton_op_enabled):
+#       set to 1 -> apply_top_k_top_p_triton at any batch size, otherwise ->
+#       apply_top_k_top_p_pytorch. Applies to both PYT and AOT; with the flag
+#       off (the default unless VLLM_QAIC_TRITON_ALL_OPS_EN is set), AOT, whose
+#       logits are host CPU tensors, gets the PyTorch implementation.
+#    Note:
+#       Applied first, because apply_top_k_top_p is a module-level function that
+#       vllm.v1.sample.rejection_sampler (imported by patch_rejection_sampler)
+#       and vllm.v1.worker.gpu.sample.{sampler,states} pull in with
+#       `from ... import apply_top_k_top_p`, which copies the object into their
+#       namespace at import time. None of them is imported yet at this point, so
+#       patching the definition site first is enough for all of them.
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #
 # ** 6. File: patch_graph_pickler.py **
@@ -146,30 +161,7 @@
 #       reads it) — added in platform.py.
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #
-# ** 9. File: patch_topk_topp_sampler.py **
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. vllm.v1.sample.ops.topk_topp_sampler.apply_top_k_top_p
-#    Why:
-#       Upstream selects the Triton top-k/top-p kernel implicitly, from
-#       HAS_TRITON plus a CUDA-tuned batch-size heuristic (Triton at batch >= 8,
-#       PyTorch sort below). On QAIC HAS_TRITON is force-enabled by
-#       patch_qaic_triton_import, so the Triton sampler kernel is selected with
-#       no way to opt out and no way to exercise it below batch 8.
-#    How:
-#       Replace apply_top_k_top_p with a version gated solely on
-#       VLLM_QAIC_TRITON_TOPK_TOPP (resolved at import via triton_op_enabled):
-#       set to 1 -> apply_top_k_top_p_triton at any batch size, otherwise ->
-#       apply_top_k_top_p_pytorch.
-#    Note:
-#       Applied first, because apply_top_k_top_p is a module-level function that
-#       vllm.v1.sample.rejection_sampler (imported by patch_rejection_sampler
-#       below) and vllm.v1.worker.gpu.sample.{sampler,states} pull in with
-#       `from ... import apply_top_k_top_p`, which copies the object into their
-#       namespace at import time. None of them is imported yet at this point, so
-#       patching the definition site first is enough for all of them.
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#
-# ** 10. File: patch_reshape_and_cache.py **
+# ** 9. File: patch_reshape_and_cache.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. vllm.v1.attention.ops.triton_reshape_and_cache_flash.
 #        triton_reshape_and_cache_flash
@@ -188,8 +180,9 @@
 #    Note:
 #       Imported only when VLLM_QAIC_ENABLE_TRITON_ATTN is set, since that
 #       backend is the only caller of this wrapper on QAIC.
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #
-# ** 11. File: patch_fp8_scaled_mm.py **
+# ** 10. File: patch_fp8_scaled_mm.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. vllm.model_executor.kernels.linear._POSSIBLE_FP8_KERNELS
 #   2. vllm.model_executor.kernels.linear._POSSIBLE_FP8_BLOCK_KERNELS
@@ -213,6 +206,7 @@
 #       before a single fused matmul. That is exact: a block scale is constant
 #       along K within a K-tile, so it hoists out of that tile's partial sum.
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#
 # ** 11. File: patch_gemma4_dtype.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. vllm.model_executor.models.gemma4_mm.Gemma4ForConditionalGeneration.__init__
@@ -223,6 +217,7 @@
 #       Set dtype/torch_dtype on the config and its sub-configs to
 #       model_config.dtype before calling the original __init__.
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#
 # ** 12. File: patch_fused_moe_activation.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. vllm.model_executor.layers.fused_moe.fused_moe.apply_moe_activation
@@ -240,6 +235,7 @@
 #       at forward time) and passes every other activation to the original
 #       function.
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#
 # ** 13. File: patch_fused_moe_sum.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. vllm._custom_ops.moe_sum
@@ -256,6 +252,7 @@
 #       slot skipping). PyTorch by default; VLLM_QAIC_TRITON_MOE_SUM routes it
 #       to upstream's Triton masked_moe_sum kernel.
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#
 # ** 14. File: patch_fused_moe_align.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. vllm._custom_ops.moe_align_block_size
@@ -288,7 +285,20 @@
 #       Imported by QaicPlatform.pre_register_and_update only in PYT mode.
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #
-# ** 16. File: patch_oai_triton_experts.py **
+# ** 16. File: patch_engine_args.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. vllm.engine.arg_utils.EngineArgs.create_model_config
+#    Why:
+#       ModelConfig.__post_init__ resolves dtype="auto" from
+#       current_platform.supported_dtypes, and QAIC's supported dtypes depend
+#       on the AIC hardware version (AI100: no BF16, AI200: BF16). In AoT
+#       mode the device to query comes from additional_config["device_group"],
+#       but the platform only receives additional_config later, in
+#       check_and_update_config, after the dtype is already fixed.
+#    How:
+#       Wrap create_model_config to pass self.additional_config to
+#       QaicPlatform.set_engine_additional_config before building ModelConfig.
+# ** 17. File: patch_oai_triton_experts.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. vllm.model_executor.layers.fused_moe.experts.
 #        gpt_oss_triton_kernels_moe.OAITritonExperts._make_routing_data / apply
@@ -320,6 +330,7 @@ import vllm_qaic.patch.patch_gemma4_dtype  # noqa
 import vllm_qaic.patch.patch_fused_moe_activation  # noqa
 import vllm_qaic.patch.patch_fused_moe_sum  # noqa
 import vllm_qaic.patch.patch_fused_moe_align  # noqa
+import vllm_qaic.patch.patch_engine_args  # noqa
 
 import vllm_qaic.envs as qaic_envs
 
