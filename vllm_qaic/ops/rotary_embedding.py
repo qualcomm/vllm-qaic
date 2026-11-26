@@ -69,6 +69,9 @@ class QAicApplyRotaryEmb(ApplyRotaryEmb):
         Returns:
             Output tensor of shape same as input x
         """
+        if cos.device != x.device:
+            cos = cos.to(x.device)
+            sin = sin.to(x.device)
         origin_dtype = x.dtype
         if enable_fp32_compute:
             x = x.to(torch.float32)
@@ -144,6 +147,8 @@ class QAicRotaryEmbedding(RotaryEmbedding):
         """
         positions = positions.flatten()
         num_tokens = positions.shape[0]
+        if cos_sin_cache.device != query.device:
+            cos_sin_cache = cos_sin_cache.to(query.device)
         cos_sin = cos_sin_cache.index_select(0, positions)
         cos, sin = cos_sin.chunk(2, dim=-1)
 

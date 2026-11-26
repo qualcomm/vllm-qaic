@@ -339,3 +339,11 @@ if qaic_envs.VLLM_QAIC_TRITON_LINEAR:
     import vllm_qaic.patch.patch_linear  # noqa
 
 import vllm_qaic.patch.patch_fp8_scaled_mm  # noqa
+
+# GDN runs on Hexagon NSP kernels, not Triton. qwen_triton_warmup pre-compiles
+# Triton GDN kernels via triton.next_power_of_2, which is absent in Triton 3.x.
+# Null it out so kernel_warmup completes without error on QAIC.
+import vllm.model_executor.warmup.kernel_warmup as _kw_mod  # noqa: E402
+
+if hasattr(_kw_mod, "qwen_triton_warmup"):
+    _kw_mod.qwen_triton_warmup = lambda *a, **kw: None

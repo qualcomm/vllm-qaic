@@ -230,6 +230,13 @@ class QaicPlatform(Platform):
                 QaicGptOssMxfp4Config,
             )
 
+            from vllm.model_executor.models import ModelRegistry
+
+            ModelRegistry.register_model(
+                "Qwen3_5MoeForConditionalGeneration",
+                "vllm_qaic.ops.gdn_qaic:QaicQwen3_5MoeForConditionalGeneration",
+            )
+
     @classmethod
     def import_kernels(cls) -> None:
         # QAIC has no CUDA kernels. Skip all kernel imports — importing vllm._C

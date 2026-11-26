@@ -77,7 +77,6 @@ class QAicRMSNorm(RMSNorm):
                     self.weight,
                     self.variance_epsilon,
                     residual,
-                    False,
                 )
                 return normed, new_residual
             normed, new_residual = _call_hexagon_rms_norm(
@@ -116,10 +115,13 @@ class QAicGemmaRMSNorm(GemmaRMSNorm):
         if residual is not None:
             if _fused_add_rms_norm_supported(x, residual, self.weight):
                 normed, new_residual = torch.ops.qaic.add_rms_norm(
-                    x, [x.shape[-1]], self.weight, self.variance_epsilon, residual, True
+                    x, [x.shape[-1]], 1.0 + self.weight, self.variance_epsilon, residual
                 )
                 return normed, new_residual
-            return self.forward_native(x, residual)
+            normed, new_residual = _call_hexagon_rms_norm(
+                residual, x, 1.0 + self.weight, self.variance_epsilon
+            )
+            return normed, new_residual
 
         return F.rms_norm(
             x, self.weight.shape, 1.0 + self.weight, self.variance_epsilon
@@ -157,14 +159,20 @@ class QAicRMSNormGated(RMSNormGated):
                 activation=self.activation,
             )
 
+        orig_dtype = x.dtype
+        x = x.float()
+        weight = self.weight.float()
+        if z is not None:
+            z = z.float()
+
         # norm_before_gate=False: gate first, then normalize (Mamba2 / Hawk style)
         if z is not None and not self.norm_before_gate:
             x = x * F.silu(z)
 
-        out = F.rms_norm(x, [self.hidden_size], self.weight, self.eps)
+        out = F.rms_norm(x, [weight.shape[0]], weight, self.eps)
 
         # norm_before_gate=True: normalize first, then gate (some SSM variants)
         if z is not None and self.norm_before_gate:
             out = out * F.silu(z)
 
-        return out
+        return out.to(orig_dtype)
