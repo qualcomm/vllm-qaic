@@ -459,7 +459,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             stages=self.stages,
             cluster_id=cluster_id,
             use_async_scheduling=self.use_async_scheduling,
-            model_type=self.config.model_type,
+            model_arch_hf=getattr(self.config, "architectures", None),
         )
         self.logits_ndim = self.session.get_logits_ndim()
         # Resolve the logits output dtype directly from the QPC binding so the
@@ -612,42 +612,47 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     target_heads = self.kv_cache_info[buff_idx][0][1]
                     if buf.size == 0 or target_heads == buf.shape[1]:
                         continue
-                    resharded = True
                     # reshard the CP=1 prefill KV into the
                     # decode QPC's CP=cp layout (cp derived from the
-                    # head-axis ratio).
-                    if kv_kind == KVCacheKind.INDEX:
-                        cp = target_heads // buf.shape[1]
-                        real_len = buf.shape[2]
-                        head_dim = buf.shape[-1]
-                        granularity = cp * self.index_block_size
-                        # CP=1 -> CP=cp reshard requires an exact multiple to
-                        # split evenly across cp decode workers, and into
-                        # whole index_block_size blocks.
-                        padded_len = -(-real_len // granularity) * granularity
-                        if padded_len > real_len:
-                            buf = np.pad(
-                                buf, [(0, 0), (0, 0), (0, padded_len - real_len), (0, 0)]
+                    # head-axis ratio). Only validated for MiniMax M3;
+                    # other models with a head-count mismatch are left
+                    # unresharded for now.
+                    if self.session._is_minimax_m3:
+                        resharded = True
+                        if kv_kind == KVCacheKind.INDEX:
+                            cp = target_heads // buf.shape[1]
+                            real_len = buf.shape[2]
+                            head_dim = buf.shape[-1]
+                            granularity = cp * self.index_block_size
+                            # CP=1 -> CP=cp reshard requires an exact multiple to
+                            # split evenly across cp decode workers, and into
+                            # whole index_block_size blocks.
+                            padded_len = -(-real_len // granularity) * granularity
+                            if padded_len > real_len:
+                                buf = np.pad(
+                                    buf,
+                                    [(0, 0), (0, 0), (0, padded_len - real_len), (0, 0)],
+                                )
+                            kv_caches[bidx][buff_idx] = index_cp1_to_cpn(
+                                buf, cp, self.index_block_size, padded_len, head_dim
                             )
-                        kv_caches[bidx][buff_idx] = index_cp1_to_cpn(
-                            buf, cp, self.index_block_size, padded_len, head_dim
-                        )
-                    elif kv_kind in (KVCacheKind.FA, KVCacheKind.MSA):
-                        cp = target_heads // buf.shape[1]
-                        real_len = buf.shape[2]
-                        head_dim = buf.shape[-1]
-                        granularity = cp
-                        # CP=1 -> CP=cp reshard requires an exact multiple to
-                        # split evenly across cp decode workers.
-                        padded_len = -(-real_len // granularity) * granularity
-                        if padded_len > real_len:
-                            buf = np.pad(
-                                buf, [(0, 0), (0, 0), (0, padded_len - real_len), (0, 0)]
+                        elif kv_kind in (KVCacheKind.FA, KVCacheKind.MSA):
+                            cp = target_heads // buf.shape[1]
+                            real_len = buf.shape[2]
+                            head_dim = buf.shape[-1]
+                            granularity = cp
+                            # CP=1 -> CP=cp reshard requires an exact multiple to
+                            # split evenly across cp decode workers.
+                            padded_len = -(-real_len // granularity) * granularity
+                            if padded_len > real_len:
+                                buf = np.pad(
+                                    buf,
+                                    [(0, 0), (0, 0), (0, padded_len - real_len), (0, 0)],
+                                )
+                            kv_heads = buf.shape[1]
+                            kv_caches[bidx][buff_idx] = attention_cp1_to_cpn(
+                                buf, cp, kv_heads, padded_len // cp, head_dim
                             )
-                        kv_heads = buf.shape[1]
-                        kv_caches[bidx][buff_idx] = attention_cp1_to_cpn(
-                            buf, cp, kv_heads, padded_len // cp, head_dim
-                        )
 
                 # Update kv cache setDataWith
                 slicing_spec_handle = None

@@ -116,7 +116,7 @@ class QAICInferenceSession:
         stages: int | None = 1,
         cluster_id: str | None = None,
         use_async_scheduling: bool = False,
-        model_type: str | None = None,
+        model_arch_hf: list[str] | None = None,
     ):
         self.stages: int = stages if stages is not None else 1
         self.cluster_id = cluster_id
@@ -238,7 +238,9 @@ class QAICInferenceSession:
         )
         self.cluster_id = cluster_id
 
-        self._is_minimax_m3 = model_type == "minimax_m3_vl"
+        self._is_minimax_m3 = any(
+            "minimaxm3" in arch.lower() for arch in (model_arch_hf or [])
+        )
 
         self.decode_buff_map = []
         for name in self.input_names:
@@ -768,7 +770,7 @@ class QAICInferenceSession:
             self.set_data_for_kv_handoff(
                 kv_cache_buffers,
                 [("batch_index", batch_index % self.full_batch_size), ("ctx_start", 0)],
-                self.prefill_buff_map[: len(self.kv_cache_info)],
+                self.prefill_buff_map[:-1],
                 exec_obj_idx,
             )
 
