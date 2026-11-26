@@ -304,6 +304,20 @@ class QAICInferenceSession:
             self.kv_slicing_spec_handle = self.get_slicing_spec_handle(
                 buffer_spec_json=buffer_spec_json
             )
+        self.indexer_slicing_spec_handle = None
+        self.fa_slicing_spec_handle = None
+        if self._is_minimax_m3 and self.decode_buff_map:
+            index_json = self.get_json_for_minimax((KVCacheKind.INDEX,))
+            if json.loads(index_json)["BufferSpecs"]:
+                self.indexer_slicing_spec_handle = self.get_slicing_spec_handle(
+                    buffer_spec_json=index_json
+                )
+            fa_json = self.get_json_for_minimax((KVCacheKind.FA, KVCacheKind.MSA))
+            if json.loads(fa_json)["BufferSpecs"]:
+                self.fa_slicing_spec_handle = self.get_slicing_spec_handle(
+                    buffer_spec_json=fa_json
+                )
+
         self.repetition_penalty_spec_handle = None
         past_repetition_penalty_buffer = "past_repetition_penalty_buffer"
         if past_repetition_penalty_buffer in self.input_names:
@@ -432,6 +446,41 @@ class QAICInferenceSession:
                     }
                 ]
             }
+        return json.dumps(json_spec)
+
+    def get_json_for_minimax(self, kinds: tuple[KVCacheKind, ...]):
+        """Build a slicing-spec JSON covering the decode-side KV buffers of
+        the given kv_kind(s), for MiniMax M3 KV handoff.
+
+        Every dim is sized from the buffer's own decode binding, which is
+        a compile-time constant -- except the context dim, which also
+        stays symbolic on size (`ctx_start`/`ctx_size`, resolved via
+        slicing_parameters at call time) since the real/padded context
+        length handed off varies per call. This is what lets the
+        resulting handle be built once here instead of being rebuilt on
+        every _kv_handoff call via build_slicing_spec_handle_from_buffers.
+        """
+        buffer_specs = []
+        for name, _ in self.decode_buff_map:
+            if self._classify_kv_binding(name) not in kinds:
+                continue
+            binding = self.bindings[self.binding_index_map[name]]
+            elem_type = aic_to_np_dtype_mapping[binding.type]
+            shape = tuple(binding.dims)
+            dim_specs = [
+                {"start": "batch_index", "size": shape[0]},
+                {"start": 0, "size": shape[1]},
+                {"start": "ctx_start", "size": "ctx_size"},
+                {"start": 0, "size": shape[-1]},
+            ]
+            buffer_specs.append(
+                {
+                    "Name": name,
+                    "ElemSize": elem_type.itemsize,
+                    "DimSpecs": dim_specs,
+                }
+            )
+        json_spec = {"BufferSpecs": buffer_specs}
         return json.dumps(json_spec)
 
     def get_json_for_repetition_penalty_slicing(self):
@@ -636,32 +685,6 @@ class QAICInferenceSession:
             buff_map,
             index,
         )
-
-    def build_slicing_spec_handle_from_buffers(self, buffers: dict[str, np.ndarray]):
-        """Build a BufferSpecs slicing-spec handle sized to each buffer's own
-        real shape and keyed to its own plain binding name.
-        """
-        buffer_specs = []
-        for name, array in buffers.items():
-            binding = self.bindings[self.binding_index_map[name]]
-            elem_type = aic_to_np_dtype_mapping[binding.type]
-            shape = array.shape
-            dim_specs = [{"start": "batch_index", "size": shape[0]}]
-            for axis_size in shape[1:-1]:
-                dim_specs.append({"start": 0, "size": axis_size})
-            dim_specs.append({"start": 0, "size": shape[-1]})
-            kv_kind = self._classify_kv_binding(name)
-            if kv_kind in (KVCacheKind.FA, KVCacheKind.MSA, KVCacheKind.INDEX):
-                dim_specs[2]["start"] = "ctx_start"
-            buffer_specs.append(
-                {
-                    "Name": name,
-                    "ElemSize": elem_type.itemsize,
-                    "DimSpecs": dim_specs,
-                }
-            )
-        json_spec = {"BufferSpecs": buffer_specs}
-        return self.get_slicing_spec_handle(buffer_spec_json=json.dumps(json_spec))
 
     def set_data_for_repetition_penalty(
         self, repetition_penalty_buffers, slicing_parameters, index=0

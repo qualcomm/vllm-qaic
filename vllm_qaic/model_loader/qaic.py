@@ -605,7 +605,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
     ):
         for _, bidx in enumerate(batch_indices):
             if kv_caches[bidx] is not None and len(kv_caches[bidx]) > 0:
-                resharded = False
                 for buff_idx in range(len(kv_caches[bidx])):
                     buf = kv_caches[bidx][buff_idx]
                     kv_kind = self.kv_cache_info[buff_idx][3]
@@ -618,7 +617,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     # other models with a head-count mismatch are left
                     # unresharded for now.
                     if self.session._is_minimax_m3:
-                        resharded = True
                         if kv_kind == KVCacheKind.INDEX:
                             cp = target_heads // buf.shape[1]
                             real_len = buf.shape[2]
@@ -655,28 +653,63 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                             )
 
                 # Update kv cache setDataWith
-                slicing_spec_handle = None
-                if resharded:
-                    # build a spec from each buffer's own real post-handoff shape/name
-                    buf_dict = dict(
-                        zip(
-                            [name for name, _ in self.session.decode_buff_map],
-                            kv_caches[bidx],
-                            strict=True,
-                        )
+                if not self.session._is_minimax_m3:
+                    _ = self.session.set_data_for_kv_handoff(
+                        kv_caches[bidx],
+                        [("batch_index", bidx), ("ctx_start", 0)],
+                        self.session.decode_buff_map,
+                        self.decode_execObj_idx or 0,
                     )
-                    slicing_spec_handle = (
-                        self.session.build_slicing_spec_handle_from_buffers(
-                            buf_dict
-                        )
+                    continue
+
+                # MiniMax M3: dispatch each kind group through its own
+                # pre-built handle (self.session.indexer_slicing_spec_handle /
+                # fa_slicing_spec_handle, built once in __init__) instead of
+                # rebuilding a slicing-spec handle from scratch here. This
+                # runs whether or not any buffer above actually needed
+                # resharding -- the handles' baked-in heads/head_dim sizes
+                # already match the decode binding's own shape either way.
+                index_buff_map, index_buffers = [], []
+                fa_buff_map, fa_buffers = [], []
+                index_ctx_size, fa_ctx_size = None, None
+                for buff_idx, (name, binding_idx) in enumerate(
+                    self.session.decode_buff_map
+                ):
+                    kv_kind = self.kv_cache_info[buff_idx][3]
+                    buf = kv_caches[bidx][buff_idx]
+                    if kv_kind == KVCacheKind.INDEX:
+                        index_buff_map.append((name, binding_idx))
+                        index_buffers.append(buf)
+                        index_ctx_size = buf.shape[2]
+                    else:
+                        fa_buff_map.append((name, binding_idx))
+                        fa_buffers.append(buf)
+                        fa_ctx_size = buf.shape[2]
+
+                if index_buffers:
+                    self.session.set_data_for_kv_handoff(
+                        index_buffers,
+                        [
+                            ("batch_index", bidx),
+                            ("ctx_start", 0),
+                            ("ctx_size", index_ctx_size),
+                        ],
+                        index_buff_map,
+                        self.decode_execObj_idx or 0,
+                        slicing_spec_handle=self.session.indexer_slicing_spec_handle,
                     )
-                _ = self.session.set_data_for_kv_handoff(
-                    kv_caches[bidx],
-                    [("batch_index", bidx), ("ctx_start", 0)],
-                    self.session.decode_buff_map,
-                    self.decode_execObj_idx or 0,
-                    slicing_spec_handle=slicing_spec_handle,
-                )
+                if fa_buffers:
+                    self.session.set_data_for_kv_handoff(
+                        fa_buffers,
+                        [
+                            ("batch_index", bidx),
+                            ("ctx_start", 0),
+                            ("ctx_size", fa_ctx_size),
+                        ],
+                        fa_buff_map,
+                        self.decode_execObj_idx or 0,
+                        slicing_spec_handle=self.session.fa_slicing_spec_handle,
+                    )
         return
 
     def _run_pipeline_prefill(
