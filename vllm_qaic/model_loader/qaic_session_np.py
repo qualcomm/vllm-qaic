@@ -307,13 +307,24 @@ class QAICInferenceSession:
         self,
         name: str,
     ) -> KVCacheKind:
-        name = name.lower()
-        if "conv" in name:
+        name = name.rsplit("/", 1)[-1].lower()
+        if name.startswith("conv_state."):
             return KVCacheKind.LA_CONV
-        elif "recurrent" in name:
+        if name.startswith("recurrent_state."):
             return KVCacheKind.LA_RECURRENT
-        else:
+        if name.startswith(
+            (
+                "past_key",
+                "past_value",
+                "compressed_",
+                "k_pe",
+                "indexer_key.",
+                "index_key.",
+                "indexer_kv_cache",
+            )
+        ):
             return KVCacheKind.FA
+        raise ValueError(f"No KV cache kind rule for retained-state binding {name}")
 
     def _is_kv_cache_name(self, name: str) -> bool:
         if self.use_legacy_slicing_spec:
@@ -322,32 +333,42 @@ class QAICInferenceSession:
 
     def get_json_for_full_kv_cache_slicing(self):
         buffer_specs = []
-        _full_attn_dim_spec = [
-            {"start": "batch_index"},
-            {"start": 0},
-            {"start": "ctx_start"},
-            {"start": 0},
-        ]
-        # Qwen3.5/Qwen3.6 recurrent (linear-attention) states are rank 4,
-        # but their last two dimensions are state dimensions rather than
-        # (context, head_size).  Do not apply ctx_start slicing to them.
-        _full_state_dim_spec = [
-            {"start": "batch_index"},
-            {"start": 0},
-            {"start": 0},
-            {"start": 0},
-        ]
+        kv_cache_info_by_name = {
+            name: info
+            for (name, _), info in zip(
+                self.decode_buff_map, self.kv_cache_info, strict=True
+            )
+        }
         for binding in self.bindings:
             name = binding.name
             if self._is_kv_cache_name(name) and name.endswith("_RetainedState"):
                 size = aic_to_np_dtype_mapping[binding.type]
                 base_name = name.replace("_RetainedState", "")
-                kv_kind = self._classify_kv_binding(name)
+                kv_shape, _, _, kv_kind = kv_cache_info_by_name[base_name]
+                if len(binding.dims) != len(kv_shape):
+                    raise ValueError(
+                        f"KV input/output rank mismatch for {name!r}: "
+                        f"input shape {kv_shape}, output shape {tuple(binding.dims)}"
+                    )
+                rank = len(kv_shape)
+                dimspec: list[dict[str, int | str]] = [{"start": 0} for _ in kv_shape]
+                dimspec[0] = {"start": "batch_index"}
+                # FA bindings (past KV, compressed KV and indexer keys) store
+                # context in the penultimate axis: rank 4 uses axis 2; rank 3
+                # indexer caches use axis 1.
                 if kv_kind == KVCacheKind.FA:
-                    dimspec = _full_attn_dim_spec
-                else:
-                    dimspec = _full_state_dim_spec
-
+                    if rank < 3:
+                        raise ValueError(
+                            f"Context-cache binding {name!r} requires rank >= 3, "
+                            f"got shape {kv_shape}"
+                        )
+                    dimspec[rank - 2] = {"start": "ctx_start"}
+                elif kv_kind not in (KVCacheKind.LA_CONV, KVCacheKind.LA_RECURRENT):
+                    raise ValueError(
+                        f"Unsupported KV cache kind {kv_kind!r} for binding {name!r}"
+                    )
+                # LA_CONV and LA_RECURRENT retain zero starts on state axes;
+                # only batch is sliced.
                 buffer_specs.append(
                     {
                         "Name": f"{base_name}.*",
@@ -391,20 +412,9 @@ class QAICInferenceSession:
                 ]
             }
         else:
-            json_spec = {
-                "BufferSpecs": [
-                    {
-                        "Name": f".*{VLLM_KV_CACHE_PREFIX}.*",
-                        "ElemSize": size.itemsize,
-                        "DimSpecs": [
-                            {"start": "batch_index"},
-                            {"start": 0},
-                            {"start": "ctx_start"},
-                            {"start": 0},
-                        ],
-                    }
-                ]
-            }
+            # Build per-binding specs for uniform caches too, since rank-3 and
+            # rank-4 context caches place their context axes at different indices.
+            return self.get_json_for_full_kv_cache_slicing()
         return json.dumps(json_spec)
 
     def get_json_for_repetition_penalty_slicing(self):
