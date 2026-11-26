@@ -23,6 +23,8 @@ class KVCacheKind(Enum):
     FA = "FA"
     LA_CONV = "LA_CONV"
     LA_RECURRENT = "LA_RECURRENT"
+    MSA = "MSA"
+    INDEX = "INDEX"
 
 
 def compute_max_decode_tokens(

@@ -40,6 +40,8 @@ logger = init_logger(__name__)
 BFLOAT16_STORAGE_DTYPE = np.dtype(np.float16)
 BFLOAT16_TYPE = getattr(aicapi, "BFLOAT16_TYPE", None)
 
+_MINIMAX_M3_DENSE_LAYER_COUNT = 3
+
 
 def float_to_bfloat16_storage(values: Any) -> np.ndarray:
     """Return raw BF16 storage compatible with QEfficient and LRT bindings.
@@ -114,6 +116,7 @@ class QAICInferenceSession:
         stages: int | None = 1,
         cluster_id: str | None = None,
         use_async_scheduling: bool = False,
+        model_arch_hf: list[str] | None = None,
     ):
         self.stages: int = stages if stages is not None else 1
         self.cluster_id = cluster_id
@@ -235,6 +238,10 @@ class QAICInferenceSession:
         )
         self.cluster_id = cluster_id
 
+        self._is_minimax_m3 = any(
+            "minimaxm3" in arch.lower() for arch in (model_arch_hf or [])
+        )
+
         self.decode_buff_map = []
         for name in self.input_names:
             if self._is_kv_cache_name(name):
@@ -270,6 +277,18 @@ class QAICInferenceSession:
                 kv_size = _binding.size
                 kv_kind = self._classify_kv_binding(name)
                 self.kv_cache_info.append((kv_shape, kv_type, kv_size, kv_kind))
+        # Prefill-only sessions have no plain-named KV input bindings, so
+        # decode_buff_map stays empty even though real hybrid KV output
+        # buffers exist in prefill_buff_map; fall back to those so
+        # is_hybrid_kv/kv_slicing_spec_handle still get set.
+        if not self.decode_buff_map:
+            for name, binding_index in self.prefill_buff_map:
+                _binding = self.bindings[binding_index]
+                kv_shape = tuple(_binding.dims)
+                kv_type = aic_to_np_dtype_mapping[_binding.type]
+                kv_size = _binding.size
+                kv_kind = self._classify_kv_binding(name)
+                self.kv_cache_info.append((kv_shape, kv_type, kv_size, kv_kind))
 
         # Hybrid KV detected if more than one KV shape found
         _num_kv_cache_info = len(set(self.kv_cache_info))
@@ -285,6 +304,20 @@ class QAICInferenceSession:
             self.kv_slicing_spec_handle = self.get_slicing_spec_handle(
                 buffer_spec_json=buffer_spec_json
             )
+        self.indexer_slicing_spec_handle = None
+        self.fa_slicing_spec_handle = None
+        if self._is_minimax_m3 and self.decode_buff_map:
+            index_json = self.get_json_for_minimax((KVCacheKind.INDEX,))
+            if json.loads(index_json)["BufferSpecs"]:
+                self.indexer_slicing_spec_handle = self.get_slicing_spec_handle(
+                    buffer_spec_json=index_json
+                )
+            fa_json = self.get_json_for_minimax((KVCacheKind.FA, KVCacheKind.MSA))
+            if json.loads(fa_json)["BufferSpecs"]:
+                self.fa_slicing_spec_handle = self.get_slicing_spec_handle(
+                    buffer_spec_json=fa_json
+                )
+
         self.repetition_penalty_spec_handle = None
         past_repetition_penalty_buffer = "past_repetition_penalty_buffer"
         if past_repetition_penalty_buffer in self.input_names:
@@ -312,12 +345,20 @@ class QAICInferenceSession:
             return KVCacheKind.LA_CONV
         elif "recurrent" in name:
             return KVCacheKind.LA_RECURRENT
+        elif self._is_minimax_m3:
+            if "index_key" in name:
+                return KVCacheKind.INDEX
+            part = name.split(".")[1] if "." in name else "0"
+            layer_number = int(part.split("_")[0])
+            if layer_number >= _MINIMAX_M3_DENSE_LAYER_COUNT:
+                return KVCacheKind.MSA
+            return KVCacheKind.FA
         else:
             return KVCacheKind.FA
 
     def _is_kv_cache_name(self, name: str) -> bool:
         if self.use_legacy_slicing_spec:
-            return name.startswith("past_key") or name.startswith("past_value")
+            return name.startswith(("past_key", "past_value", "index_key"))
         return VLLM_KV_CACHE_PREFIX in name
 
     def get_json_for_full_kv_cache_slicing(self):
@@ -343,7 +384,7 @@ class QAICInferenceSession:
                 size = aic_to_np_dtype_mapping[binding.type]
                 base_name = name.replace("_RetainedState", "")
                 kv_kind = self._classify_kv_binding(name)
-                if kv_kind == KVCacheKind.FA:
+                if kv_kind in (KVCacheKind.FA, KVCacheKind.MSA, KVCacheKind.INDEX):
                     dimspec = _full_attn_dim_spec
                 else:
                     dimspec = _full_state_dim_spec
@@ -405,6 +446,41 @@ class QAICInferenceSession:
                     }
                 ]
             }
+        return json.dumps(json_spec)
+
+    def get_json_for_minimax(self, kinds: tuple[KVCacheKind, ...]):
+        """Build a slicing-spec JSON covering the decode-side KV buffers of
+        the given kv_kind(s), for MiniMax M3 KV handoff.
+
+        Every dim is sized from the buffer's own decode binding, which is
+        a compile-time constant -- except the context dim, which also
+        stays symbolic on size (`ctx_start`/`ctx_size`, resolved via
+        slicing_parameters at call time) since the real/padded context
+        length handed off varies per call. This is what lets the
+        resulting handle be built once here instead of being rebuilt on
+        every _kv_handoff call via build_slicing_spec_handle_from_buffers.
+        """
+        buffer_specs = []
+        for name, _ in self.decode_buff_map:
+            if self._classify_kv_binding(name) not in kinds:
+                continue
+            binding = self.bindings[self.binding_index_map[name]]
+            elem_type = aic_to_np_dtype_mapping[binding.type]
+            shape = tuple(binding.dims)
+            dim_specs = [
+                {"start": "batch_index", "size": shape[0]},
+                {"start": 0, "size": shape[1]},
+                {"start": "ctx_start", "size": "ctx_size"},
+                {"start": 0, "size": shape[-1]},
+            ]
+            buffer_specs.append(
+                {
+                    "Name": name,
+                    "ElemSize": elem_type.itemsize,
+                    "DimSpecs": dim_specs,
+                }
+            )
+        json_spec = {"BufferSpecs": buffer_specs}
         return json.dumps(json_spec)
 
     def get_json_for_repetition_penalty_slicing(self):
@@ -598,11 +674,14 @@ class QAICInferenceSession:
         slicing_parameters,
         buff_map: list[tuple[str, int]],
         index=0,
+        slicing_spec_handle=None,
     ):
         return self._set_data_with_slices(
             kv_cache_buffers,
             slicing_parameters,
-            self.kv_slicing_spec_handle,
+            slicing_spec_handle
+            if slicing_spec_handle is not None
+            else self.kv_slicing_spec_handle,
             buff_map,
             index,
         )
