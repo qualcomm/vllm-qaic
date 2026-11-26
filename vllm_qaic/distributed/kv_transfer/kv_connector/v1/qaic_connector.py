@@ -257,8 +257,13 @@ class ShmBuffer:
             # (e.g. (num_vision_tokens, hidden)). Preserve the shape verbatim.
             return tuple(kv_shape)
         # Recurrent and convolutional state tensors have rank 4, but their
-        # third dimension is not a context dimension. Slice only FA caches.
-        if not use_full_kv_transfer and kv_kind == KVCacheKind.FA and len(kv_shape) > 3:
+        # third dimension is not a context dimension. Slice only attention
+        # caches (FA/MSA/INDEX).
+        if (
+            not use_full_kv_transfer
+            and kv_kind in (KVCacheKind.FA, KVCacheKind.MSA, KVCacheKind.INDEX)
+            and len(kv_shape) > 3
+        ):
             seq_len = min(num_tokens, kv_shape[2])
             return (1, kv_shape[1], seq_len) + kv_shape[3:]
         # Use batch size 1 and keep other dims intact.
@@ -563,6 +568,7 @@ class QaicConnector(KVConnectorBase_V1):
             logger.debug("In connector.start_load_kv, but the kv_cache_info is None")
             return
         kv_cache_info = kwargs["kv_cache_info"]
+        native_kv_cache_info = kwargs.get("native_kv_cache_info", kv_cache_info)
 
         forward_context.additional_kwargs["cleanup_callback"] = self.cleanup_callback
         # Load the KV for each request
@@ -580,7 +586,9 @@ class QaicConnector(KVConnectorBase_V1):
                     )
                     kv_shm_buff_name = resp.payload[0]
                 kv_storage_shm_name, kv_buff = self.mem_bank.get_Storage(
-                    kv_cache_info=kv_cache_info,
+                    kv_cache_info=kv_cache_info
+                    if self.is_producer
+                    else native_kv_cache_info,
                     num_tokens=len(request.token_ids),
                     name=kv_shm_buff_name,
                 )

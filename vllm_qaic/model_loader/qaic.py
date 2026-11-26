@@ -26,6 +26,7 @@ from transformers import PretrainedConfig
 from vllm.config import ModelConfig, VllmConfig
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
 from vllm_qaic.logger import init_logger
+from vllm_qaic.utils.qaic_utils import KVCacheKind
 from vllm.model_executor.layers.pooler.common import ClassifierFn
 from vllm.model_executor.layers.pooler.seqwise import (
     SequencePoolingFn,
@@ -49,6 +50,8 @@ from vllm.v1.sample.sampler import Sampler
 
 from vllm_qaic.platform import AIC_HW_VERSION_AI200
 from vllm_qaic.utils.qaic_utils import _clean_config, compute_max_decode_tokens
+
+from .m3_kv_layout import attention_cp1_to_cpn, index_cp1_to_cpn
 
 logger = init_logger(__name__)
 
@@ -163,6 +166,15 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             )
 
         self.ctx_len = model_config.max_model_len
+        sparse_attention_config = getattr(
+            model_config.hf_text_config, "sparse_attention_config", None
+        )
+        self.index_block_size = (
+            sparse_attention_config.get("sparse_block_size")
+            if sparse_attention_config
+            else None
+        )
+        self.native_kv_heads = model_config.get_total_num_kv_heads()
         self.decode_bsz = vllm_config.scheduler_config.max_num_seqs
         self.full_batch_size = vllm_config.scheduler_config.max_num_seqs
         self.prefill_bsz = 1
@@ -463,6 +475,7 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             stages=self.stages,
             cluster_id=cluster_id,
             use_async_scheduling=self.use_async_scheduling,
+            model_arch_hf=getattr(self.config, "architectures", None),
         )
         self.logits_ndim = self.session.get_logits_ndim()
         # Resolve the logits output dtype directly from the QPC binding so the
@@ -586,6 +599,16 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         # [(kv_shape, kv_type, kv_size, kv_kind)]
         return self.session.kv_cache_info
 
+    @property
+    def native_kv_cache_info(self) -> list[tuple]:
+        native_info = []
+        for kv_shape, kv_type, kv_size, kv_kind in self.kv_cache_info:
+            if kv_kind in (KVCacheKind.FA, KVCacheKind.MSA, KVCacheKind.INDEX):
+                heads = 1 if kv_kind == KVCacheKind.INDEX else self.native_kv_heads
+                kv_shape = (kv_shape[0], heads, self.ctx_len) + tuple(kv_shape[3:])
+            native_info.append((kv_shape, kv_type, kv_size, kv_kind))
+        return native_info
+
     def get_io_shape_and_dtype(
         self, buffer_name: str, is_input: bool = True
     ) -> tuple[list, np.dtype, int] | None:
@@ -609,30 +632,77 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
     ):
         for _, bidx in enumerate(batch_indices):
             if kv_caches[bidx] is not None and len(kv_caches[bidx]) > 0:
-                assert len(self.kv_cache_info) == len(kv_caches[bidx]), (
-                    f"KV buffer count mismatch: "
-                    f"expected {len(self.kv_cache_info)} buffers, "
-                    f"got {len(kv_caches[bidx])}"
-                )
+                resharded = False
                 for buff_idx in range(len(kv_caches[bidx])):
                     buf = kv_caches[bidx][buff_idx]
+                    kv_kind = self.kv_cache_info[buff_idx][3]
                     target_heads = self.kv_cache_info[buff_idx][0][1]
-                    # broadcast MLA buffers across num heads (zero-copy)
-                    if buf.size > 0 and target_heads != buf.shape[1]:
-                        assert buf.shape[1] == 1, (
-                            f"MLA KV head expansion expects num_heads=1 in received "
-                            f"buffer, got {buf.shape[1]} (shape={buf.shape})"
-                        )
-                        kv_caches[bidx][buff_idx] = np.broadcast_to(
-                            buf, (buf.shape[0], target_heads) + buf.shape[2:]
-                        )
+                    if buf.size == 0 or target_heads == buf.shape[1]:
+                        continue
+                    # reshard the CP=1 prefill KV into the
+                    # decode QPC's CP=cp layout (cp derived from the
+                    # head-axis ratio). Only validated for MiniMax M3;
+                    # other models with a head-count mismatch are left
+                    # unresharded for now.
+                    if self.session._is_minimax_m3:
+                        resharded = True
+                        if kv_kind == KVCacheKind.INDEX:
+                            cp = target_heads // buf.shape[1]
+                            real_len = buf.shape[2]
+                            head_dim = buf.shape[-1]
+                            granularity = cp * self.index_block_size
+                            # CP=1 -> CP=cp reshard requires an exact multiple to
+                            # split evenly across cp decode workers, and into
+                            # whole index_block_size blocks.
+                            padded_len = -(-real_len // granularity) * granularity
+                            if padded_len > real_len:
+                                buf = np.pad(
+                                    buf,
+                                    [(0, 0), (0, 0), (0, padded_len - real_len), (0, 0)],
+                                )
+                            kv_caches[bidx][buff_idx] = index_cp1_to_cpn(
+                                buf, cp, self.index_block_size, padded_len, head_dim
+                            )
+                        elif kv_kind in (KVCacheKind.FA, KVCacheKind.MSA):
+                            cp = target_heads // buf.shape[1]
+                            real_len = buf.shape[2]
+                            head_dim = buf.shape[-1]
+                            granularity = cp
+                            # CP=1 -> CP=cp reshard requires an exact multiple to
+                            # split evenly across cp decode workers.
+                            padded_len = -(-real_len // granularity) * granularity
+                            if padded_len > real_len:
+                                buf = np.pad(
+                                    buf,
+                                    [(0, 0), (0, 0), (0, padded_len - real_len), (0, 0)],
+                                )
+                            kv_heads = buf.shape[1]
+                            kv_caches[bidx][buff_idx] = attention_cp1_to_cpn(
+                                buf, cp, kv_heads, padded_len // cp, head_dim
+                            )
 
                 # Update kv cache setDataWith
+                slicing_spec_handle = None
+                if resharded:
+                    # build a spec from each buffer's own real post-handoff shape/name
+                    buf_dict = dict(
+                        zip(
+                            [name for name, _ in self.session.decode_buff_map],
+                            kv_caches[bidx],
+                            strict=True,
+                        )
+                    )
+                    slicing_spec_handle = (
+                        self.session.build_slicing_spec_handle_from_buffers(
+                            buf_dict
+                        )
+                    )
                 _ = self.session.set_data_for_kv_handoff(
                     kv_caches[bidx],
                     [("batch_index", bidx), ("ctx_start", 0)],
                     self.session.decode_buff_map,
                     self.decode_execObj_idx or 0,
+                    slicing_spec_handle=slicing_spec_handle,
                 )
         return
 
