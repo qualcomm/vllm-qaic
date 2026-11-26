@@ -636,7 +636,7 @@ class QaicPlatform(Platform):
                 # budget.  Setting max_num_batched_tokens to this value simultaneously
                 # gives the scheduler the correct per-step budget AND sizes the buffers
                 # large enough to never overflow after decode expansion.
-                scheduler_config.max_num_batched_tokens = min(
+                scheduler_config.max_num_batched_tokens = max(
                     scheduler_config.max_num_seqs
                     * (
                         max(__prefill_seq_len)
