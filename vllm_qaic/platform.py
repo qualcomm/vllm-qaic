@@ -657,19 +657,10 @@ class QaicPlatform(Platform):
         assert not (on_device_sampling_en and vllm_config.speculative_config), (
             "SPD with On-device sampling is not yet supported for QAIC backend"
         )
-        guided_decoding_en = override_qaic_config.get(
+        if on_device_sampling_en and override_qaic_config.get(
             "aic_include_guided_decoding", False
-        )
-        if (
-            on_device_sampling_en
-            and guided_decoding_en
-            and scheduler_config.async_scheduling
         ):
-            logger.warning_once(
-                "Guided decoding with on-device sampling requires synchronous "
-                "scheduling; falling back to non-async scheduling."
-            )
-            scheduler_config.async_scheduling = False
+            raise ValueError("Guided decoding is not supported with on-device sampling")
         if on_device_sampling_en:
             assert not (
                 vllm_config.kv_transfer_config

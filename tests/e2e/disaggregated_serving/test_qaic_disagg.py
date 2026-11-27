@@ -267,47 +267,31 @@ class TestDisaggregatedServingBasic:
     num_decode_workers=1,
     decode_device_group_size=2,
     prefill_max_num_seqs=2,
-    decode_override_qaic_config={
-        "aic_include_sampler": True,
-        "aic_include_guided_decoding": True,
-    },
+    decode_override_qaic_config={"aic_include_sampler": True},
 )
-class TestDisaggregatedServingGuidedDecoding:
-    """Guided decoding on the decode (KV-consumer) side with on-device sampling.
-    The prefill worker only builds KV; the first token is sampled on decode."""
+class TestDisaggregatedServingOnDeviceSampling:
+    """On-device sampling on the decode (KV-consumer) side. The prefill worker
+    only builds KV; the first token is sampled on decode."""
 
-    def test_choice_per_request(self, disagg_server):
+    def test_generation(self, disagg_server):
         test_config = disagg_server
         port = test_config["disaggregated_server_port"]
         timeout = test_config["client_request_timeout"]
         prompts = get_prompts(
             "/v1/completions", ctx_len=test_config["ctx_len"], max_tokens=8
         )[:4]
-        # Different choices per request catch slot-to-row mapping mistakes.
-        choices = [
-            ["yes", "no"],
-            ["red", "green", "blue"],
-            ["Paris", "London"],
-            ["0", "1"],
-        ]
 
-        def ask(prompt, allowed):
-            response = query_server(
+        def ask(prompt):
+            return query_server(
                 prompt,
                 max_tokens=8,
-                temperature=1.0,
-                ignore_eos=False,
+                temperature=0.0,
                 port=port,
                 timeout=timeout,
-                structured_outputs={"choice": allowed},
             )
-            assert response.status_code == 200, response.text
-            return response.json()["choices"][0]["text"], allowed
 
-        for _ in range(2):
-            with ThreadPoolExecutor(max_workers=len(prompts)) as pool:
-                results = list(
-                    pool.map(lambda pa: ask(*pa), zip(prompts, choices, strict=True))
-                )
-            for text, allowed in results:
-                assert text in allowed, f"{text!r} not in {allowed}"
+        with ThreadPoolExecutor(max_workers=len(prompts)) as pool:
+            responses = list(pool.map(ask, prompts))
+        for response in responses:
+            assert response.status_code == 200, response.text
+            assert response.json()["choices"][0]["text"], response.text

@@ -173,12 +173,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         # Keep borrowed [1, vocab] penalty rows alive until decode completes.
         self._ods_handoff_buffers: list[np.ndarray] = []
         self.include_sampler = override_qaic_config.get("aic_include_sampler", False)
-        self.include_guided_decoding = bool(
-            self.include_sampler
-            and override_qaic_config.get("aic_include_guided_decoding", False)
-        )
-        self.token_bitmask_width: int | None = None
-        self.token_bitmask_dtype: np.dtype | None = None
         self.return_pdfs = bool(
             self.include_sampler and override_qaic_config.get("aic_return_pdfs", False)
         )
@@ -525,15 +519,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             cluster_id=cluster_id,
             use_async_scheduling=self.use_async_scheduling,
         )
-
-        if self.include_guided_decoding:
-            # Mask width and dtype come from the QPC's token_bitmasks binding.
-            binding = cast(
-                tuple[list, np.dtype, int],
-                self.get_io_shape_and_dtype("token_bitmasks"),
-            )
-            dims, self.token_bitmask_dtype, _ = binding
-            self.token_bitmask_width = int(dims[-1])
 
         # ODS QPCs do not expose logits; use a dummy 3D shape for bookkeeping.
         self.logits_ndim = 3 if self.include_sampler else self.session.get_logits_ndim()
@@ -1011,10 +996,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                 chunk_inputs["random_numbers"] = chunk_inputs["random_numbers"][
                     i : i + 1
                 ]
-                if self.include_guided_decoding:
-                    chunk_inputs["token_bitmasks"] = chunk_inputs["token_bitmasks"][
-                        i : i + 1
-                    ]
             if block_table is not None and slot_id is not None:
                 chunk_inputs["block_table"] = block_table[i : i + 1].reshape(
                     1, self.num_gpu_blocks_per_batch

@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 # ------------------------------------------------------------------
 
-"""CPU tests for AOT worker sampling startup and guided-decoding masks."""
+"""CPU tests for AOT worker sampling startup and ODS sampling buffers."""
 
 import builtins
 import sys
@@ -16,10 +16,7 @@ import torch
 import vllm_qaic.v1.sample as sample_package
 import vllm_qaic.worker.worker as worker_module
 from vllm_qaic.model_loader.qaic import QaicCausalLM
-from vllm_qaic.worker.model_runner import (
-    QaicModelRunnerAoT,
-    _producer_placeholder_tokens,
-)
+from vllm_qaic.worker.model_runner import QaicModelRunnerAoT
 from vllm_qaic.worker.worker import QaicWorkerAoT
 
 
@@ -167,87 +164,7 @@ def test_drafter_warmup_gating_for_non_ngram_and_missing_drafter(method):
     )
 
 
-WIDTH = 40  # not a multiple of 32, so the padded tail is exercised
-
-
-class _FakeRunner:
-    _ods_token_bitmasks = QaicModelRunnerAoT._ods_token_bitmasks
-    _add_ods_token_bitmasks = QaicModelRunnerAoT._add_ods_token_bitmasks
-
-    def __init__(self, req_ids, num_decodes, is_kv_consumer=False, decode_bsz=2):
-        self.input_batch = SimpleNamespace(
-            num_reqs=len(req_ids),
-            req_id_to_index={r: i for i, r in enumerate(req_ids)},
-        )
-        self.model = SimpleNamespace(
-            token_bitmask_width=WIDTH,
-            token_bitmask_dtype=np.int8,
-            decode_bsz=decode_bsz,
-        )
-        self.num_decodes = num_decodes
-        self.is_kv_consumer = is_kv_consumer
-
-
-def _grammar(req_ids, rows):
-    return SimpleNamespace(
-        structured_output_request_ids=req_ids,
-        grammar_bitmask=np.array(rows, dtype=np.int32),
-    )
-
-
-def test_masks_map_to_slots_and_unpack_lsb_first():
-    runner = _FakeRunner(["a", "b", "c"], num_decodes=1)
-    # Rows follow structured_output_request_ids, not batch order.
-    masks = runner._ods_token_bitmasks(_grammar(["c", "a"], [[0b101, 0], [-1, 1]]))
-
-    assert masks.shape == (3, WIDTH)
-    assert masks.dtype == np.int8
-    assert np.array_equal(np.flatnonzero(masks[0]), np.arange(33))  # "a"
-    assert masks[1].all()  # "b" has no grammar, so it stays unconstrained
-    assert np.array_equal(np.flatnonzero(masks[2]), [0, 2])  # "c"
-
-
-def test_no_grammar_leaves_every_slot_unconstrained():
-    masks = _FakeRunner(["a", "b"], num_decodes=2)._ods_token_bitmasks(None)
-    assert masks.shape == (2, WIDTH)
-    assert masks.all()
-
-
-def test_decode_and_prefill_params_follow_batch_layout():
-    runner = _FakeRunner(["a", "b", "c"], num_decodes=1, decode_bsz=2)
-    decode, prefill = {}, {}
-    runner._add_ods_token_bitmasks(decode, prefill, _grammar(["c"], [[0b1, 0]]))
-
-    # Decode row 0 is slot 0 and is padded to decode_bsz like the other params.
-    assert decode["token_bitmasks"].shape == (2, WIDTH)
-    assert decode["token_bitmasks"][0].all()
-    # Prefill rows are the non-decode slots in batch order: "b" then "c".
-    assert prefill["token_bitmasks"].shape == (2, WIDTH)
-    assert prefill["token_bitmasks"][0].all()
-    assert np.array_equal(np.flatnonzero(prefill["token_bitmasks"][1]), [0])
-
-
-def test_disagg_consumer_decode_rows_cover_every_request():
-    runner = _FakeRunner(["a", "b"], num_decodes=0, is_kv_consumer=True)
-    decode, prefill = {}, {}
-    runner._add_ods_token_bitmasks(decode, prefill, _grammar(["b"], [[0b10, 0]]))
-
-    assert decode["token_bitmasks"][0].all()
-    assert np.array_equal(np.flatnonzero(decode["token_bitmasks"][1]), [1])
-
-
-def test_producer_placeholder_is_lowest_grammar_allowed_token():
-    req_to_slot = {"a": 0, "b": 1}
-    grammar = _grammar(["b"], [[0, 0b1]])  # only token 32 allowed (second word)
-    tokens = _producer_placeholder_tokens(grammar, req_to_slot, 2, vocab_size=40)
-    assert tokens.shape == (2, 1)
-    assert tokens[0, 0] == 0  # unstructured request keeps the zero placeholder
-    assert tokens[1, 0] == 32
-
-
-def test_producer_placeholder_without_grammar_is_zero():
-    tokens = _producer_placeholder_tokens(None, {"a": 0}, 1, vocab_size=40)
-    assert tokens.tolist() == [[0]]
+WIDTH = 40  # fake vocab size; not a multiple of 32
 
 
 class _SamplingRunner:
