@@ -5,10 +5,12 @@
 
 """Shared QAIC utilities used across vLLM"""
 
+from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import regex as re
-from enum import Enum
+
 from vllm_qaic.logger import init_logger
 
 if TYPE_CHECKING:
@@ -17,12 +19,137 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+class KVCacheGranularity(Enum):
+    """Whether handoff transfers a context prefix or the complete state."""
+
+    PARTIAL = "PARTIAL"
+    FULL = "FULL"
+
+
 class KVCacheKind(Enum):
     """Simple enum class to store different type of kv$ supported on qaic"""
 
     FA = "FA"
     LA_CONV = "LA_CONV"
     LA_RECURRENT = "LA_RECURRENT"
+    MSA = "MSA"
+    INDEX = "INDEX"
+    CSA0 = "CSA0"
+    CSA1 = "CSA1"
+    CSA2 = "CSA2"
+    CSA3 = "CSA3"
+    CSA4 = "CSA4"
+    HCA0 = "HCA0"
+    HCA1 = "HCA1"
+    HCA2 = "HCA2"
+    HCA3 = "HCA3"
+    SWA = "SWA"
+
+    @property
+    def granularity(self) -> KVCacheGranularity:
+        if self in (
+            KVCacheKind.FA,
+            KVCacheKind.MSA,
+            KVCacheKind.INDEX,
+            KVCacheKind.CSA1,
+            KVCacheKind.CSA2,
+        ):
+            return KVCacheGranularity.PARTIAL
+        return KVCacheGranularity.FULL
+
+    @property
+    def compression_ratio(self) -> int:
+        return 4 if self in (KVCacheKind.CSA1, KVCacheKind.CSA2) else 1
+
+
+class KVTransform:
+    """TS1 prefill -> TS16 decode layouts for MiniMax M3 and DeepSeek-V4 Flash.
+
+    Shapes are deliberately fixed to the current B1/DP1 handoff ABI. HCA score
+    state dimensions, unspecified in the shape table, come from the QPC binding.
+    All transforms preserve dtype and packed feature order.
+    """
+
+    TS = 16
+    PREFILL_SHAPES = {
+        KVCacheKind.FA: (1, 4, 65536, 132),
+        KVCacheKind.MSA: (1, 4, 65536, 132),
+        KVCacheKind.INDEX: (1, 1, 65536, 132),
+        KVCacheKind.CSA0: (1, 128, 512),
+        KVCacheKind.CSA1: (1, 65536, 512),
+        KVCacheKind.CSA2: (1, 65536, 128),
+        KVCacheKind.CSA3: (1, 8, 2048),
+        KVCacheKind.CSA4: (1, 8, 512),
+        KVCacheKind.HCA0: (1, 128, 512),
+        KVCacheKind.HCA1: (1, 65536, 512),
+        KVCacheKind.HCA2: (1, 65536, 128),
+        KVCacheKind.SWA: (1, 128, 512),
+    }
+
+    @classmethod
+    def native_shape(cls, kind: KVCacheKind, decode_shape: tuple) -> tuple:
+        if kind == KVCacheKind.HCA3:
+            return (1,) + tuple(decode_shape[2:])
+        return cls.PREFILL_SHAPES[kind]
+
+    @staticmethod
+    def reshape_transpose(
+        cache: np.ndarray, cp: int, block_size: int = 1
+    ) -> np.ndarray:
+        """T1: cyclic slots, or block-cyclic slots for the MiniMax indexer."""
+        if cache.ndim == 3:
+            cache = cache[:, None]
+        batch, heads, slots, features = cache.shape
+        group_size = cp * block_size
+        padded_slots = -(-slots // group_size) * group_size
+        if padded_slots != slots:
+            cache = np.pad(cache, ((0, 0), (0, 0), (0, padded_slots - slots), (0, 0)))
+        grouped = cache.reshape(
+            batch, heads, padded_slots // group_size, cp, block_size, features
+        )
+        rows = grouped.transpose(0, 3, 1, 2, 4, 5)
+        return np.ascontiguousarray(
+            rows.reshape(batch, cp * heads, padded_slots // cp, features)
+        )
+
+    @staticmethod
+    def partition_local_ring(cache: np.ndarray, cp: int) -> np.ndarray:
+        """T2: consecutive local-ring chunks, without interleaving."""
+        batch, slots, features = cache.shape
+        return np.ascontiguousarray(cache.reshape(batch, cp, slots // cp, features))
+
+    @staticmethod
+    def replicate(cache: np.ndarray, cp: int) -> np.ndarray:
+        """T3: a complete copy of the packed state on every decode row."""
+        return np.repeat(cache[:, None], cp, axis=1)
+
+    @classmethod
+    def apply(
+        cls, cache: np.ndarray, kind: KVCacheKind, index_block_size: int = 1
+    ) -> np.ndarray:
+        if cache.size == 0:
+            return cache
+        if kind in (KVCacheKind.FA, KVCacheKind.MSA, KVCacheKind.INDEX):
+            if cache.shape[1] == cls.TS:
+                return cache
+            cp = cls.TS // cls.PREFILL_SHAPES[kind][1]
+            block_size = index_block_size if kind == KVCacheKind.INDEX else 1
+            return cls.reshape_transpose(cache, cp, block_size)
+        if cache.ndim == 4:
+            return cache  # Already in decode layout.
+        if kind in (KVCacheKind.CSA0, KVCacheKind.HCA0):
+            return cls.partition_local_ring(cache, cls.TS)
+        if kind in (KVCacheKind.CSA1, KVCacheKind.CSA2, KVCacheKind.HCA1):
+            return cls.reshape_transpose(cache, cls.TS)
+        if kind in (
+            KVCacheKind.CSA3,
+            KVCacheKind.CSA4,
+            KVCacheKind.HCA2,
+            KVCacheKind.HCA3,
+            KVCacheKind.SWA,
+        ):
+            return cls.replicate(cache, cls.TS)
+        raise ValueError(f"No TS16 handoff transform for {kind}")
 
 
 def compute_max_decode_tokens(
