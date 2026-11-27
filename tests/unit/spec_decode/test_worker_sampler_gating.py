@@ -168,17 +168,14 @@ WIDTH = 40  # fake vocab size; not a multiple of 32
 
 
 class _SamplingRunner:
-    _cache_ods_sampling_params = QaicModelRunnerAoT._cache_ods_sampling_params
     _prepare_ods_sampling_params = QaicModelRunnerAoT._prepare_ods_sampling_params
 
     def __init__(self, num_decodes=1, is_kv_consumer=False):
         self.model = SimpleNamespace(decode_bsz=3, max_top_k_ids=4)
         self.num_decodes = num_decodes
         self.is_kv_consumer = is_kv_consumer
-        self._ods_min_ps = {}
         self._ods_sampling_buffers = {}
         self._ods_decode_buffers = {}
-        self._ods_sampling_layout = None
         self.input_ids = SimpleNamespace(cpu=torch.tensor([11, 12]))
         self.input_batch = SimpleNamespace(
             num_reqs=2,
@@ -192,19 +189,22 @@ class _SamplingRunner:
             num_computed_tokens_cpu=np.array([4, 5]),
             num_prompt_tokens=np.array([5, 5]),
         )
-        self._requests = {}
+        self.requests = {}
         self._generators = {
             "a": torch.Generator().manual_seed(10),
             "b": torch.Generator().manual_seed(20),
         }
-        self.arrive(_sampling_request("a", 0.0), _sampling_request("b", 0.7, top_k=9))
+        self.arrive(
+            _sampling_request("a", 0.0),
+            _sampling_request("b", 0.7, top_k=9, min_p=0.5),
+        )
 
     def set_requests(self, req_ids):
         # Mirror InputBatch's request-arrival/reorder updates to its CPU buffers.
         self.input_batch.req_ids = req_ids
         self.input_batch.num_reqs = len(req_ids)
         for slot, req_id in enumerate(req_ids):
-            params = self._requests[req_id].sampling_params
+            params = self.requests[req_id].sampling_params
             self.input_batch.temperature_cpu[slot] = params.temperature
             self.input_batch.top_p_cpu[slot] = params.top_p
             self.input_batch.top_k_cpu[slot] = (
@@ -216,22 +216,19 @@ class _SamplingRunner:
                 req_id
             ]
 
-    def arrive(self, *requests, finished=()):
-        self._requests.update({req.req_id: req for req in requests})
+    def arrive(self, *requests):
+        self.requests.update({req.req_id: req for req in requests})
         self.set_requests(self.input_batch.req_ids)
-        self._cache_ods_sampling_params(
-            SimpleNamespace(scheduled_new_reqs=requests, finished_req_ids=finished)
-        )
 
 
-def _sampling_request(req_id, temperature, top_k=-1):
+def _sampling_request(req_id, temperature, top_k=-1, min_p=0.1):
     return SimpleNamespace(
         req_id=req_id,
         sampling_params=SimpleNamespace(
             temperature=temperature,
             top_k=top_k,
             top_p=0.9,
-            min_p=0.1,
+            min_p=min_p,
             repetition_penalty=1.2,
             presence_penalty=0.3,
         ),
@@ -278,30 +275,25 @@ def test_ods_cache_tracks_request_reorder_and_decode_prefill_split():
     runner.set_requests(["b", "a"])
     decode, prefill = runner._prepare_ods_sampling_params()
     assert np.allclose(decode["temperatures"], 0.7)
+    assert np.allclose(decode["min_ps"], 0.5)
     assert prefill["temperatures"].tolist() == [[0.0]]
+    assert np.allclose(prefill["min_ps"], 0.1)
 
     runner.num_decodes = 2
     decode, prefill = runner._prepare_ods_sampling_params()
     assert np.allclose(decode["temperatures"].ravel(), [0.7, 0.0, 0.7])
+    assert np.allclose(decode["min_ps"].ravel(), [0.5, 0.1, 0.5])
     assert prefill["temperatures"].shape == (0, 1)
 
 
-def test_ods_cache_survives_preemption_and_evicts_finished_requests():
+def test_ods_min_p_follows_request_state_across_preemption():
     runner = _SamplingRunner()
-    cached_b = runner._ods_min_ps["b"]
-    runner.set_requests(["a"])
+    runner.set_requests(["a"])  # "b" is preempted
     runner._prepare_ods_sampling_params()
-    runner.arrive()  # preempted request "b" is not finished
-    assert runner._ods_min_ps["b"] == cached_b
-
-    runner.set_requests(["b"])
+    runner.set_requests(["b"])  # "b" resumes in slot 0
     decode, _ = runner._prepare_ods_sampling_params()
     assert np.allclose(decode["temperatures"], 0.7)
-    runner.arrive(finished=("b",))
-    assert "b" not in runner._ods_min_ps
-    runner.arrive(_sampling_request("b", 0.2))
-    decode, _ = runner._prepare_ods_sampling_params()
-    assert np.allclose(decode["temperatures"], 0.2)
+    assert np.allclose(decode["min_ps"], 0.5)
 
 
 def test_ods_consumer_accepted_tokens_refresh_in_place():

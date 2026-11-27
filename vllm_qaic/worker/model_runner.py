@@ -593,10 +593,8 @@ class QaicModelRunnerAoT(GPUModelRunner):
         self.num_kv_heads = self.model_config.get_num_kv_heads(self.parallel_config)
         self.head_size = self.model_config.get_head_size()
         self.execute_model_state: QaicExecuteModelState | None = None
-        self._ods_min_ps: dict[str, float] = {}
         self._ods_sampling_buffers: dict[str, np.ndarray] = {}
         self._ods_decode_buffers: dict[str, np.ndarray] = {}
-        self._ods_sampling_layout: tuple[tuple[str, ...], int] | None = None
         # Undrained AsyncModelRunnerOutput from sample_tokens(). Drained early
         # by the next execute_model()'s synchronize_input_prep() if it needs
         # this batch's exec object back before the engine calls get_output().
@@ -1292,74 +1290,45 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 mm_kwargs_list.append(_kw)
         return mm_kwargs_list
 
-    def _cache_ods_sampling_params(self, scheduler_output: SchedulerOutput) -> None:
-        """Reuse InputBatch's static settings; cache ODS-only min-p at arrival."""
-        for req_id in scheduler_output.finished_req_ids:
-            self._ods_min_ps.pop(req_id, None)
-        for req in scheduler_output.scheduled_new_reqs:
-            if req.sampling_params is None:
-                raise ValueError("On-device sampling requires sampling parameters.")
-            self._ods_min_ps[req.req_id] = req.sampling_params.min_p
-            self._ods_sampling_layout = None
-            if not self._ods_sampling_buffers:
-                # InputBatch already stores and reorders these request-static values.
-                batch = self.input_batch
-                bsz = self.model.decode_bsz
-                self._ods_sampling_buffers = {
-                    "temperatures": batch.temperature_cpu[:bsz].reshape(-1, 1),
-                    "top_ps": batch.top_p_cpu[:bsz].reshape(-1, 1),
-                    "repetition_penalties": batch.repetition_penalties_cpu[
-                        :bsz
-                    ].reshape(-1, 1),
-                    "presence_penalties": batch.presence_penalties_cpu[:bsz].reshape(
-                        -1, 1
-                    ),
-                    "top_ks": np.empty((bsz, 1), dtype=np.int32),
-                    "min_ps": np.empty((bsz, 1), dtype=np.float32),
-                    "random_numbers": np.empty(
-                        (bsz, self.model.max_top_k_ids), dtype=np.float32
-                    ),
-                }
-                self._ods_decode_buffers = {
-                    name: np.empty_like(value)
-                    for name, value in self._ods_sampling_buffers.items()
-                }
-                if self.is_kv_consumer:
-                    self._ods_decode_buffers["last_accepted_output_tokens"] = np.empty(
-                        (bsz, 1), dtype=np.int64
-                    )
-
     def _prepare_ods_sampling_params(
         self,
     ) -> tuple[dict[str, np.ndarray] | None, dict[str, np.ndarray]]:
         sampling_metadata = self.input_batch.sampling_metadata
-        if sampling_metadata is None:
-            raise ValueError("On-device sampling requires sampling metadata.")
-
         num_reqs = self.input_batch.num_reqs
-        req_ids = tuple(self.input_batch.req_ids[:num_reqs])
         num_decode_reqs = num_reqs if self.is_kv_consumer else self.num_decodes
+        if not self._ods_sampling_buffers:
+            # Request-static values are views into InputBatch; the rest are reused.
+            batch, bsz = self.input_batch, self.model.decode_bsz
+            self._ods_sampling_buffers = {
+                "temperatures": batch.temperature_cpu[:bsz].reshape(-1, 1),
+                "top_ps": batch.top_p_cpu[:bsz].reshape(-1, 1),
+                "repetition_penalties": batch.repetition_penalties_cpu[:bsz].reshape(
+                    -1, 1
+                ),
+                "presence_penalties": batch.presence_penalties_cpu[:bsz].reshape(-1, 1),
+                "top_ks": np.empty((bsz, 1), dtype=np.int32),
+                "min_ps": np.empty((bsz, 1), dtype=np.float32),
+                "random_numbers": np.empty(
+                    (bsz, self.model.max_top_k_ids), dtype=np.float32
+                ),
+            }
+            self._ods_decode_buffers = {
+                name: np.empty_like(value)
+                for name, value in self._ods_sampling_buffers.items()
+            }
+            if self.is_kv_consumer:
+                self._ods_decode_buffers["last_accepted_output_tokens"] = np.empty(
+                    (bsz, 1), dtype=np.int64
+                )
         params = self._ods_sampling_buffers
-        decode_params = self._ods_decode_buffers if num_decode_reqs else None
-        layout = (req_ids, num_decode_reqs)
-        if layout != self._ods_sampling_layout:
-            # Remap cached rows only when batch membership/order or its split changes.
-            # InputBatch converts unrestricted top-k to vocab_size; clamp for ODS.
-            np.minimum(
-                self.input_batch.top_k_cpu[:num_reqs],
-                self.model.max_top_k_ids,
-                out=params["top_ks"][:num_reqs, 0],
-            )
-            for slot, req_id in enumerate(req_ids):
-                params["min_ps"][slot, 0] = self._ods_min_ps[req_id]
-            if decode_params is not None:
-                for row in range(self.model.decode_bsz):
-                    for name in params:
-                        if name != "random_numbers":
-                            decode_params[name][row] = params[name][
-                                row % num_decode_reqs
-                            ]
-            self._ods_sampling_layout = layout
+        # InputBatch converts unrestricted top-k to vocab_size; clamp for ODS.
+        np.minimum(
+            self.input_batch.top_k_cpu[:num_reqs],
+            self.model.max_top_k_ids,
+            out=params["top_ks"][:num_reqs, 0],
+        )
+        for slot, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+            params["min_ps"][slot, 0] = self.requests[req_id].sampling_params.min_p
 
         # Refresh draws in place every step using each active slot's generator.
         for slot in range(num_reqs):
@@ -1369,11 +1338,13 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 dtype=torch.float32,
                 out=torch.from_numpy(params["random_numbers"][slot]),
             )
-        if decode_params is not None:
-            for row in range(self.model.decode_bsz):
-                decode_params["random_numbers"][row] = params["random_numbers"][
-                    row % num_decode_reqs
-                ]
+        decode_params = None
+        if num_decode_reqs:
+            # Decode rows cycle through the active requests to fill the fixed QPC batch.
+            decode_params = self._ods_decode_buffers
+            rows = np.arange(self.model.decode_bsz) % num_decode_reqs
+            for name, value in params.items():
+                np.take(value[:num_decode_reqs], rows, axis=0, out=decode_params[name])
             if self.is_kv_consumer:
                 sentinel = np.iinfo(np.int32).max
                 accepted = decode_params["last_accepted_output_tokens"]
@@ -2367,8 +2338,6 @@ class QaicModelRunnerAoT(GPUModelRunner):
         # to unlink the SHM segment (else use-after-free on the torch tensor).
         freed_mm_hashes = list(scheduler_output.free_encoder_mm_hashes)
         super()._update_states(scheduler_output)
-        if self.model.include_sampler:
-            self._cache_ods_sampling_params(scheduler_output)
         if freed_mm_hashes and has_ec_transfer() and not get_ec_transfer().is_producer:
             get_ec_transfer().free_caches(freed_mm_hashes)
 

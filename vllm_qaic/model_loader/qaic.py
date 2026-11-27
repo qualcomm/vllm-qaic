@@ -683,12 +683,6 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
     ):
         decode_index = self.decode_execObj_idx
         if self.include_sampler:
-            if penalty_token_ids is None or len(penalty_token_ids) != len(
-                batch_indices
-            ):
-                raise ValueError(
-                    "ODS KV handoff requires token history for each request."
-                )
             self._ods_handoff_buffers.clear()
         for row, bidx in enumerate(batch_indices):
             if kv_caches[bidx] is not None and len(kv_caches[bidx]) > 0:
