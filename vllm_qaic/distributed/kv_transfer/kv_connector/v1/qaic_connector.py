@@ -257,13 +257,15 @@ class ShmBuffer:
             # (e.g. (num_vision_tokens, hidden)). Preserve the shape verbatim.
             return tuple(kv_shape)
         granularity = kv_info.granularity
-        if (
-            not use_full_kv_transfer
-            and granularity == KVGranularity.PARTIAL
-            and len(kv_shape) > 3
-        ):
-            seq_len = min(num_tokens, kv_shape[2])
-            return (1, kv_shape[1], seq_len) + kv_shape[3:]
+        if not use_full_kv_transfer and granularity == KVGranularity.PARTIAL:
+            kv_kind = kv_info.kv_kind if isinstance(kv_info, KVCacheInfo) else kv_info
+            ratio = kv_kind.compression_ratio
+            if len(kv_shape) > 3:
+                seq_len = min(-(-num_tokens // ratio), kv_shape[2])
+                return (1, kv_shape[1], seq_len) + kv_shape[3:]
+            if len(kv_shape) == 3 and kv_kind in (KVCacheKind.CSA1, KVCacheKind.CSA2):
+                seq_len = min(-(-num_tokens // ratio), kv_shape[1])
+                return (1, seq_len) + kv_shape[2:]
         # Use batch size 1 and keep other dims intact.
         return (1,) + kv_shape[1:]
 
