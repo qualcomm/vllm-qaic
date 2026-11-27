@@ -49,7 +49,7 @@ from qaic_disagg.kv_handoff.protocol import (
     QaicKvHandOffPutReq,
     QaicKvHandOffReqType,
 )
-from vllm_qaic.utils.qaic_utils import KVCacheKind
+from vllm_qaic.utils.qaic_utils import KVCacheInfo, KVCacheKind, KVGranularity
 from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -166,15 +166,15 @@ class ShmBuffer:
             raise ValueError("shape must be a list")
 
         self.buff_sizes = []
-        # kv_cache_info contains (kv_shape, kv_type, kv_size, kv_kind).
+        # kv_cache_info contains (shape, dtype, bytes, layout metadata).
         for info in kv_cache_info:
             kv_shape, kv_type, _ = info[:3]
-            kv_kind = info[3] if len(info) > 3 else KVCacheKind.FA
+            kv_info = info[3] if len(info) > 3 else KVCacheKind.FA
             _kv_shape = self._get_kv_shape(
                 use_full_kv_transfer,
                 kv_shape,
                 num_tokens,
-                kv_kind,
+                kv_info,
                 self.preserve_shape,
             )
             _bytes_of_buffer = 1
@@ -230,14 +230,14 @@ class ShmBuffer:
         # create list of numpy arrays
         for i, info in enumerate(self.kv_cache_info):
             kv_shape, kv_type, _ = info[:3]
-            kv_kind = info[3] if len(info) > 3 else KVCacheKind.FA
+            kv_info = info[3] if len(info) > 3 else KVCacheKind.FA
 
             with self.get_data(i) as buff:
                 _kv_shape = self._get_kv_shape(
                     use_full_kv_transfer,
                     kv_shape,
                     num_tokens,
-                    kv_kind,
+                    kv_info,
                     self.preserve_shape,
                 )
                 self.list_of_np_buff.append(
@@ -249,16 +249,19 @@ class ShmBuffer:
         use_full_kv_transfer: bool,
         kv_shape: tuple,
         num_tokens: int,
-        kv_kind: KVCacheKind,
+        kv_info: KVCacheInfo | KVCacheKind,
         preserve_shape: bool = False,
     ) -> tuple:
         if preserve_shape:
             # EC embeddings are fixed-size per image; dim0 is NOT a batch dim
             # (e.g. (num_vision_tokens, hidden)). Preserve the shape verbatim.
             return tuple(kv_shape)
-        # Recurrent and convolutional state tensors have rank 4, but their
-        # third dimension is not a context dimension. Slice only FA caches.
-        if not use_full_kv_transfer and kv_kind == KVCacheKind.FA and len(kv_shape) > 3:
+        granularity = kv_info.granularity
+        if (
+            not use_full_kv_transfer
+            and granularity == KVGranularity.PARTIAL
+            and len(kv_shape) > 3
+        ):
             seq_len = min(num_tokens, kv_shape[2])
             return (1, kv_shape[1], seq_len) + kv_shape[3:]
         # Use batch size 1 and keep other dims intact.
@@ -563,6 +566,7 @@ class QaicConnector(KVConnectorBase_V1):
             logger.debug("In connector.start_load_kv, but the kv_cache_info is None")
             return
         kv_cache_info = kwargs["kv_cache_info"]
+        native_kv_cache_info = kwargs.get("native_kv_cache_info", kv_cache_info)
 
         forward_context.additional_kwargs["cleanup_callback"] = self.cleanup_callback
         # Load the KV for each request
@@ -580,7 +584,9 @@ class QaicConnector(KVConnectorBase_V1):
                     )
                     kv_shm_buff_name = resp.payload[0]
                 kv_storage_shm_name, kv_buff = self.mem_bank.get_Storage(
-                    kv_cache_info=kv_cache_info,
+                    kv_cache_info=kv_cache_info
+                    if self.is_producer
+                    else native_kv_cache_info,
                     num_tokens=len(request.token_ids),
                     name=kv_shm_buff_name,
                 )

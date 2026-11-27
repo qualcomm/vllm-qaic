@@ -115,10 +115,10 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     act_fn=None,  # softmax not applied; raw logits returned
                 ),
             }
-            # "embed&token_classify" is BGE-M3 specific (upstream vLLM only registers it for
-            # BgeM3EmbeddingModel). vLLM's ModelConfig.get_pooling_task() gives it priority over
-            # "embed", so advertising it for every model makes the OpenAI server skip the
-            # /v1/embeddings endpoint (HTTP 501) unless --pooler-config '{"task": "embed"}' is passed.
+            # "embed&token_classify" is BGE-M3 specific (upstream vLLM only
+            # registers it for BgeM3EmbeddingModel). get_pooling_task() gives
+            # it priority over "embed", so advertising it for every model skips
+            # /v1/embeddings (HTTP 501) unless the pooler task is set to "embed".
             if "BgeM3EmbeddingModel" in (model_config.architectures or []):
                 poolers["embed&token_classify"] = BgeM3Pooler(
                     token_classify_pooler=_token_classify_pooler,
@@ -142,6 +142,11 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
         # TODO: Add new variables for turbo
 
         self.config = config
+        self.model_arch_hf = (
+            model_config.architectures or getattr(config, "architectures", None) or []
+        )
+        self.model_layer_types = getattr(config.get_text_config(), "layer_types", None)
+        self.native_kv_heads = model_config.get_total_num_kv_heads()
         self.vocab_size = config.get_text_config().vocab_size
         # `override_qaic_config["prefill_seq_len"]` defines the prefill chunk length.
         self.prefill_seq_len: int
@@ -463,6 +468,8 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
             stages=self.stages,
             cluster_id=cluster_id,
             use_async_scheduling=self.use_async_scheduling,
+            model_arch_hf=getattr(self, "model_arch_hf", None),
+            model_layer_types=getattr(self, "model_layer_types", None),
         )
         self.logits_ndim = self.session.get_logits_ndim()
         # Resolve the logits output dtype directly from the QPC binding so the
@@ -583,8 +590,21 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
 
     @property
     def kv_cache_info(self) -> list[tuple]:
-        # [(kv_shape, kv_type, kv_size, kv_kind)]
         return self.session.kv_cache_info
+
+    @property
+    def native_kv_cache_info(self) -> list[tuple]:
+        if self.session.cluster_id == "prefill":
+            return self.kv_cache_info
+        native_info = []
+        for kv_shape, kv_type, kv_size, info in self.kv_cache_info:
+            if info.transform_category is None:
+                native_info.append((kv_shape, kv_type, kv_size, info))
+                continue
+            native_shape = info.native_shape(kv_shape, self.native_kv_heads)
+            native_size = int(np.prod(native_shape)) * np.dtype(kv_type).itemsize
+            native_info.append((native_shape, kv_type, native_size, info))
+        return native_info
 
     def get_io_shape_and_dtype(
         self, buffer_name: str, is_input: bool = True
@@ -614,17 +634,17 @@ class QaicCausalLM(nn.Module, SupportsLoRA):
                     f"expected {len(self.kv_cache_info)} buffers, "
                     f"got {len(kv_caches[bidx])}"
                 )
-                for buff_idx in range(len(kv_caches[bidx])):
+                for buff_idx, (kv_shape, _, _, info) in enumerate(self.kv_cache_info):
                     buf = kv_caches[bidx][buff_idx]
-                    target_heads = self.kv_cache_info[buff_idx][0][1]
-                    # broadcast MLA buffers across num heads (zero-copy)
-                    if buf.size > 0 and target_heads != buf.shape[1]:
+                    if info.transform_category is not None:
+                        kv_caches[bidx][buff_idx] = info.transform(buf, kv_shape)
+                    elif buf.size > 0 and kv_shape[1] != buf.shape[1]:
                         assert buf.shape[1] == 1, (
                             f"MLA KV head expansion expects num_heads=1 in received "
                             f"buffer, got {buf.shape[1]} (shape={buf.shape})"
                         )
                         kv_caches[bidx][buff_idx] = np.broadcast_to(
-                            buf, (buf.shape[0], target_heads) + buf.shape[2:]
+                            buf, (buf.shape[0], kv_shape[1]) + buf.shape[2:]
                         )
 
                 # Update kv cache setDataWith

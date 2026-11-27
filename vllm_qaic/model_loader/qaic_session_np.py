@@ -13,7 +13,7 @@ import numpy as np
 import torch
 
 from vllm_qaic.logger import init_logger
-from vllm_qaic.utils.qaic_utils import KVCacheKind
+from vllm_qaic.utils.qaic_utils import KVCacheInfo, KVCacheKind
 
 try:
     import qaicrt
@@ -114,6 +114,8 @@ class QAICInferenceSession:
         stages: int | None = 1,
         cluster_id: str | None = None,
         use_async_scheduling: bool = False,
+        model_arch_hf: list[str] | None = None,
+        model_layer_types: list[str] | None = None,
     ):
         self.stages: int = stages if stages is not None else 1
         self.cluster_id = cluster_id
@@ -234,6 +236,11 @@ class QAICInferenceSession:
             os.getenv(VLLM_QAIC_USE_LEGACY_SLICING_SPEC_ENV, "0") == "1"
         )
         self.cluster_id = cluster_id
+        self.model_layer_types = model_layer_types or []
+        self._is_minimax_m3 = any(
+            "minimaxm3" in arch.lower().replace("_", "").replace("-", "")
+            for arch in (model_arch_hf or [])
+        )
 
         self.decode_buff_map = []
         for name in self.input_names:
@@ -262,14 +269,11 @@ class QAICInferenceSession:
         self.prefill_buff_map.sort(key=_kv_sort_key)
 
         self.kv_cache_info = []
-        for name, _ in self.decode_buff_map:
-            if self._is_kv_cache_name(name):
-                _binding = self.bindings[self.binding_index_map[name]]
-                kv_shape = tuple(_binding.dims)
-                kv_type = aic_to_np_dtype_mapping[_binding.type]
-                kv_size = _binding.size
-                kv_kind = self._classify_kv_binding(name)
-                self.kv_cache_info.append((kv_shape, kv_type, kv_size, kv_kind))
+        for name, binding_index in self.decode_buff_map:
+            self.kv_cache_info.append(self._make_kv_cache_info(name, binding_index))
+        if not self.decode_buff_map:
+            for name, binding_index in self.prefill_buff_map:
+                self.kv_cache_info.append(self._make_kv_cache_info(name, binding_index))
 
         # Hybrid KV detected if more than one KV shape found
         _num_kv_cache_info = len(set(self.kv_cache_info))
@@ -279,7 +283,7 @@ class QAICInferenceSession:
         if _num_kv_cache_info:
             buffer_spec_json = (
                 self.get_json_for_kv_cache_slicing()
-                if not self.is_hybrid_kv
+                if not (self.is_hybrid_kv or self._is_minimax_m3)
                 else self.get_json_for_full_kv_cache_slicing()
             )
             self.kv_slicing_spec_handle = self.get_slicing_spec_handle(
@@ -303,19 +307,41 @@ class QAICInferenceSession:
             if name.startswith("log"):
                 self.prefill_buff_map.append((name, self.binding_index_map[name]))
 
-    def _classify_kv_binding(
-        self,
-        name: str,
-    ) -> KVCacheKind:
-        name = name.lower()
-        if "conv" in name:
+    def _make_kv_cache_info(self, name: str, binding_index: int) -> tuple:
+        binding = self.bindings[binding_index]
+        kv_shape = tuple(binding.dims)
+        kv_type = aic_to_np_dtype_mapping[binding.type]
+        kv_size = binding.size
+        kv_kind = self._classify_kv_binding(name)
+        granularity = kv_kind.granularity
+        transform_category = "T1" if self._is_minimax_m3 else None
+        return KVCacheInfo(kv_kind, granularity, transform_category).apply(
+            kv_shape, kv_type, kv_size
+        )
+
+    def _classify_kv_binding(self, name: str) -> KVCacheKind:
+        lower_name = name.lower()
+        if "conv" in lower_name:
             return KVCacheKind.LA_CONV
-        elif "recurrent" in name:
+        if "recurrent" in lower_name:
             return KVCacheKind.LA_RECURRENT
-        else:
-            return KVCacheKind.FA
+        if self._is_minimax_m3:
+            if "index_key" in lower_name:
+                return KVCacheKind.INDEX
+            part = lower_name.split(".")[1] if "." in lower_name else "0"
+            layer = int(part.split("_")[0])
+            if (
+                layer < len(self.model_layer_types)
+                and "sparse" in self.model_layer_types[layer].lower()
+            ):
+                return KVCacheKind.MSA
+        return KVCacheKind.FA
 
     def _is_kv_cache_name(self, name: str) -> bool:
+        if self._is_minimax_m3 and name.startswith(
+            ("past_key", "past_value", "index_key")
+        ):
+            return True
         if self.use_legacy_slicing_spec:
             return name.startswith("past_key") or name.startswith("past_value")
         return VLLM_KV_CACHE_PREFIX in name
@@ -343,7 +369,7 @@ class QAICInferenceSession:
                 size = aic_to_np_dtype_mapping[binding.type]
                 base_name = name.replace("_RetainedState", "")
                 kv_kind = self._classify_kv_binding(name)
-                if kv_kind == KVCacheKind.FA:
+                if kv_kind in (KVCacheKind.FA, KVCacheKind.MSA, KVCacheKind.INDEX):
                     dimspec = _full_attn_dim_spec
                 else:
                     dimspec = _full_state_dim_spec
