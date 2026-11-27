@@ -15,7 +15,7 @@ from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import copy, deepcopy
 from dataclasses import dataclass
 from queue import Queue
-from typing import TYPE_CHECKING, NamedTuple, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 import numpy as np
 import torch
@@ -133,6 +133,7 @@ class QaicExecuteModelState(NamedTuple):
         int | None
     )  # for kv_consumer this also include the last prompt token
     discard_request_mask_np: np.ndarray | None  # used to calculate partial prefills
+    ods_next_token: dict[str, Any] | None  # used to capture next token in case of ods
 
 
 class QaicAsyncPoolingModelRunnerOutput(AsyncModelRunnerOutput):
@@ -283,25 +284,44 @@ class QaicAsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
             )
             return self._output
 
-        # 1. Wait for inference completiong
+        # 1. Wait for inference completion
         mr.complete_all_inf(
             state.pending_prefill_exec_queue, state.num_decodes_executed
         )
-        # 2. Compute hidden states + logits
-        hidden_states, logits = mr._compute_hidden_states_and_logits(
-            state.hidden_states_decode,
-            state.hidden_states_prefill,
-            state.num_decodes_executed,
-            spec_decode_metadata=state.spec_decode_metadata,
-        )
-        # Apply structured output bitmasks if present.
-        if self._grammar_output is not None:
-            apply_grammar_bitmask(
-                state.scheduler_output, self._grammar_output, mr.input_batch, logits
-            )
 
-        sampler_output = mr._sample(logits, state.spec_decode_metadata)
-        mr.input_batch.prev_sampled_token_ids = None
+        # ODS outputs the next token directly, so logits are dummy tensors used
+        # only to keep the vLLM bookkeeping path intact.
+        if mr.model.include_sampler:
+            if self._grammar_output is not None:
+                raise ValueError(
+                    "Guided decoding is not supported with on-device sampling; "
+                    "_grammar_output must be None"
+                )
+            logits = torch.zeros(mr.input_batch.num_reqs, 1)
+            hidden_states = logits
+            sampling_metadata = mr.input_batch.sampling_metadata
+            mr.input_batch.update_async_output_token_ids()
+            sampler_output = mr.model.sample(
+                logits,
+                sampling_metadata,
+                state.ods_next_token,
+            )
+            mr.input_batch.prev_sampled_token_ids = None
+        else:
+            hidden_states, logits = mr._compute_hidden_states_and_logits(
+                state.hidden_states_decode,
+                state.hidden_states_prefill,
+                state.num_decodes_executed,
+                spec_decode_metadata=state.spec_decode_metadata,
+            )
+            # Apply structured output bitmasks if present.
+            if self._grammar_output is not None:
+                apply_grammar_bitmask(
+                    state.scheduler_output, self._grammar_output, mr.input_batch, logits
+                )
+
+            sampler_output = mr._sample(logits, state.spec_decode_metadata)
+            mr.input_batch.prev_sampled_token_ids = None
 
         # 3. Book keep to update input batch
         (
@@ -320,6 +340,9 @@ class QaicAsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
             hidden_states,
             state.scheduler_output.total_num_scheduled_tokens,
         )
+
+        if mr.model.include_sampler:
+            num_nans_in_logits = None
 
         # 4. Clear ephemeral state to unblock future batches
         mr.execute_model_state = None
@@ -570,6 +593,8 @@ class QaicModelRunnerAoT(GPUModelRunner):
         self.num_kv_heads = self.model_config.get_num_kv_heads(self.parallel_config)
         self.head_size = self.model_config.get_head_size()
         self.execute_model_state: QaicExecuteModelState | None = None
+        self._ods_sampling_buffers: dict[str, np.ndarray] = {}
+        self._ods_decode_buffers: dict[str, np.ndarray] = {}
         # Undrained AsyncModelRunnerOutput from sample_tokens(). Drained early
         # by the next execute_model()'s synchronize_input_prep() if it needs
         # this batch's exec object back before the engine calls get_output().
@@ -1265,6 +1290,91 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 mm_kwargs_list.append(_kw)
         return mm_kwargs_list
 
+    def _prepare_ods_sampling_params(
+        self,
+    ) -> tuple[dict[str, np.ndarray] | None, dict[str, np.ndarray]]:
+        sampling_metadata = self.input_batch.sampling_metadata
+        num_reqs = self.input_batch.num_reqs
+        num_decode_reqs = num_reqs if self.is_kv_consumer else self.num_decodes
+        if not self._ods_sampling_buffers:
+            # Request-static values are views into InputBatch; the rest are reused.
+            batch, bsz = self.input_batch, self.model.decode_bsz
+            self._ods_sampling_buffers = {
+                "temperatures": batch.temperature_cpu[:bsz].reshape(-1, 1),
+                "top_ps": batch.top_p_cpu[:bsz].reshape(-1, 1),
+                "repetition_penalties": batch.repetition_penalties_cpu[:bsz].reshape(
+                    -1, 1
+                ),
+                "presence_penalties": batch.presence_penalties_cpu[:bsz].reshape(-1, 1),
+                "top_ks": np.empty((bsz, 1), dtype=np.int32),
+                "min_ps": np.empty((bsz, 1), dtype=np.float32),
+                "random_numbers": np.empty(
+                    (bsz, self.model.max_top_k_ids), dtype=np.float32
+                ),
+            }
+            self._ods_decode_buffers = {
+                name: np.empty_like(value)
+                for name, value in self._ods_sampling_buffers.items()
+            }
+            if self.is_kv_consumer:
+                self._ods_decode_buffers["last_accepted_output_tokens"] = np.empty(
+                    (bsz, 1), dtype=np.int64
+                )
+        params = self._ods_sampling_buffers
+        # InputBatch converts unrestricted top-k to vocab_size; clamp for ODS.
+        np.minimum(
+            self.input_batch.top_k_cpu[:num_reqs],
+            self.model.max_top_k_ids,
+            out=params["top_ks"][:num_reqs, 0],
+        )
+        for slot, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+            params["min_ps"][slot, 0] = self.requests[req_id].sampling_params.min_p
+
+        # Refresh draws in place every step using each active slot's generator.
+        for slot in range(num_reqs):
+            torch.rand(
+                self.model.max_top_k_ids,
+                generator=sampling_metadata.generators.get(slot),
+                dtype=torch.float32,
+                out=torch.from_numpy(params["random_numbers"][slot]),
+            )
+        decode_params = None
+        if num_decode_reqs:
+            # Decode rows cycle through the active requests to fill the fixed QPC batch.
+            decode_params = self._ods_decode_buffers
+            rows = np.arange(self.model.decode_bsz) % num_decode_reqs
+            for name, value in params.items():
+                np.take(value[:num_decode_reqs], rows, axis=0, out=decode_params[name])
+            if self.is_kv_consumer:
+                sentinel = np.iinfo(np.int32).max
+                accepted = decode_params["last_accepted_output_tokens"]
+                accepted.fill(sentinel)
+                accepted[:num_reqs, 0] = self.input_ids.cpu.numpy()[:num_reqs]
+                # Replaying the last prompt token must not count as generated text.
+                first_step = (
+                    self.input_batch.num_computed_tokens_cpu[:num_reqs]
+                    < self.input_batch.num_prompt_tokens[:num_reqs]
+                )
+                accepted[np.flatnonzero(first_step), 0] = sentinel
+        prefill_params = {
+            key: values[self.num_decodes : num_reqs] for key, values in params.items()
+        }
+        return decode_params, prefill_params
+
+    def _dummy_ods_sampling_params(self, batch_size: int) -> dict[str, np.ndarray]:
+        scalar_shape = (batch_size, 1)
+        return {
+            "temperatures": np.ones(scalar_shape, dtype=np.float32),
+            "top_ks": np.ones(scalar_shape, dtype=np.int32),
+            "top_ps": np.zeros(scalar_shape, dtype=np.float32),
+            "min_ps": np.zeros(scalar_shape, dtype=np.float32),
+            "repetition_penalties": np.zeros(scalar_shape, dtype=np.float32),
+            "presence_penalties": np.zeros(scalar_shape, dtype=np.float32),
+            "random_numbers": np.random.default_rng(0)
+            .random((batch_size, self.model.max_top_k_ids))
+            .astype(np.float32),
+        }
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -1379,7 +1489,9 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 else self.batch_indices[:num_scheduled_tokens]
             )
             if "block_table" in self.model.session.input_names:
-                decode_block_table: np.ndarray = self.block_table[: self.num_decodes]
+                decode_block_table: np.ndarray | None = self.block_table[
+                    : self.num_decodes
+                ]
                 decode_slot_ids: np.ndarray = self.slot_id[: self.num_decodes]
             else:
                 decode_block_table, decode_slot_ids = None, None
@@ -1420,7 +1532,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 : self.input_batch.num_reqs
             ].copy()
             if "block_table" in self.model.session.input_names:
-                prefill_block_table: np.ndarray = self.block_table[
+                prefill_block_table: np.ndarray | None = self.block_table[
                     self.num_decodes : self.input_batch.num_reqs
                 ]
                 prefill_slot_ids: np.ndarray = self.slot_id[
@@ -1475,7 +1587,35 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 and not self.is_kv_producer
             )
 
+            sampling_params_decode = sampling_params_prefill = None
+            if self.model.include_sampler:
+                (
+                    sampling_params_decode,
+                    sampling_params_prefill,
+                ) = self._prepare_ods_sampling_params()
+
+            ods_next_token = None
+            if self.model.include_sampler:
+                # Keep ordered prefill chunks alive; merge their final token per row.
+                ods_next_token = self.model.decode_next_tokens
+                ods_next_token["next_tokens"].fill(-1)
+                ods_next_token["_prefill_sources"] = []
+                if self.model.return_pdfs:
+                    ods_next_token["probs"].fill(0)
+                    ods_next_token["_prefill_probs_sources"] = []
+
             if prefill_input_ids.size > 0:
+                penalty_token_ids = None
+                if self.is_kv_consumer and self.model.include_sampler:
+                    penalty_token_ids = [
+                        (
+                            self.requests[req_id].prompt_token_ids or [],
+                            self.requests[req_id].output_token_ids,
+                        )
+                        for req_id in self.input_batch.req_ids[
+                            self.num_decodes : num_reqs
+                        ]
+                    ]
                 prefill_req_ids = self.input_batch.req_ids[self.num_decodes : num_reqs]
                 qaic_prefill_slot_ids = np.arange(
                     len(prefill_req_ids),
@@ -1492,7 +1632,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 )
                 hidden_states_prefill = (
                     self.create_logits_np(len(prefill_cum_sum), self.model.vocab_size)
-                    if not self.is_kv_consumer
+                    if not self.is_kv_consumer and not self.model.include_sampler
                     else None
                 )
                 # Per-prefill-request total prompt length, for CCL bucket selection.
@@ -1532,6 +1672,9 @@ class QaicModelRunnerAoT(GPUModelRunner):
                     lora_ids=prefill_lora_ids,
                     num_prompt_tokens_prefill=num_prompt_tokens_prefill,
                     tlm_prefill_hidden_chunks=tlm_prefill_hidden_chunks,
+                    sampling_params=sampling_params_prefill,
+                    prefill_output_offset=self.num_decodes,
+                    penalty_token_ids=penalty_token_ids,
                 )
                 if _dflash_prefill:
                     # Prefill is sync for DFlash; per-chunk hidden buffers are
@@ -1552,8 +1695,12 @@ class QaicModelRunnerAoT(GPUModelRunner):
                     )
 
             if decode_input_ids.size > 0:
-                hidden_states_decode = self.create_logits_np(
-                    self.model.decode_bsz, self.model.vocab_size, self.active_k + 1
+                hidden_states_decode = (
+                    None
+                    if self.model.include_sampler
+                    else self.create_logits_np(
+                        self.model.decode_bsz, self.model.vocab_size, self.active_k + 1
+                    )
                 )
                 self.model(
                     input_ids=decode_input_ids,
@@ -1566,6 +1713,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
                     slot_id=decode_slot_ids,
                     lora_ids=decode_lora_ids,
                     dflash_decode_hidden_buf=getattr(self, "_tlm_hidden_buf", None),
+                    sampling_params=sampling_params_decode,
                 )
         # mark the current request as finished with PrefillBank so that it's slots are
         # freed out of scheduler loop
@@ -1576,13 +1724,21 @@ class QaicModelRunnerAoT(GPUModelRunner):
         num_decodes_executed = (
             self.num_decodes if not self.is_kv_consumer else len(self.cu_num_tokens)
         )
+
         if not self.use_async_scheduling:
-            hidden_states, logits = self._compute_hidden_states_and_logits(
-                hidden_states_decode,
-                hidden_states_prefill,
-                num_decodes_executed,
-                spec_decode_metadata=spec_decode_metadata,
-            )
+            if self.model.include_sampler:
+                # Dummy logits and hidden states for bookkeeping
+                logits = torch.zeros(
+                    (self.input_batch.num_reqs, 1), dtype=torch.float32
+                )
+                hidden_states = logits
+            else:
+                hidden_states, logits = self._compute_hidden_states_and_logits(
+                    hidden_states_decode,
+                    hidden_states_prefill,
+                    num_decodes_executed,
+                    spec_decode_metadata=spec_decode_metadata,
+                )
 
         spec_decode_common_attn_metadata = None
         if self.speculative_config is not None:
@@ -1625,6 +1781,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
             pending_prefill_exec_queue,
             num_decodes_executed,
             discard_request_mask_np,
+            ods_next_token,  # ODS next token.
         )
         self.kv_connector_output = kv_connector_output
         return None
@@ -1696,12 +1853,18 @@ class QaicModelRunnerAoT(GPUModelRunner):
             cudagraph_stats,
             slot_mappings,
             *_,
+            ods_next_token,
         ) = self.execute_model_state
         # Clear ephemeral state.
         self.execute_model_state = None
 
         # Apply structured output bitmasks if present.
         if grammar_output is not None:
+            if self.model.include_sampler:
+                raise ValueError(
+                    "Guided decoding is not supported with on-device sampling; "
+                    "grammar_output must be None"
+                )
             apply_grammar_bitmask(
                 scheduler_output, grammar_output, self.input_batch, logits
             )
@@ -1711,7 +1874,15 @@ class QaicModelRunnerAoT(GPUModelRunner):
                 torch.zeros((len(self.batch_indices), 1), dtype=torch.int64)
             )
         else:
-            sampler_output = self._sample(logits, spec_decode_metadata)
+            if self.model.include_sampler:
+                self.input_batch.update_async_output_token_ids()
+                sampler_output = self.model.sample(
+                    logits,
+                    self.input_batch.sampling_metadata,
+                    ods_next_token,
+                )
+            else:
+                sampler_output = self._sample(logits, spec_decode_metadata)
 
         # AOT-only path: eager mode returns early via super().execute_model() above.
         self._draft_token_ids = None
@@ -1764,6 +1935,8 @@ class QaicModelRunnerAoT(GPUModelRunner):
             hidden_states,
             scheduler_output.total_num_scheduled_tokens,
         )
+        if self.model.include_sampler:
+            num_nans_in_logits = None
 
         # DFlash: advance DLM KV cache for prefilled requests every step, even when
         # decode drafting is skipped (e.g. sequence too long for the drafter).
@@ -1972,6 +2145,8 @@ class QaicModelRunnerAoT(GPUModelRunner):
             return
         if self.model.is_vision_encoder:
             return
+        if self.model.return_pdfs:
+            return
 
         # Decode (SpD-aware: allocate max_decode_tokens per request)
         decode_bsz = self.model.decode_bsz
@@ -1997,6 +2172,11 @@ class QaicModelRunnerAoT(GPUModelRunner):
         if self.model.is_multimodal_model and self.model.default_mm_kwargs:
             decode_mm_kwargs_list = [self.model.default_mm_kwargs] * decode_bsz
 
+        decode_sampling_params = (
+            self._dummy_ods_sampling_params(decode_bsz)
+            if self.model.include_sampler
+            else None
+        )
         decode_logits = self.create_logits_np(
             self.model.decode_bsz, self.model.vocab_size, self.max_decode_tokens
         )
@@ -2009,6 +2189,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
             logits=decode_logits,
             mm_kwargs_list=decode_mm_kwargs_list,
             dflash_decode_hidden_buf=getattr(self, "_tlm_hidden_buf", None),
+            sampling_params=decode_sampling_params,
             block_table=decode_block_table,
             slot_id=decode_slot_ids,
         )
@@ -2043,6 +2224,11 @@ class QaicModelRunnerAoT(GPUModelRunner):
         if self.model.is_multimodal_model and self.model.default_mm_kwargs:
             mm_kwargs_list = [self.model.default_mm_kwargs] * prefill_bsz
 
+        prefill_sampling_params = (
+            self._dummy_ods_sampling_params(prefill_bsz)
+            if self.model.include_sampler
+            else None
+        )
         prefill_logits = self.create_logits_np(prefill_bsz, self.model.vocab_size)
         pending_prefill_exec_queue = self.model(
             input_ids=prefill_input_ids,
@@ -2053,6 +2239,7 @@ class QaicModelRunnerAoT(GPUModelRunner):
             prefill_cum_sum=prefill_cum_sum,
             mm_kwargs_list=mm_kwargs_list,
             logits=prefill_logits,
+            sampling_params=prefill_sampling_params,
             block_table=prefill_block_table,
             slot_id=prefill_slot_ids,
         )

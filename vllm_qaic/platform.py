@@ -483,6 +483,13 @@ class QaicPlatform(Platform):
         else:
             override_qaic_config = {}
             additional_config["override_qaic_config"] = override_qaic_config
+        # _clean_config maps only lowercase true/false; "False" or "no" stay truthy.
+        for flag in ("aic_include_sampler", "aic_include_guided_decoding"):
+            if isinstance(override_qaic_config.get(flag), str):
+                override_qaic_config[flag] = override_qaic_config[flag].lower() in (
+                    "true",
+                    "1",
+                )
         # a hack for online serving's Async EngineArgs
         if vllm_config.device_config.device_type != cls.device_type:
             vllm_config.device_config.device_type = cls.device_type
@@ -696,15 +703,19 @@ class QaicPlatform(Platform):
             cls._configure_pyt_compilation(vllm_config)
 
         on_device_sampling_en = override_qaic_config.get("aic_include_sampler", False)
-        if isinstance(on_device_sampling_en, str):
-            on_device_sampling_en = on_device_sampling_en.lower() in [
-                "true",
-                "1",
-            ]
 
         assert not (on_device_sampling_en and vllm_config.speculative_config), (
             "SPD with On-device sampling is not yet supported for QAIC backend"
         )
+        if on_device_sampling_en and override_qaic_config.get(
+            "aic_include_guided_decoding", False
+        ):
+            raise ValueError("Guided decoding is not supported with on-device sampling")
+        if on_device_sampling_en:
+            assert not (
+                vllm_config.kv_transfer_config
+                and vllm_config.kv_transfer_config.kv_role != "kv_consumer"
+            ), "On-device sampling with disaggregated serving requires kv_consumer role"
 
         # Disaggregated prefill/decode is supported standalone for now
         if vllm_config.kv_transfer_config:
@@ -726,16 +737,6 @@ class QaicPlatform(Platform):
                 "Prefix caching with KV-role 'kv_consumer' or 'kv_both' not "
                 "yet supported for QAIC backend"
             )
-            if (
-                on_device_sampling_en
-                and vllm_config.kv_transfer_config.kv_role == "kv_producer"
-            ):
-                logger.warning_once(
-                    "On-device sampling with Disaggregated serving is only "
-                    "supported in Decode cluster with no support for "
-                    "repetition penalty"
-                )
-
             if vllm_config.kv_transfer_config.kv_role == "kv_producer":
                 stages = int(override_qaic_config.get("stages"))
                 assert not scheduler_config.async_scheduling or (

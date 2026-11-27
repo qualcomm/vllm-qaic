@@ -66,6 +66,7 @@ def create_qeff_model_and_processor(
     kv_offload: bool,
     override_cfg: dict,
     tokenizer_obj,
+    decode_bsz: int,
 ):
     from QEfficient import QEFFAutoModelForCausalLM, QEFFAutoModelForImageTextToText
 
@@ -74,6 +75,7 @@ def create_qeff_model_and_processor(
         num_cores=NUM_CORES,
         prefill_seq_len=seq_len,
         ctx_len=ctx_len,
+        batch_size=decode_bsz,
         mxfp6_matmul=dtype == "mxfp6",
         mxint8_kv_cache=kv_dtype == "mxint8",
         aic_enable_depth_first="dfs" not in override_cfg,

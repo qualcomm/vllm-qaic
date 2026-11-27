@@ -26,6 +26,8 @@ Status of vLLM features on Qualcomm Cloud AI hardware.
 | Suffix | ✅ | ❌ | |
 | Draft model | ✅ | ❌ | Separate DLM on same device |
 | DFlash (block-diffusion draft) | ✅ | ❌ | Separate DLM |
+| **Sampling** | | | |
+| On-device sampling | ✅ | ❌ | Guided decoding is not supported with ODS; host guided decoding works without ODS |
 | **Advanced Features** | | | |
 | LoRA adapters | ✅ | ❌ | Hot-swap adapters |
 | Disaggregated serving | ✅ | ❌ | xEyPzD encode/prefill/decode split |

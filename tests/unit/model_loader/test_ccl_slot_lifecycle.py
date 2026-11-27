@@ -62,6 +62,7 @@ def make_model(monkeypatch):
     def create(role="kv_producer", ccl=True, async_scheduling=True):
         model = SimpleNamespace(
             full_batch_size=4,
+            include_sampler=False,
             use_async_scheduling=async_scheduling,
             prefill_bsz=1,
             decode_bsz=4,

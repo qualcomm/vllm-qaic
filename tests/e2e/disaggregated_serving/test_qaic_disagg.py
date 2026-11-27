@@ -252,3 +252,46 @@ class TestDisaggregatedServingBasic:
                         ), f"Token count mismatch for prompt: {prompt}"
                 except Exception as e:
                     pytest.fail(f"Request failed for prompt '{prompt[:50]}...': {e}")
+
+
+@pytest.mark.qaic_disagg_installed
+@pytest.mark.qaic_aot_mode("requires qaic_disagg's AoT QPC prefill/decode deployment")
+@pytest.mark.qaic_test_config(
+    model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+    ctx_len=2048,
+    seq_len=256,
+    dtype="mxfp6",
+    decode_bsz=4,
+    num_prefill_workers=1,
+    prefill_device_group_size=2,
+    num_decode_workers=1,
+    decode_device_group_size=2,
+    prefill_max_num_seqs=2,
+    decode_override_qaic_config={"aic_include_sampler": True},
+)
+class TestDisaggregatedServingOnDeviceSampling:
+    """On-device sampling on the decode (KV-consumer) side. The prefill worker
+    only builds KV; the first token is sampled on decode."""
+
+    def test_generation(self, disagg_server):
+        test_config = disagg_server
+        port = test_config["disaggregated_server_port"]
+        timeout = test_config["client_request_timeout"]
+        prompts = get_prompts(
+            "/v1/completions", ctx_len=test_config["ctx_len"], max_tokens=8
+        )[:4]
+
+        def ask(prompt):
+            return query_server(
+                prompt,
+                max_tokens=8,
+                temperature=0.0,
+                port=port,
+                timeout=timeout,
+            )
+
+        with ThreadPoolExecutor(max_workers=len(prompts)) as pool:
+            responses = list(pool.map(ask, prompts))
+        for response in responses:
+            assert response.status_code == 200, response.text
+            assert response.json()["choices"][0]["text"], response.text

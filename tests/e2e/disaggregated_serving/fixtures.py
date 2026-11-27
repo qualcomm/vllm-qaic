@@ -188,6 +188,7 @@ def _disagg_test_config(request, pytestconfig, host, port, device_pool_ids):
         else None
     )
     config["kv_store_size"] = kwargs.get("kv_store_size")
+    config["decode_override_qaic_config"] = kwargs.get("decode_override_qaic_config")
     return config
 
 
@@ -238,6 +239,11 @@ def disagg_server(request, _disagg_test_config):
         )
     if test_config["kv_store_size"] is not None:
         commands.append(f"--kv-store-size={test_config['kv_store_size']}")
+    if test_config["decode_override_qaic_config"] is not None:
+        commands += [
+            "--decode-override-qaic-config",
+            json.dumps(test_config["decode_override_qaic_config"]),
+        ]
 
     test_config["constant_factor"] = (
         decode_bsz * test_config["num_decode_workers"]
