@@ -5,10 +5,13 @@
 
 """Shared QAIC utilities used across vLLM"""
 
+from dataclasses import dataclass
+from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import regex as re
-from enum import Enum
+
 from vllm_qaic.logger import init_logger
 
 if TYPE_CHECKING:
@@ -17,12 +20,123 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+class KVGranularity(Enum):
+    """Whether handoff transfers a context prefix or the complete state."""
+
+    PARTIAL = "PARTIAL"
+    FULL = "FULL"
+
+
 class KVCacheKind(Enum):
     """Simple enum class to store different type of kv$ supported on qaic"""
 
     FA = "FA"
     LA_CONV = "LA_CONV"
     LA_RECURRENT = "LA_RECURRENT"
+    MSA = "MSA"
+    INDEX = "INDEX"
+    CSA0 = "CSA0"
+    CSA1 = "CSA1"
+    CSA2 = "CSA2"
+    CSA3 = "CSA3"
+    CSA4 = "CSA4"
+    HCA0 = "HCA0"
+    HCA1 = "HCA1"
+    HCA2 = "HCA2"
+    HCA3 = "HCA3"
+    SWA = "SWA"
+
+    @property
+    def granularity(self) -> KVGranularity:
+        if self in (
+            KVCacheKind.FA,
+            KVCacheKind.MSA,
+            KVCacheKind.INDEX,
+            KVCacheKind.CSA1,
+            KVCacheKind.CSA2,
+        ):
+            return KVGranularity.PARTIAL
+        return KVGranularity.FULL
+
+    @property
+    def compression_ratio(self) -> int:
+        return 4 if self in (KVCacheKind.CSA1, KVCacheKind.CSA2) else 1
+
+
+@dataclass(frozen=True)
+class KVCacheInfo:
+    """Per-binding KV metadata and its handoff transform policy."""
+
+    TS = 16
+
+    kv_kind: KVCacheKind
+    granularity: KVGranularity
+    transform_category: str | None
+
+    @staticmethod
+    def _t1(cache: np.ndarray, cp: int) -> np.ndarray:
+        if cache.ndim == 3:
+            cache = cache[:, None]
+        batch, heads, slots, features = cache.shape
+        padded_slots = -(-slots // cp) * cp
+        if padded_slots != slots:
+            cache = np.pad(cache, ((0, 0), (0, 0), (0, padded_slots - slots), (0, 0)))
+        grouped = cache.reshape(batch, heads, padded_slots // cp, cp, features)
+        rows = grouped.transpose(0, 3, 1, 2, 4)
+        return np.ascontiguousarray(
+            rows.reshape(batch, cp * heads, padded_slots // cp, features)
+        )
+
+    def apply(self, kv_shape: tuple, kv_type: Any, kv_size: int) -> tuple:
+        """Attach the transform policy to one QPC binding descriptor."""
+        return kv_shape, kv_type, kv_size, self
+
+    def native_shape(self, decode_shape: tuple, num_kv_heads: int) -> tuple:
+        if self.transform_category is None:
+            return tuple(decode_shape)
+        batch, _, slots, features = decode_shape
+        if self.transform_category == "T1" and self.kv_kind in (
+            KVCacheKind.FA,
+            KVCacheKind.MSA,
+            KVCacheKind.INDEX,
+        ):
+            heads = 1 if self.kv_kind == KVCacheKind.INDEX else num_kv_heads
+            cp = self.TS // heads
+            return (batch, heads, slots * cp, features)
+        if self.transform_category in ("T1", "T2"):
+            return (batch, self.TS * slots, features)
+        if self.transform_category == "T3":
+            return (batch, slots, features)
+        raise ValueError(f"Unsupported KV transform {self.transform_category!r}")
+
+    @staticmethod
+    def _t2(cache: np.ndarray, cp: int) -> np.ndarray:
+        if cache.ndim == 4 and cache.shape[1] == 1:
+            cache = cache[:, 0]
+        batch, slots, features = cache.shape
+        return np.ascontiguousarray(cache.reshape(batch, cp, slots // cp, features))
+
+    @staticmethod
+    def _t3(cache: np.ndarray, cp: int) -> np.ndarray:
+        if cache.ndim == 4 and cache.shape[1] == 1:
+            cache = cache[:, 0]
+        return np.repeat(cache[:, None], cp, axis=1)
+
+    def transform(self, cache: np.ndarray, decode_shape: tuple) -> np.ndarray:
+        if self.transform_category is None or cache.size == 0:
+            return cache
+        if cache.ndim == 4 and cache.shape[1] == decode_shape[1]:
+            return cache
+        cp = self.TS
+        if self.transform_category == "T1":
+            if self.kv_kind in (KVCacheKind.FA, KVCacheKind.MSA):
+                cp = self.TS // cache.shape[1]
+            return self._t1(cache, cp)
+        if self.transform_category == "T2":
+            return self._t2(cache, cp)
+        if self.transform_category == "T3":
+            return self._t3(cache, cp)
+        raise ValueError(f"Unsupported KV transform {self.transform_category!r}")
 
 
 def compute_max_decode_tokens(

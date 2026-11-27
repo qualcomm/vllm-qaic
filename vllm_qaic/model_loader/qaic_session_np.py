@@ -13,7 +13,7 @@ import numpy as np
 import torch
 
 from vllm_qaic.logger import init_logger
-from vllm_qaic.utils.qaic_utils import KVCacheKind
+from vllm_qaic.utils.qaic_utils import KVCacheInfo, KVCacheKind, KVGranularity
 
 try:
     import qaicrt
@@ -114,6 +114,8 @@ class QAICInferenceSession:
         stages: int | None = 1,
         cluster_id: str | None = None,
         use_async_scheduling: bool = False,
+        model_arch_hf: list[str] | None = None,
+        model_layer_types: list[str] | None = None,
     ):
         self.stages: int = stages if stages is not None else 1
         self.cluster_id = cluster_id
@@ -234,6 +236,15 @@ class QAICInferenceSession:
             os.getenv(VLLM_QAIC_USE_LEGACY_SLICING_SPEC_ENV, "0") == "1"
         )
         self.cluster_id = cluster_id
+        self.model_layer_types = model_layer_types or []
+        self._is_minimax_m3 = any(
+            "minimaxm3" in arch.lower().replace("_", "").replace("-", "")
+            for arch in (model_arch_hf or [])
+        )
+        self._is_deepseek_v4 = any(
+            "deepseekv4" in arch.lower().replace("_", "").replace("-", "")
+            for arch in (model_arch_hf or [])
+        )
 
         self.decode_buff_map = []
         for name in self.input_names:
@@ -262,14 +273,11 @@ class QAICInferenceSession:
         self.prefill_buff_map.sort(key=_kv_sort_key)
 
         self.kv_cache_info = []
-        for name, _ in self.decode_buff_map:
-            if self._is_kv_cache_name(name):
-                _binding = self.bindings[self.binding_index_map[name]]
-                kv_shape = tuple(_binding.dims)
-                kv_type = aic_to_np_dtype_mapping[_binding.type]
-                kv_size = _binding.size
-                kv_kind = self._classify_kv_binding(name)
-                self.kv_cache_info.append((kv_shape, kv_type, kv_size, kv_kind))
+        for name, binding_index in self.decode_buff_map:
+            self.kv_cache_info.append(self._make_kv_cache_info(name, binding_index))
+        if not self.decode_buff_map:
+            for name, binding_index in self.prefill_buff_map:
+                self.kv_cache_info.append(self._make_kv_cache_info(name, binding_index))
 
         # Hybrid KV detected if more than one KV shape found
         _num_kv_cache_info = len(set(self.kv_cache_info))
@@ -279,7 +287,7 @@ class QAICInferenceSession:
         if _num_kv_cache_info:
             buffer_spec_json = (
                 self.get_json_for_kv_cache_slicing()
-                if not self.is_hybrid_kv
+                if not (self.is_hybrid_kv or self._is_minimax_m3)
                 else self.get_json_for_full_kv_cache_slicing()
             )
             self.kv_slicing_spec_handle = self.get_slicing_spec_handle(
@@ -303,50 +311,129 @@ class QAICInferenceSession:
             if name.startswith("log"):
                 self.prefill_buff_map.append((name, self.binding_index_map[name]))
 
-    def _classify_kv_binding(
-        self,
-        name: str,
-    ) -> KVCacheKind:
-        name = name.lower()
-        if "conv" in name:
-            return KVCacheKind.LA_CONV
-        elif "recurrent" in name:
-            return KVCacheKind.LA_RECURRENT
+    def _make_kv_cache_info(self, name: str, binding_index: int) -> tuple:
+        binding = self.bindings[binding_index]
+        kv_shape = tuple(binding.dims)
+        kv_type = aic_to_np_dtype_mapping[binding.type]
+        kv_size = binding.size
+        kv_kind = self._classify_kv_binding(name)
+        granularity = kv_kind.granularity
+        if self._is_minimax_m3:
+            transform_category = "T1"
+        elif self._is_deepseek_v4:
+            transform_category = {
+                KVCacheKind.CSA0: "T2",
+                KVCacheKind.CSA1: "T1",
+                KVCacheKind.CSA2: "T1",
+                KVCacheKind.CSA3: "T3",
+                KVCacheKind.CSA4: "T3",
+                KVCacheKind.HCA0: "T2",
+                KVCacheKind.HCA1: "T1",
+                KVCacheKind.HCA2: "T3",
+                KVCacheKind.HCA3: "T3",
+                KVCacheKind.SWA: "T3",
+            }.get(kv_kind)
         else:
+            transform_category = None
+        return KVCacheInfo(kv_kind, granularity, transform_category).apply(
+            kv_shape, kv_type, kv_size
+        )
+
+    def _classify_kv_binding(self, name: str) -> KVCacheKind:
+        lower_name = name.lower()
+        if "conv" in lower_name:
+            return KVCacheKind.LA_CONV
+        if "recurrent" in lower_name:
+            return KVCacheKind.LA_RECURRENT
+        part = lower_name.split(".")[1] if "." in lower_name else "0"
+        layer = int(part.split("_")[0])
+        if self._is_minimax_m3:
+            if "index_key" in lower_name:
+                return KVCacheKind.INDEX
+            if (
+                layer < len(self.model_layer_types)
+                and "sparse" in self.model_layer_types[layer].lower()
+            ):
+                return KVCacheKind.MSA
             return KVCacheKind.FA
+        if self._is_deepseek_v4:
+            if "sliding_window_kv" in lower_name:
+                layer_type = (
+                    self.model_layer_types[layer].lower()
+                    if layer < len(self.model_layer_types)
+                    else ""
+                )
+                return (
+                    KVCacheKind.SWA
+                    if "sliding" in layer_type or layer < 2
+                    else KVCacheKind.HCA0
+                )
+            if "actual_compressed_kv" in lower_name:
+                return KVCacheKind.HCA1
+            if "compressor_kv_buffer" in lower_name:
+                return KVCacheKind.HCA2
+            if "compressor_gate_buffer" in lower_name:
+                return KVCacheKind.HCA3
+            if "local_kv_cache" in lower_name:
+                return KVCacheKind.CSA0
+            if "compressed_kv_cache" in lower_name:
+                return KVCacheKind.CSA1
+            if "indexer_kv_cache" in lower_name:
+                return KVCacheKind.CSA2
+            if "comp_state" in lower_name or "compressor_kv_state" in lower_name:
+                return KVCacheKind.CSA3
+            if "idx_state" in lower_name or "indexer_kv_state" in lower_name:
+                return KVCacheKind.CSA4
+            if "compressor_score_state" in lower_name:
+                return KVCacheKind.CSA3
+            if "indexer_score_state" in lower_name:
+                return KVCacheKind.CSA4
+        return KVCacheKind.FA
 
     def _is_kv_cache_name(self, name: str) -> bool:
+        lower_name = name.lower()
+        if self._is_minimax_m3 and lower_name.startswith(
+            ("past_key", "past_value", "index_key")
+        ):
+            return True
+        if self._is_deepseek_v4 and any(
+            token in lower_name
+            for token in (
+                "sliding_window_kv",
+                "actual_compressed_kv",
+                "compressor_kv_buffer",
+                "compressor_gate_buffer",
+                "local_kv_cache",
+                "compressed_kv_cache",
+                "indexer_kv_cache",
+                "comp_state",
+                "idx_state",
+                "compressor_kv_state",
+                "compressor_score_state",
+                "indexer_kv_state",
+                "indexer_score_state",
+            )
+        ):
+            return True
         if self.use_legacy_slicing_spec:
             return name.startswith("past_key") or name.startswith("past_value")
         return VLLM_KV_CACHE_PREFIX in name
 
     def get_json_for_full_kv_cache_slicing(self):
         buffer_specs = []
-        _full_attn_dim_spec = [
-            {"start": "batch_index"},
-            {"start": 0},
-            {"start": "ctx_start"},
-            {"start": 0},
-        ]
-        # Qwen3.5/Qwen3.6 recurrent (linear-attention) states are rank 4,
-        # but their last two dimensions are state dimensions rather than
-        # (context, head_size).  Do not apply ctx_start slicing to them.
-        _full_state_dim_spec = [
-            {"start": "batch_index"},
-            {"start": 0},
-            {"start": 0},
-            {"start": 0},
-        ]
         for binding in self.bindings:
             name = binding.name
             if self._is_kv_cache_name(name) and name.endswith("_RetainedState"):
                 size = aic_to_np_dtype_mapping[binding.type]
                 base_name = name.replace("_RetainedState", "")
                 kv_kind = self._classify_kv_binding(name)
-                if kv_kind == KVCacheKind.FA:
-                    dimspec = _full_attn_dim_spec
-                else:
-                    dimspec = _full_state_dim_spec
+                dimspec = [
+                    {"start": "batch_index" if axis == 0 else 0}
+                    for axis in range(len(binding.dims))
+                ]
+                if kv_kind.granularity == KVGranularity.PARTIAL:
+                    ctx_axis = 1 if len(binding.dims) == 3 else 2
+                    dimspec[ctx_axis]["start"] = "ctx_start"
 
                 buffer_specs.append(
                     {
