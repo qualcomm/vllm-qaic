@@ -17,19 +17,25 @@ def register_qaic_customop():
     if _QAIC_CUSTOMOP_IS_REGISTERED:
         return
 
-    from vllm.model_executor.custom_op import CustomOp
+    from vllm.model_executor.custom_op import CustomOp, PluggableLayer
 
     # relative import for cross-compatibility in
     # plugin and fork
     from .gemma4_router import register_qaic_gemma4_router
     from .grouped_topk_router import register_qaic_grouped_topk_router
-    from .activation import QAicSiluAndMul, register_qaic_silu_and_mul
+    from .activation import (
+        QAicGeluAndMul,
+        QAicSiluAndMul,
+        register_qaic_silu_and_mul,
+    )
     from .layernorm import (
         QAicGemmaRMSNorm,
         QAicRMSNorm,
         QAicRMSNormGated,
     )
     from .quant_fp8 import QAicQuantFP8
+    from .embedding import QAicVocabParallelEmbedding
+    from .qk_norm_rope import register_qaic_qk_norm_rope
     from .topk_router import register_qaic_topk_router
     from .unquantized_fused_moe_method import (
         QAicUnquantizedFusedMoEMethod,
@@ -47,16 +53,21 @@ def register_qaic_customop():
     register_qaic_grouped_topk_router()
     register_qaic_gemma4_router()
     register_qaic_silu_and_mul()
+    register_qaic_qk_norm_rope()
 
     CustomOp.register_oot(
         _decorated_op_cls=QAicUnquantizedFusedMoEMethod,
         name="UnquantizedFusedMoEMethod",
+    )
+    PluggableLayer.register_oot(
+        _decorated_layer_cls=QAicVocabParallelEmbedding, name="VocabParallelEmbedding"
     )
     CustomOp.register_oot(_decorated_op_cls=QAicRMSNorm, name="RMSNorm")
     CustomOp.register_oot(_decorated_op_cls=QAicGemmaRMSNorm, name="GemmaRMSNorm")
     CustomOp.register_oot(_decorated_op_cls=QAicRMSNormGated, name="RMSNormGated")
     CustomOp.register_oot(_decorated_op_cls=QAicSiluAndMul, name="SiluAndMul")
     CustomOp.register_oot(_decorated_op_cls=QAicQuantFP8, name="QuantFP8")
+    CustomOp.register_oot(_decorated_op_cls=QAicGeluAndMul, name="GeluAndMul")
     CustomOp.register_oot(
         _decorated_op_cls=QAicMMEncoderAttention, name="MMEncoderAttention"
     )
