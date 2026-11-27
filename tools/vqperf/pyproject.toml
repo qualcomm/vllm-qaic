@@ -1,0 +1,29 @@
+# ------------------------------------------------------------------
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause-Clear
+# ------------------------------------------------------------------
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vqperf"
+version = "0.1.0"
+description = "Commit-to-commit performance comparison for vllm-qaic"
+requires-python = ">=3.10"
+# Deliberately dependency-free: vqperf runs *outside* the per-commit
+# environments it builds, so anything it imports would have to be installed
+# next to a vllm it is not allowed to influence.
+dependencies = []
+
+[project.scripts]
+vqperf = "vqperf.cli:main"
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[tool.setuptools.packages.find]
+include = ["vqperf*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

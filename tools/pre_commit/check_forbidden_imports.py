@@ -42,7 +42,16 @@ CHECK_IMPORTS = {
         pattern=r"^\s*(?:import\s+re(?:$|\s|,)|from\s+re\s+import)",
         tip="Replace 'import re' with 'import regex as re' or 'import regex'.",
         allowed_pattern=re.compile(r"^\s*import\s+regex(\s*|\s+as\s+re\s*)$"),
-        allowed_files={"setup.py"},
+        # tools/vqperf is a standalone developer tool that runs *outside* the
+        # per-commit environments it builds, so it is deliberately
+        # dependency-free and cannot import the third-party regex module.
+        allowed_files={
+            "setup.py",
+            "tools/vqperf/vqperf/config.py",
+            "tools/vqperf/vqperf/hostinfo.py",
+            "tools/vqperf/vqperf/profiler.py",
+            "tools/vqperf/vqperf/repo.py",
+        },
     ),
 }
 

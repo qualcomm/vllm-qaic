@@ -1,0 +1,18 @@
+# ------------------------------------------------------------------
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause-Clear
+# ------------------------------------------------------------------
+# Example vqperf configuration matrix. One row per benchmark cell; every
+# column maps onto a `vllm serve` or `vllm bench serve` flag. Lines starting
+# with '#' and blank lines are ignored. Columns prefixed with 'x_' are
+# passed through to the report as labels and never reach a command line.
+#
+#   vqperf run --base-sha <sha> --new-sha <sha> --mode pyt --configs tools/vqperf/configs/example.csv
+#
+# profile_* columns require --mode pyt: profiling is a no-op in AoT mode
+# (QaicWorkerAoT.profile() only logs a warning), so vqperf rejects them at
+# parse time rather than producing empty traces an hour later.
+config_id,model,max_model_len,num_prompts,random_input_len,random_output_len,max_concurrency,max_num_seqs,profile_mode,x_note
+llama31_8b_1k_128_c8,meta-llama/Llama-3.1-8B-Instruct,2048,64,1024,128,8,8,off,steady-state decode
+llama31_8b_4k_256_c16,meta-llama/Llama-3.1-8B-Instruct,8192,64,4096,256,16,16,off,long prefill
+llama31_8b_1k_128_profile,meta-llama/Llama-3.1-8B-Instruct,2048,64,1024,128,8,8,torch,attribution pass only
